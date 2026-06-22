@@ -1815,6 +1815,8 @@ window.$docsify = {
             wrapper.addEventListener(
               'click',
               (e) => {
+                // badge 正在拖拽中，吞掉 click
+                if (wrapper._dprBadgeDragging) return;
                 // 拖拽距离超过阈值时，视为拖拽操作，不触发折叠
                 if (_dayTogglePtrStart) {
                   const dx = e.clientX - _dayTogglePtrStart.x;
@@ -2095,6 +2097,8 @@ window.$docsify = {
             }, true);
 
             const toggle = (event) => {
+              // badge 正在拖拽中，吞掉 click
+              if (wrapper._dprBadgeDragging) return;
               // 拖拽距离超过阈值时，视为拖拽操作，不触发折叠
               if (event && event.type === 'click' && _confTogglePtrStart) {
                 const dx = event.clientX - _confTogglePtrStart.x;
@@ -2629,6 +2633,12 @@ window.$docsify = {
               badge.addEventListener('pointerdown', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
+
+                // 标记 badge 拖拽进行中 —— wrapper 的 click handler 检查此标志
+                // 以防止拖拽/点击 badge 时触发日期组折叠
+                const parentToggle = badge.closest('.sidebar-day-toggle,.sidebar-conference-toggle');
+                if (parentToggle) parentToggle._dprBadgeDragging = true;
+
                 const rect = badge.getBoundingClientRect();
                 const startX = e.clientX, startY = e.clientY;
                 const origLeft = rect.left + rect.width / 2;
@@ -2641,8 +2651,21 @@ window.$docsify = {
                 ghost.style.top = (e.clientY - rect.height / 2) + 'px';
                 document.body.appendChild(ghost);
 
-                badge.style.visibility = 'hidden';
+                // 用 opacity:0 而非 visibility:hidden —— opacity:0 仍可被点击命中，
+                // 这样 pointerup 后浏览器触发的 click 事件 target 仍是 badge，
+                // wrapper 的 click handler 走 .closest('.dpr-unread-badge') 分支
+                // 直接 return，不会误触展开/折叠。
+                badge.style.opacity = '0';
+                badge.style.pointerEvents = 'none';
                 badge.setPointerCapture(e.pointerId);
+
+                // 延迟清除拖拽标志：pointerup → click 之间有微小延迟，
+                // 必须等 click 事件被 wrapper handler 吞掉后才清除
+                const clearDragFlag = () => {
+                  setTimeout(() => {
+                    if (parentToggle) parentToggle._dprBadgeDragging = false;
+                  }, 80);
+                };
 
                 const onMove = (ev) => {
                   ghost.style.left = (ev.clientX - rect.width / 2) + 'px';
@@ -2659,9 +2682,12 @@ window.$docsify = {
                   const dist = Math.sqrt(dx * dx + dy * dy);
 
                   if (dist > 60) {
-                    ghost.classList.add('popping');
-                    ghost.addEventListener('animationend', () => {
-                      ghost.remove();
+                    // ── 拖远：标记已读并消失 ──
+                    let popDone = false;
+                    const cleanupPop = () => {
+                      if (popDone) return;
+                      popDone = true;
+                      if (ghost.parentNode) ghost.remove();
                       const groupLi = badge.closest('li');
                       if (groupLi) {
                         const links = groupLi.querySelectorAll('a.dpr-sidebar-item-link[href*="#/"]');
@@ -2670,18 +2696,35 @@ window.$docsify = {
                           if (href) markPaperRead(href, 'read');
                         });
                       }
-                      badge.style.visibility = '';
+                      badge.style.opacity = '';
+                      badge.style.pointerEvents = '';
                       updateSidebarUnreadBadges();
-                    }, { once: true });
+                      clearDragFlag();
+                    };
+                    ghost.classList.add('popping');
+                    ghost.addEventListener('animationend', cleanupPop, { once: true });
+                    // 兜底：动画可能因 DOM 变动等原因不触发 animationend
+                    setTimeout(cleanupPop, 500);
                   } else {
+                    // ── 拖近：弹回原位 ──
+                    let returnDone = false;
+                    const cleanupReturn = () => {
+                      if (returnDone) return;
+                      returnDone = true;
+                      if (ghost.parentNode) ghost.remove();
+                      badge.style.opacity = '';
+                      badge.style.pointerEvents = '';
+                      clearDragFlag();
+                    };
                     ghost.classList.add('returning');
+                    // 强制 reflow，确保 .returning 的 transition 规则生效后再设目标值
+                    void ghost.offsetWidth;
                     ghost.style.left = (origLeft - rect.width / 2) + 'px';
                     ghost.style.top = (origTop - rect.height / 2) + 'px';
                     ghost.style.transform = 'scale(1)';
-                    ghost.addEventListener('transitionend', () => {
-                      ghost.remove();
-                      badge.style.visibility = '';
-                    }, { once: true });
+                    ghost.addEventListener('transitionend', cleanupReturn, { once: true });
+                    // 兜底：如果 transition 未真正触发（距离极小 / 同帧值相同）
+                    setTimeout(cleanupReturn, 350);
                   }
                 };
 
