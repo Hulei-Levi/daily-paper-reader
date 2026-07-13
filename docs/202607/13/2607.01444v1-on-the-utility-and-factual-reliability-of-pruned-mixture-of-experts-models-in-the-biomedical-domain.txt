@@ -1,0 +1,814 @@
+Title: On the Utility and Factual Reliability of Pruned Mixture-of-Experts Models in the Biomedical Domain
+
+URL Source: https://arxiv.org/pdf/2607.01444v1
+
+Published Time: Fri, 03 Jul 2026 00:17:47 GMT
+
+Number of Pages: 24
+
+Markdown Content:
+# On the Utility and Factual Reliability of Pruned Mixture-of-Experts Models in the Biomedical Domain 
+
+Atsuki Yamaguchi 1,2 Szymon Palucha 2 Léo Bijar 2
+
+Aline Villavicencio 1,3,4 Nikolaos Aletras 11University of Sheffield, United Kingdom 2AstraZeneca 
+
+> 3
+
+University of Exeter, United Kingdom 4Federal University of Rio Grande do Norte, Brazil 
+
+{ayamaguchi1,a.villavicencio,n.aletras}@sheffield.ac.uk 
+
+Abstract 
+
+Mixture-of-Experts (MoE) models offer in-ference speedups via selective activation but impose substantial memory requirements because the whole network must remain loaded. Structured expert pruning is a practi-cal approach for reducing deployment costs in resource-constrained settings. However, prior studies primarily evaluate benchmark utility, leaving the effect of pruning on fac-tual reliability underexplored, particularly in high-stakes domains such as biomedicine. In this paper, we investigate how domain-specific expert pruning affects both utility and reliability. We assess four MoE mod-els, six pruning methods, and multiple prun-ing ratios across generation and classifica-tion tasks under in-domain (biomedical) and cross-domain settings. Results reveal that moderate pruning preserves in-domain util-ity without immediate reliability decline, al-though hallucination risks increase at ex-treme pruning ratios. When shifting to the general domain, both utility and reliability degrade rapidly. These findings indicate that safe compression depends heavily on the task and domain. Evaluating pruned MoE models solely on utility is inadequate for high-stakes deployment without reliability assessment. 1
+
+1 Introduction 
+
+Modern large language models (LLMs) such as Qwen3.6 (Qwen Team, 2026), GPT-OSS (Ope-nAI et al., 2025), and Nemotron3 (NVIDIA et al., 2025) follow a Mixture-of-Experts (MoE) archi-tecture. During the forward pass, MoE models activate only a subset of the network by routing each token through specialized subnetworks called experts (Du et al., 2022; Cai et al., 2025). They achieve strong performance while offering substan-tial inference speedups. However, this efficiency 
+
+> 1
+
+Our code is available at https://github.com/ gucci-j/moe-pruning-reliability .Source Document          
+
+> Eutrophic electrotherapy was more e4ective than a uniform 10 Hz
+> electrotherapy ... uniform 10 Hz electrotherapy ignored the spike
+> train information, which was the signal inducing rapid... adaptation .
+> Pruned MoE
+> The study concluded that uniform 10 Hz stim -
+> ulation , which ignored the motor unit’s action
+> potential spike train, notably induces rapid
+> and behaviorally e4ective plastic adaptation.
+> Original MoE
+> The study concluded that the 10 Hz protocol
+> failed to convey the... information necessary
+> for rapid, behaviorally e4ective adaptation.
+> ✅
+> ❌
+> Expert
+> 1
+> Expert
+> 2
+> Expert
+> 3
+> Expert
+> 4
+> Output
+> Router
+> Expert
+> 1
+> Expert
+> 2
+> Expert
+> 3
+> Router
+> Output
+> Input
+> Input
+> ✂
+> ✂
+
+Figure 1: An example of hallucination in biomedical text summarization, where the text highlighted in red represents a term that inverts the original meaning of the source while it is still plausible. 
+
+does not eliminate the memory overhead during deployment. At inference, all experts must remain loaded in memory, which results in substantially larger memory footprints than those of dense mod-els with comparable active parameter counts. A popular approach to mitigating this con-straint is expert pruning, which eliminates redun-dant experts based on an informativeness (i.e., saliency) criterion estimated from a small cali-bration dataset (Chen et al., 2022; Muzio et al., 2024; Lu et al., 2024, inter alia ). Among these approaches, domain-specific expert pruning has been proposed to tailor the compressed model for a particular field (Dong et al., 2025), such as biomedicine. However, previous studies pri-marily evaluate pruning methods on downstream benchmark performance, or utility . Consequently, they overlook the reliability of the resulting com-pressed models. This includes factual consistency, faithfulness, and hallucination prevention (Ji et al., 2023; Pal et al., 2023). This oversight poses seri-ous risks particularly in high-stakes domains such as biomedicine, where factual errors can lead to critical real-world failures (Weidinger et al., 2022; Moor et al., 2023). Furthermore, benchmark utility does not always 
+
+> arXiv:2607.01444v1 [cs.LG] 1 Jul 2026
+
+align with factual reliability. Chrysostomou et al. (2024) indicate that pruning dense models can re-sult in reduced hallucinations. However, unlike dense model pruning, expert pruning completely re-moves entire weight matrices, fundamentally alter-ing the model architecture. This forces the model to rely on fallback experts; these alternatives may generate contextually fluent text while silently in-jecting subtle factual inaccuracies (see Figure 1). Therefore, the relationship between utility and reli-ability in MoE pruning remains unclear. In this paper, we investigate how domain-specific expert pruning affects both utility and re-liability in high-stakes settings. Focusing on the biomedical domain, we evaluate four MoE models, six pruning methods, and multiple pruning ratios. Our evaluation spans generation and classification tasks, comparing in-domain behavior with com-plementary general-domain analysis. This frame-work examines whether pruning degrades perfor-mance, if utility and reliability remain coupled, where degradation begins to appear, and how these outcomes vary across task types and domains. Our contributions are as follows: • We provide the first systematic study of how expert pruning affects the factual reliability of MoE models in a high-stakes setting, with a primary focus on the biomedical domain. • We characterize how utility and reliability change across pruning ratios, model families, and pruning strategies, showing that moder-ate in-domain pruning remains robust while degradation becomes more pronounced at ex-treme pruning ratios and under domain shift. • We show that the safety of MoE compression is strongly task- and domain-dependent, and that evaluating pruned MoE models using util-ity alone is insufficient for high-stakes deploy-ment without explicit reliability assessment. 
+
+2 Related Work 
+
+Reducing Memory Footprint in MoE Models. 
+
+Efforts to reduce the memory footprint of MoE models span several approaches, including weight quantization (Li et al., 2024a; Huang et al., 2025; Chen et al., 2025c, inter alia. ), expert merging (He et al., 2023; Zhang et al., 2025; Zhou et al., 2025, 
+
+inter alia. ), and expert pruning (Kim et al., 2021; Lu et al., 2024; Chen et al., 2025b; Bai et al., 2025). Quantization techniques minimize network stor-age requirements by reducing parameter bit-width. Examples include methods that vary bit-widths based on structural sensitivity (Li et al., 2024a; Huang et al., 2025), optimize calibration (Chen et al., 2025c), or employ extreme 1-bit compres-sion (Yuan et al., 2023; Frantar and Alistarh, 2024). Quantization reduces numerical precision rather than altering network topology, making it orthogo-nal to expert merging and pruning (Lu et al., 2024). Expert merging mitigates memory constraints by mathematically blending parameter matrices into a unified matrix (He et al., 2023; Li et al., 2024b; Chen et al., 2025a), while expert pruning permanently removes a subset of redundant or low-saliency experts based on calibration data (Muzio et al., 2024; Hu et al., 2026; Lasby et al., 2026). Expert merging introduces irreducible errors by eliminating the ability of the router to maintain fine-grained, independent control over experts (Dong et al., 2025; Lasby et al., 2026; Liu et al., 2026). Conversely, expert pruning preserves the origi-nal functional topology and routing independence, demonstrating superior performance at high com-pression rates (Bai et al., 2025; Lasby et al., 2026). Therefore, we focus exclusively on expert pruning. 
+
+Expert Pruning. Expert pruning methods are generally categorized into two paradigms: those that require subsequent fine-tuning and those that operate entirely without training (i.e., post-training or one-shot pruning) (Lu et al., 2024). Methods requiring training remove experts based on routing statistics or regularization, subsequently applying gradient-based optimization to recover the resulting performance degradation (Kim et al., 2021; Chen et al., 2022; Muzio et al., 2024; Yang et al., 2024). In contrast, training-free expert pruning removes redundant experts using one-shot calibration data, bypassing parameter updates. Prominent exam-ples estimate expert saliency through reconstruc-tion loss (Lu et al., 2024), domain-specific demon-strations (Dong et al., 2025), expert-selection fre-quency (Chen et al., 2025b), or advanced functional criteria to preserve routing independence without gradient updates (Hu et al., 2026; Lasby et al., 2026; Liu et al., 2026). We focus on this training-free paradigm because it provides a lightweight so-lution that facilitates the efficient on-device deploy-ment of massive MoE architectures. This approach also enables isolated examination of pruning effects without confounding variables from fine-tuning. Model Compression and Factual Reliability. 
+
+The relationship between model compression and the factual reliability of LLMs has been exten-sively investigated across dense model pruning, model merging, and weight quantization. Chrysos-tomou et al. (2024) find that dense model prun-ing reduces hallucinations in abstractive summa-rization by forcing reliance on source documents. Other studies show that it degrades overall trust-worthiness (Hong et al., 2024) and disrupts internal activation features necessary for robust lie detec-tion (Fu et al., 2025a). Therefore, dense model pruning yields task-dependent outcomes. While studies on merged models remain scarce, Yang et al. (2025b) demonstrate its utility as a parameter-level conflict-resolution strategy to harmonize helpful-ness, honesty, and harmlessness. For weight quan-tization, previous work (Hong et al., 2024; Singh and Sajjad, 2025) demonstrates that moderate bit-width reduction generally preserves trustworthi-ness and internal calibration. However, quantized models become susceptible to deceptive prompts, even while retaining truthful internal representa-tions (Fu et al., 2025b), and exhibit degraded faithfulness when generating natural language self-explanations (Wang et al., 2026). Consequently, weight quantization presents a delicate trade-off be-tween numerical efficiency and semantic precision. Despite extensive research across these method-ologies, the impact of expert pruning on factual reliability remains unexplored. This work provides the first systematic exploration into how expert pruning affects the reliability of MoE models, of-fering critical insights for their safe deployment. 
+
+3 Training-free Domain-specific Expert Pruning 
+
+3.1 MoE Pruning Framework 
+
+Consider an MoE model with L layers, where each layer l ∈ { 1, . . . , L } contains a set of N experts, 
+
+{El
+
+> 1
+
+, . . . , E lN }. For a given pruning ratio p, the ob-jective is to retain a subset of M experts per layer, where M = (1 − p)N , and discard the remain-ing N − M experts. In this work, we focus on domain-specific expert pruning (Dong et al., 2025), compressing an MoE model to preserve utility on a domain of interest (here, the biomedical domain). To achieve this, the pruning process utilizes a cal-ibration set C sampled from the domain of interest. For each sample in C with a sequence length of T
+
+tokens, a saliency metric (defined in §3.2) evaluates expert importance. After calculating the average importance across C, experts with the lowest scores are removed. During inference, the router is re-stricted to selecting from the remaining M experts. 
+
+3.2 Saliency Metrics 
+
+To quantify the importance of each expert, we con-sider six distinct metrics ranging from random base-lines to state-of-the-art methods. Our aim is to in-vestigate how different importance metrics affect domain utility and factual reliability. Specifically, we first use a stochastic baseline (Random) and then advance through a progression of data-driven complexity: from static measures (Frequency), to dynamic activation-based approaches, and finally to recent, context-aware formulations. 
+
+Random. The random pruning metric samples 
+
+M experts for retention from a uniform distribution. This approach serves as a weak baseline excluding importance estimation and data-driven signals. 
+
+Frequency. This metric measures how often the router selects an expert (Chen et al., 2022). It as-signs equal weight to every activation event, re-gardless of the magnitude assigned by the routing algorithm. For an expert Eli , the score is the count of activations: PTt=1 I(gli,t > 0) , where I(·) is the indicator function that returns one for positive gat-ing values and zero otherwise. 
+
+Gate. This metric assesses expert importance based on routing activation magnitude (Chen et al., 2022). Unlike Frequency, which treats all activa-tions equally, the gating metric identifies experts prioritized by the router. For an expert Eli in layer 
+
+l, the score is the sum of gating values across all tokens: PTt=1 gli,t , where gli,t represents the gating value of the i-th expert for the t-th token at layer l.
+
+EAN. Expert Activation Norm (Jaiswal et al., 2025) assesses importance by accumulating the norms of intermediate activations produced by an expert. The saliency score for expert Eli is the L2 norms of outputs across active tokens: PTt=1 I(gli,t > 0) · ∥ Eli,t (hlt)∥2. Here, Eli,t (hlt) de-notes the output vector of the i-th expert for the hidden state hlt at layer l. This method favors ex-perts that produce high-magnitude transformations. 
+
+EASY-EP. Expert Assessment with Simple Yet-effective scoring for Expert Pruning (Dong et al., 2025) optimizes importance estimation by coupling the output magnitude of an expert with the token-level contribution to representation shift. This met-ric posits an expert is essential only when the output magnitude is large and the transformation induces a considerable reorientation of the hidden state. The saliency score is the product of output-aware im-portance cli,t and expert-level token contribution 
+
+slt, aggregated as PTt=1 cli,t · slt. The output-aware importance cli,t multiplies the routing gate value by the L2 norm of the expert output, formulated as 
+
+cli,t = gli,t ∥Eli,t (hlt)∥2. The token contribution slt is defined as 1 − Sim (hlt, ˜hlt), where Sim denotes co-sine similarity between hidden representations pre-ceding ( hlt) and following ( ˜hlt) the expert module. 
+
+REAP. Router-weighted Expert Activation Prun-ing (Lasby et al., 2026) extends EAN by integrating gating values and normalizing by activation fre-quency. This metric isolates experts with the most substantial per-token contribution via the formu-lation:    
+
+> PTt=1 gli,t ∥Eli,t (hlt)∥2
+> PTt=1 I(gli,t >0)
+
+. This approach ensures that the importance score reflects the mean contri-bution per activation, identifying experts that main-tain influence regardless of selection frequency. 
+
+4 Experimental Setup 
+
+To investigate the empirical relationship between expert pruning and factual consistency, the evalua-tion framework comprises two distinct dimensions: 
+
+utility , reflecting downstream task performance, and reliability , quantifying hallucination fre-quency. This joint analysis reveals whether configu-rations that maintain in-domain utility concurrently preserve reliability, or if reliability degrades more rapidly than utility as the pruning ratio increases. 2
+
+4.1 Models 
+
+We use four instruction-tuned MoE models: GPT-OSS 20B (OpenAI et al., 2025, GPT-OSS, 32 experts), Qwen3 30B Instruct 2507 (Yang et al., 2025a, Qwen3, 128 experts), Nemotron 3 Nano 30B (NVIDIA et al., 2025, Nemotron3, 128 ex-perts), and Qwen3.6 35B (Qwen Team, 2026, Qwen3.6, 256 experts). This selection offers vary-ing expert granularity and architectures such as the hybrid Mamba-Transformer Nemotron3. 
+
+4.2 MoE Pruning 
+
+We utilize MedINST (Han et al., 2024) as the cal-ibration set C for expert selection. MedINST is a 
+
+> 2Please see Appendix A for implementation details.
+
+comprehensive meta-dataset of biomedical instruc-tions with diverse tasks, providing an ideal foun-dation to capture representative domain-specific activations. The calibration set contains 128 ran-domly sampled demonstrations from the training subset of MedINST, following the established prac-tice in the pruning literature (Williams et al., 2025). To mitigate sampling bias, we run three indepen-dent calibration experiments for each configuration. Furthermore, to systematically evaluate the impact of structural compression, we assess each pruning strategy across pruning ratios in 12.5% increments. 
+
+4.3 Utility Generation Tasks. We employ a MedINST eval-uation subset requiring full-text generation. 3 The selected categories are summarization (SUM), ma-chine translation (MT), question answering (QA), named entity recognition (NER), named entity dis-ambiguation (NED), relation extraction (RE), coref-erence resolution (COREF), and event extraction (EE). We compute zero-shot ROUGE-L (Lin, 2004) for SUM, chrF++ (Popovi´ c, 2017) for MT, and F1 for all other tasks. 
+
+Classification Tasks. To complement the gener-ative evaluation, we follow Williams et al. (2026) to assess discriminative utility using the Multi-MedQA benchmark (Singhal et al., 2023). The benchmark comprises several multiple-choice QA tasks: PubMedQA (Jin et al., 2019), MedQA (Jin et al., 2021), and relevant subsets from MMLU (anatomy, clinical knowledge, college medicine, medical genetics, professional medicine, and col-lege biology) (Hendrycks et al., 2021). We measure zero-shot accuracy for all tasks. 
+
+4.4 Reliability Generation Tasks. We measure semantic consis-tency using the Multi-XScience (Lu et al., 2020) and RCT (Wallace et al., 2021) benchmarks. Multi-XScience, a part of MedINST, involves generating a related work section based on an abstract and reference articles. The RCT dataset contains ran-domized controlled trial reports and serves as a high-stakes test for medical summary accuracy. We use an LLM-as-a-Judge framework (Zheng et al., 2023) comprising three frontier models (gpt-5.4-mini , Claude Haiku 4.5 , and Gemini 
+
+> 3This subset does not overlap with the calibration set, en-suring a fair comparison.
+
+3.1 Flash-Lite ) to minimize inter-model vari-ability. The evaluation includes two methods: ab-solute judgment , which classifies outputs as ei-ther faithful or hallucinated, and relative judg-ment (Lango and Dusek, 2023; Chrysostomou et al., 2024), which compares summaries from source and pruned models across four criteria: 1. Hallucinations (↓): Frequency of unsup-ported content by the source document. 2. Omission (↓): Exclusion of critical source information. 3. Repetition (↓): Presence of redundant text. 4. Alignment (↑): Degree of semantic correspon-dence with the source document. For relative judgment, we report the preference rate, calculated as the proportion of instances favoring the pruned model over the source model, where a rate above 0.5 denotes preference for the pruned model. We also compute standard metrics such as ROUGE-L and BERTScore (Zhang et al., 2020) to contrast lexical and semantic overlap with these judgments, following Chrysostomou et al. (2024). 
+
+Classification Tasks. For discriminative reliabil-ity, we use three reasoning tasks from the Med-ical Domain Hallucination Test (Pal et al., 2023, MedHALT): the False Confidence Test (FCT), the Fake Questions Test (Fake), and the None of the Above Test (NOTA). The FCT provides a randomly suggested answer alongside the question to assess whether the model exhibits unwarranted certainty. The Fake task presents nonsensical medical ques-tions to evaluate whether the model can recognize invalid queries. Finally, the NOTA task replaces the correct option with “None of the above” to test whether the model can reject incorrect informa-tion. Collectively, these tests determine whether the model resists hallucination when a false answer is proposed, a query is fundamentally flawed, or a correct solution is absent. 
+
+4.5 General-domain Analysis 
+
+To complement our domain-specific evaluation, we monitor the impact of expert pruning on general-domain benchmarks. This analysis determines whether the relationship between utility and relia-bility in the biomedical domain persists across a broader context. 0             
+
+> 25
+> 50
+> 75
+> 100
+> Generation  GPT-OSS Nemotron3 Qwen3 Qwen3.6
+> .25 .50 .75
+> 0
+> 25
+> 50
+> 75
+> 100
+> Classification
+> .25 .50 .75 .25 .50 .75 .25 .50 .75
+> Relative performance (%)
+> Pruning ratio
+> Random
+> Frequency
+> Gate
+> EAN
+> EASY-EP
+> REAP
+
+Figure 2: Downstream performance comparison across pruning ratios. Lines denote mean performance rela-tive to the source baseline (100%), with shaded areas indicating standard deviation across three random seeds. Task-specific results at a 50% pruning ratio are available in Tables 7 and 8 in the Appendix. 
+
+Utility. We use four benchmarks: IFEval (Zhou et al., 2023) zero-shot accuracy for instruction-following, GSM8K (Cobbe et al., 2021) five-shot exact match for math reasoning, HumanEval (Chen et al., 2021) zero-shot pass@1 for coding, and MMLU three-shot accuracy for general reasoning. 
+
+Reliability. We use Multi-News+ (Choi et al., 2024) to measure the ability of the model to summa-rize multiple documents for a given topic. We apply the same LLM-as-a-Judge protocol from §4.4. 
+
+5 Results 
+
+5.1 Biomedical Domain Utility 
+
+Figure 2 shows the relative performance retention across various compression levels. 
+
+Pruning Method. We observe that expert prun-ing strategies influence in-domain performance re-tention. Random pruning causes severe perfor-mance degradation across all settings. At a 50% pruning ratio, a standard evaluation threshold in prior MoE pruning work (Dong et al., 2025; Lasby et al., 2026), it leads to relative utility drops ranging from 18.8% for Qwen3.6 to 75.1% for GPT-OSS on generation tasks. In contrast, non-random strategies retain perfor-mance comparable to unpruned baselines. Most of these strategies yield similar results, with a maximum variance of 5.2% in generation tasks and 17.2% in classification tasks. However, EAN often lags behind other methods in classification tasks, underperforming the best data-driven metric (EASY-EP) by an average of 23.7% across models, with the gap reaching 36.0% in GPT-OSS. 0.0                                            
+
+> 0.25
+> 0.50
+> 0.75
+> 1.0
+> Absolute Relative Omission Repetition Alignment Absolute Relative Omission Repetition
+> GPT-OSS
+> Alignment
+> 0.0
+> 0.25
+> 0.50
+> 0.75
+> 1.0
+> Nemotron3
+> 0.0
+> 0.25
+> 0.50
+> 0.75
+> 1.0
+> Qwen3
+> .25 .50 .75
+> 0.0
+> 0.25
+> 0.50
+> 0.75
+> 1.0
+> .25 .50 .75 .25 .50 .75 .25 .50 .75 .25 .50 .75 .25 .50 .75 .25 .50 .75 .25 .50 .75 .25 .50 .75 .25 .50 .75
+> Qwen3.6
+> Hallucination score / Judge prefers pruned (rate)
+> Pruning ratio
+> RCT Multi-XScience
+> Random Frequency Gate EAN EASY-EP REAP Baseline (Source / 0.5)
+
+Figure 3: Biomedical reliability results across pruning ratios. Dashed lines denote baseline unpruned models for abso-lute scores, or the 0.5 preference threshold for relative comparisons. The average inter-annotator agreements (Fleiss’ 
+
+κ) are 0.52 for absolute judgments and 0.46 for relative judgments (moderate agreement). Tables 4 and 5 in the Ap-pendix provide agreement breakdowns. Figure 7 in the Appendix shows the corresponding summarization metrics. 
+
+This observation aligns with recent find-ings (Dong et al., 2025; Lasby et al., 2026). Rely-ing solely on raw activation norms forces EAN to overemphasize output scale instead of true token-level utility. Because EAN does not consider the gating confidence of the router ( gli,t in REAP) or the representational shift ( slt in EASY-EP), it re-tains experts that produce large but contextually un-helpful transformations. This generates suboptimal utility. Consequently, EAN experiences an earlier performance drop compared to other approaches at a 62.5% pruning ratio. Importantly, this earlier utility decline corresponds to an earlier onset of hal-lucination risks across models, as discussed in §5.2. 
+
+Model Family. Pruning behavior also varies across expert granularities and model architectures. Models with large expert pools, like Qwen3 and Qwen3.6, tolerate a 50% pruning ratio well. For Qwen3.6, all data-driven approaches achieve nearly 100% performance retention on generation tasks, and EASY-EP even reaches 106.8% on classifica-tion tasks. In contrast, models with fewer experts, like GPT-OSS, suffer greater degradation because each expert holds more network capacity. This vulnerability is especially evident on classification tasks, where no configuration exceeds 91.1%. Beyond expert count, architectural complexity introduces another vulnerability. Nemotron3 mod-els show a consistent performance decline, under-performing the baseline by at least 6.3% (REAP). We hypothesize that expert pruning disrupts the balance within this hybrid architecture, which com-bines Transformer attention, Mamba state-space layers, and MoE feed-forward networks. This in-stability is critical in classification tasks, which rely on precise internal state propagation to form accurate decision boundaries. 
+
+Pruning Ratio. For generation tasks, perfor-mance remains robust up to a 50% pruning ratio. Context-aware methods like EASY-EP and REAP often match or exceed the unpruned baseline at ra-tios up to 75%. For instance, at a 75% pruning ratio, Qwen3.6 under REAP retains 96.7% of its baseline utility (a negligible 3.3% drop). In contrast, classi-fication tasks show a gradual performance decline before dropping severely. 
+
+5.2 Biomedical Domain Reliability Pruning Method. Most pruning methods pre-serve baseline reliability metrics up to moder-ate compression levels (a 50% pruning ratio) in-domain. However, we observe that Random and EAN pruning degrade earlier; Random pruning causes immediate degradation even under moder-ate compression. On FCT classification, accuracy approaches near zero across all pruning ratios (Fig-ure 4). On generation tasks (Figure 3), Random pruning causes severe omissions that standard sum-marization metrics often mask. For instance, on RCT at a 37.5% pruning ratio, Qwen3.6 under Ran-dom pruning maintains a ROUGE-L of .135 and BERTScore of .853 (vs. .134 and .853 for the baseline). Yet, its relative alignment drops to .329 due to high omissions (.790). EAN also exhibits 0         
+
+> 25
+> 50
+> 75
+> 100 FCT Fake
+> GPT-OSS
+> NOTA
+> 0
+> 25
+> 50
+> 75
+> 100
+> Nemotron3
+> 0
+> 25
+> 50
+> 75
+> 100
+> Qwen3
+> .25 .50 .75
+> 0
+> 25
+> 50
+> 75
+> 100
+> .25 .50 .75 .25 .50 .75
+> Qwen3.6
+> Accuracy (%)
+> Pruning ratio
+> Random
+> Frequency
+> Gate
+> EAN
+> EASY-EP
+> REAP
+> Source Figure 4: MedHALT evaluation results across pruning ratios and approaches. Dashed lines represent unpruned baseline model performances.
+
+early reliability degradation under moderate prun-ing compared to other data-driven approaches. For example, on FCT, Qwen3 accuracy drops to 20.7% under EAN at a 50% ratio, compared to 47.2% under EASY-EP. Observation 1: Coherence vs. Completeness Random pruning can result in high omission and repetition rates even under moderate com-pression. Standard summarization metrics fail to identify cases where summaries remain structurally fluent but omit key information, creating a false impression of stability. 
+
+Model Family. Echoing the utility findings (§5.1), models with large expert pools, such as Qwen3 and Qwen3.6, exhibit remarkable stability up to moderate pruning ratios (50%). This robust-ness particularly holds under context-aware prun-ing methods (EASY-EP, REAP), where both gener-ative and discriminative benchmarks remain stable and match baseline performance. In contrast, models with fewer experts show earlier degradation. GPT-OSS exhibits reliability degradation at a 50% pruning ratio. Under EASY-EP at this ratio, GPT-OSS suffers from substantial factual consistency decay on both RCT and Multi-XScience, despite minimal decline in both task-specific and overall utility metrics. For instance, on Multi-XScience, the model suffers from high repe-titions (.815), alongside an increase in the absolute hallucination rate to 17.3% (compared to 10.5% at the 37.5% ratio). However, task-specific sum-marization metrics remain stable. ROUGE-L and BERTScore are .102 and .817 on Multi-XScience (vs. .100 and .816 for the baseline). Likewise, overall generation utility retains 96.9% of baseline performance (a minor 3.1% drop), demonstrating that factual reliability decay can occur even with minimal impact on standard task-specific and over-all utility measurements. 
+
+Observation 2: MoE Capacity Bottleneck 
+
+Under moderate pruning ratios ( ≈ 50% ), mod-els with smaller expert pools can exhibit factual reliability degradation earlier than models with larger expert pools. This decline occurs before standard utility metrics begin to degrade. 
+
+Nemotron3, while stable under low pruning ra-tios of 25% or lower, undergoes gradual reliability degradation at the moderate stage of 50%. On RCT under EASY-EP, it exhibits increased infor-mation omissions (.598). On Multi-XScience, it experiences a decline in relative alignment (.364) accompanied by elevated relative hallucinations (.625) and repetitions (.624). Yet, summarization metrics on Multi-XScience remain largely unaf-fected: ROUGE-L is .137 and BERTScore is .838, compared to the baseline scores of .148 and .845. This stability hides the factual consistency decay as the absolute hallucination rate rises to 44.7% from 20.1% for the source model. However, overall generation utility successfully detects this degrada-tion, underperforming the baseline by 7.9% at 50% pruning. This suggests that physical model con-straints (e.g., the hybrid MoE-Mamba-Attention topology of Nemotron3) drive a coupled, parallel decay in overall utility and reliability, even when task-specific metrics remain stable. 
+
+Pruning Ratio. Extreme pruning (62.5% or higher) increases reliability risks across all mod-els, mirroring utility drops. However, the thresh-old for reliability preservation depends on the task. For instance, tasks like Fake, NOTA, and RCT of-ten maintain baseline reliability even at 75% com-pression. Conversely, tasks like FCT and Multi-XScience exhibit earlier, gradual degradation. We attribute this divergence to different reasoning de-mands. Simple classification (Fake and NOTA) and single-source extraction (RCT) may rely on broad semantic matching shared across many experts. In contrast, precise fact retrieval (FCT) and multi-source synthesis (Multi-XScience) depend on spe-cific experts, making them vulnerable to pruning. Crucially, extreme compression decouples util-ity and reliability on Multi-XScience for GPT-OSS, Qwen3, and Qwen3.6. For instance, under EASY-EP at 75% pruning, the relative hallucination rate for Qwen3.6 decreases to .204 from .507 at 50% pruning. Yet, the corresponding absolute rate in-creases from 11.9% to 17.9%. This apparent rela-tive improvement is due to an artifact of summary collapse. A summary length audit reveals that at 75% pruning, average lengths drop from baselines for Qwen3.6 (204.9 to 97.4 words), Qwen3 (367.8 to 262.7), and GPT-OSS (382.9 to 279.8). Conse-quently, relative omission rates surge above .630 for these models. The shorter the summary, the lower the absolute number of errors it will con-tain, lowering the probability of incurring a penalty during relative hallucination evaluation. However, the absolute hallucination rate rises because the ac-tual summary consists largely of ungrounded fab-rications. Standard summarization metrics mask this collapse; ROUGE-L and BERTScore remain largely stable (e.g., Qwen3.6 records .122 and .833, compared to .152 and .846 at 50% pruning). Observation 3: Summary Collapse Extreme pruning artificially lowers relative hal-lucination rates while standard summarization metrics remain stable. This stems from sum-mary collapse; degenerate outputs omit critical information and make fewer assertions, render-ing them less faithful to the source material. 
+
+5.3 General-domain Analysis Utility. Figure 5 presents the results on general-domain benchmarks. Across model families, expert pruning causes an immediate performance decline in the general domain, with overall utility dropping steadily as the pruning ratio increases. This gradual decay contrasts with in-domain utility, where per-formance remains highly robust up to 50%–75% pruning before collapsing suddenly. GPT-OSS is the least robust and shows an immediate average decline of 32.4% even at 12.5% pruning probably due to its small expert pool. When comparing pruning methods, EAN occa-sionally beats others up to a 50% ratio, except for GPT-OSS. Because EAN selects experts by mag-nitude without domain-specific weighting, it pre-serves general capabilities at the expense of in-.25 .50 .75       
+
+> 0
+> 25
+> 50
+> 75
+> 100
+> GPT-OSS
+> .25 .50 .75
+> Nemotron3
+> .25 .50 .75
+> Qwen3
+> .25 .50 .75
+> Qwen3.6
+> Relative
+> performance (%)
+> Pruning ratio
+> Random
+> Frequency
+> Gate
+> EAN
+> EASY-EP
+> REAP
+
+Figure 5: General-domain utility across pruning ratios. Lines and shaded areas denote the mean performance relative to the unpruned source baseline (100%) and standard deviation, respectively. Table 6 in the Ap-pendix provides task-specific results at 50% pruning. 0.0                  
+
+> 0.25
+> 0.50
+> 0.75
+> 1.0 Absolute Relative Omission Repetition
+> GPT-OSS
+> Alignment
+> 0.0
+> 0.25
+> 0.50
+> 0.75
+> 1.0
+> Nemotron3
+> 0.0
+> 0.25
+> 0.50
+> 0.75
+> 1.0
+> Qwen3
+> .25 .50 .75
+> 0.0
+> 0.25
+> 0.50
+> 0.75
+> 1.0
+> .25 .50 .75 .25 .50 .75 .25 .50 .75 .25 .50 .75
+> Qwen3.6
+> Hallucination score / Judge prefers pruned (rate)
+> Pruning ratio
+> Multi-News+ (General Domain)
+> Random
+> Frequency
+> Gate
+> EAN
+> EASY-EP
+> REAP
+> Baseline (Source / 0.5)
+
+Figure 6: General-domain reliability (Multi-News+) across pruning ratios. Dashed lines denote unpruned baselines for absolute scores and the 0.5 preference threshold for relative comparisons. The inter-annotator agreements (Fleiss’ κ) are 0.58 for absolute judgments and 0.44 for relative judgments (moderate agreement). 
+
+domain alignment. This trade-off becomes evident when examining expert selection overlap. At 50% pruning, the overlap between EAN and other data-driven methods is low, peaking at .653 for Qwen3.6 (with the exception of Nemotron3 at .714). In con-trast, pairwise overlap among the remaining meth-ods is higher with a minimum of .753. Ultimately, this divergence occurs because domain-specific cal-ibration inherently removes general-purpose ex-perts that rarely activate during biomedical tasks. Our multi-domain calibration analysis in §6 further corroborates this finding. 
+
+Reliability. Hallucination rates on Multi-News+ increase monotonically with pruning ratio (Figure 6). For non-random methods, Spearman correla-tion coefficients for absolute and relative halluci-nation rates span ρ = 0 .88 to 0.93 and ρ = 0 .73 
+
+to 0.87 , respectively. Crucially, this degradation occurs much earlier than in the in-domain setting. Unlike in-domain reliability, which remains largely stable through 50%–62.5% pruning (and up to 75% for Qwen3 and Qwen3.6) as observed in Figure 3, Multi-News+ hallucination rates climb steadily. For example, GPT-OSS reaches an 11.1% mean absolute hallucination rate at just 37.5% pruning, diverging from a 1.3% baseline. Only Qwen3.6 re-mains relatively robust until 62.5% pruning, where it reaches 12.2% (baseline 2.7%). By contrast, summarization metrics remain sta-ble. Both ROUGE-L and BERTScore stay within 2% of the unpruned baseline for all models up to 62.5% pruning (Figure 7 in the Appendix). Because ROUGE-L measures the longest com-mon subsequence and ignores repetition, and BERTScore rewards topically plausible yet unfaith-ful text, both metrics obscure the underlying degra-dation of reliability. This decoupling constitutes an-other form of summary collapse driven by domain shift. At 62.5% pruning, models tend to produce repetitive text with increasing relative repetition rates (e.g., 77.1% for Qwen3 under EASY-EP). This triggers a collapse in lexical diversity, mea-sured via Type-Token Ratio (TTR). For instance, from an unpruned baseline of .765, the TTR of Qwen3 drops to .731 at 62.5% pruning and falls sharply to .638 at 75%. Except for Qwen3.6, this repetition inflates mean summary length by up to 149 words without improving faithfulness. 
+
+6 Analysis 
+
+Correlation between LLM-as-a-Judge and Hu-man Evaluation. To validate the reliability of our evaluation framework, we conduct a manual anno-tation study on 30 samples from RCT and Multi-XScience. Three human evaluators annotate each sample for comparison against the judgments of our three LLM judges. We stratify the reliability agree-ment (Cohen’s κ) by pruning ratio windows: Low (p ≤ 25 .0% ), Moderate ( 37 .5% ≤ p ≤ 50 .0% ), and Extreme ( p ≥ 62 .5% ), as shown in Table 1. Under extreme pruning ratios, we find substan-tial agreement across all groups (e.g., human-LLM absolute agreement reaches 82.1% with κ =0.644 ). Severe quality degradation (e.g., obvious hallucinations, omissions, and repetitions) drives this straightforward evaluation for both humans and LLMs. Under low and moderate pruning, how-ever, the differences are subtle. Relative preference exhibits substantial variance across both windows                          
+
+> Pair Low Moderate Extreme Sample Size ( N)8913
+> Absolute
+> Human–Human 0.467 1.000 0.898 Human–LLM 0.006 0.738 0.644 LLM–LLM 0.333 0.738 0.783
+> Relative
+> Human–Human 0.366 0.260 0.733 Human–LLM 0.238 -0.012 0.605 LLM–LLM 0.508 0.370 0.676
+> Table 1: Reliability agreement (Cohen’s κ) across expert pruning ratio windows. κis computed pairwise for all pairs within a category (3 pairs for Human–Human and LLM–LLM, and 9 pairs for Human–LLM) and then averaged. Relative agreement is pooled across questions (Q1–Q4) for each pair before computing the metrics.
+
+(κ = 0 .238 and κ = −0.012 for human-LLM). This variance reflects the inherent difficulty of choosing between outputs of similar quality before severe degradation occurs. For absolute judgments, agreement is high during moderate compression (κ = 0 .738 for human-LLM) but diminishes un-der low compression ( κ = 0 .006 ), suggesting that LLM judges diverge from humans when evaluating near-baseline outputs. Overall, the strong align-ment between human and LLM judges in detecting severe degradations justifies our automated evalu-ation setup for generation reliability assessment. 
+
+Multi-domain Calibration. Given the substan-tial impact of calibration data domains on utility and reliability, we compare biomedical-only cali-bration against dual-domain calibration, which ad-ditionally uses general-domain calibration data. 4
+
+Following Dong et al. (2025), we compute a saliency metric (§3.2) for each domain and aver-age them. We analyze these calibration behavior at moderate (50%) and extreme (75%) pruning ratios using Qwen3.6 with EASY-EP as this combination represents the most effective pruning configuration. As shown in Table 2, dual-domain calibration mitigates general utility degradation, boosting it from .387 to .597 at 75% pruning. Yet, this im-provement incurs a trade-off in biomedical utility (e.g., at 75% pruning, MultiMedQA drops from .665 to .563). For reliability, dual-domain calibra-tion performs comparably to the biomedical-only method at 50% pruning. It maintains low absolute hallucination rates, degrading by a maximum of .029 on Multi-News+ compared to the unpruned baseline, and yields similar pairwise preference win-rates. Conversely, under extreme 75% prun-ing, the biomedical-only calibration is more robust.                                                                                     
+
+> 4We use 128 Dolci-Instruct-SFT-No-Tools (Team Olmo et al., 2025) samples as general-domain calibration data. Configuration Utility Biomedical Reliability General Reliability MedINST MMQA General RCT MXSci. Hall. Omis. Repe. Align. MN+ Hall. Omis. Repe. Align.
+> MedINST (50%) .554 .004 .838 .008 .689 .010 .015 .009 .121 .079 .476 .029 .402 .073 .516 .067 .564 .036 .031 .036 .367 .076 .480 .106 .547 .133 .647 .012
+> + General (50%) .548 .013 .833 .004 .915 .064 .019 .017 .088 .064 .437 .033 .470 .044 .517 .053 .550 .029 .060 .045 .510 .082 .537 .065 .593 .094 .447 .079
+> MedINST (75%) .476 .037 .665 .137 .387 .088 .024 .019 .179 .044 .204 .029 .735 .088 .405 .161 .417 .079 .211 .073 .540 .020 .727 .081 .680 .140 .287 .031
+> + General (75%) .424 .128 .563 .096 .597 .287 .061 .026 .358 .025 .372 .050 .646 .040 .653 .112 .414 .029 .323 .167 .755 .100 .630 .162 .905 .055 .160 .043
+> + GPTQ (4-bit) .543 .005 .829 .011 .676 .020 .017 .026 .125 .079 .419 .025 .470 .037 .492 .022 .564 .034 .078 .055 .547 .058 .553 .085 .620 .078 .410 .075
+
+Table 2: Utility and reliability metrics for Qwen3.6 EASY-EP pruned models, contrasting biomedical-only calibration against dual-domain calibration at 50% and 75% ratios, alongside the impact of 4-bit GPTQ quantization. Bold text denotes superior performance within each pairing; subscripts indicate standard deviation across three seeds. 
+
+Under dual calibration, absolute hallucination rates surge across tasks, doubling the rates of MedINST (.358 vs. .179 on Multi-XScience). Pairwise met-rics confirm this degradation: the 75% dual-pruned model exhibits higher relative hallucinations and repetitions. This outcome suggests that while multi-domain calibration helps balance general and spe-cialized utility under moderate pruning, specialized in-domain calibration is critical for preserving fac-tual reliability during extreme compression. 
+
+Quantization. While quantization is orthogonal to expert pruning (§2), we examine whether utility and reliability trends remain consistent in quantized models. Specifically, we apply 4-bit GPTQ (Frantar et al., 2023) weight quantization to the Qwen3.6 EASY-EP 50% pruned model. As Table 2 indi-cates, we observe no substantial utility difference between the unquantized and quantized configu-rations: the quantized model retains a biomedical utility of .543 on generation and .829 on classifi-cation tasks (compared to .554 and .838 for the unquantized counterpart). It also preserves .676 of general-domain utility, a minor decrease from the unquantized score of .689. For reliability, quantization generally preserves consistency on biomedical benchmarks. For in-stance, it maintains absolute hallucination rates of .017 on RCT and .125 on Multi-XScience, against unquantized rates of .015 and .121. However, in the general domain, quantization increases absolute hallucinations (.078 vs. .031) and elevates relative errors. Hallucination, omission, and repetition rates rise to .547, .553, and .620 respectively, while rel-ative alignment drops from .647 to .410. These results demonstrate that while expert pruning and post-training weight quantization can combine to achieve additional compression without compound-ing in-domain performance loss, quantization can increase reliability risks in cross-domain settings. 
+
+Qualitative Analysis. To investigate reliability degradation, we analyze RCT generated summaries                   
+
+> Source Context Pruned Output Cl. Gem. GPT 1. 3.8 ng/ml 3.8 mg/ml 1.0 0.0 0.0
+> 2. 179 randomized 70-9 randomized 1.0 1.0 0.0
+> 3. (abstract) Given ..., write... 1.0 1.0 0.0
+
+Table 3: Output error examples on RCT and LLM judge absolute evaluations (1.0: unfaithful, 0.0: faithful). 
+
+(Table 3). We identify three primary failure modes: (1) Unit hallucinations , swapping measurement units (e.g., Qwen3 generating mg/ml instead of ng/ml at 25% Gate); (2) Numerical errors , intro-ducing factual mistakes (e.g., GPT-OSS reporting 179 patients as 70-9 at 75% Frequency); and (3) In-struction leakage , repeating the task template under extreme pruning (e.g., Qwen3.6 at 87.5% EAN). Evaluating these outputs reveals the varying sen-sitivities of absolute LLM judges. While Claude identifies most errors, Gemini and GPT overlook the unit swap in Case 1. This error notably occurs at a low 25% pruning ratio while utility remains in-tact. This establishes that evaluating pruned models on utility alone is often inadequate for high-stakes deployment; direct reliability assessments are criti-cal to detect factual failures before utility degrades. 
+
+7 Conclusion 
+
+This paper presents the first comprehensive study on the impact of expert pruning in MoE models on both benchmark utility and factual reliability within the high-stakes biomedical domain. Our findings highlight that utility is not always indica-tive of reliability. During domain shift or extreme pruning, models experience summary collapse and an increase in hallucination rates before standard utility metrics register a decline. In high-stakes do-mains, this trade-off between utility and reliability requires careful consideration through comprehen-sive in-domain and general evaluation. Finally, while multi-domain calibration and quantization offer benefits, they introduce reliability trade-offs under high compression or cross-domain settings. Acknowledgment 
+
+We would like to thank Mingzi Cao, Vynska Amalia Permadi, and Samuel Lewis-Lim for their annotation support. We also appreciate initial guidance on hallucination evaluation from Tim-othee Mickus. AY is supported by the Engineering and Physical Sciences Research Council (EPSRC) [grant number EP/W524360/1] and the Japan Stu-dent Services Organization (JASSO) Student Ex-change Support Program (Graduate Scholarship for Degree Seeking Students). 
+
+References 
+
+Jason Ansel, Edward Yang, Horace He, Natalia Gimelshein, Animesh Jain, Michael Voznesen-sky, Bin Bao, Peter Bell, David Berard, Evgeni Burovski, Geeta Chauhan, Anjali Chourdia, Will Constable, Alban Desmaison, Zachary DeVito, Elias Ellison, Will Feng, Jiong Gong, Michael Gschwind, Brian Hirsh, Sherlock Huang, Kshi-teej Kalambarkar, Laurent Kirsch, Michael Lazos, Mario Lezcano, Yanbo Liang, Jason Liang, Yinghai Lu, C. K. Luk, Bert Maher, Yunjie Pan, Christian Puhrsch, Matthias Reso, Mark Saroufim, Marcos Yukio Siraichi, Helen Suk, Shunting Zhang, Michael Suo, Phil Tillet, Xu Zhao, Eikan Wang, Keren Zhou, Richard Zou, Xiaodong Wang, Ajit Mathews, William Wen, Gregory Chanan, Peng Wu, and Soumith Chintala. 2024. PyTorch 2: Faster machine learning through dynamic Python bytecode trans-formation and graph compilation. In Proceed-ings of the 29th ACM International Conference on Architectural Support for Programming Lan-guages and Operating Systems, Volume 2 , ASP-LOS ’24, page 929–947, New York, NY, USA. Association for Computing Machinery. Sikai Bai, Haoxi Li, Jie Zhang, Zicong Hong, and Song Guo. 2025. DiEP: Adaptive mixture-of-experts compression through differentiable ex-pert pruning. In Advances in Neural Information Processing Systems , volume 38, pages 56090– 56115. Curran Associates, Inc. Weilin Cai, Juyong Jiang, Fan Wang, Jing Tang, Sunghun Kim, and Jiayi Huang. 2025. A survey on mixture of experts in large language mod-els. IEEE Transactions on Knowledge and Data Engineering , 37(7):3896–3915. I-Chun Chen, Hsu-Shen Liu, Wei-Fang Sun, Chen-Hao Chao, Yen-Chang Hsu, and Chun-Yi Lee. 2025a. Retraining-free merging of sparse MoE via hierarchical clustering. In Proceedings of the Forty-second International Conference on Machine Learning .Mark Chen, Jerry Tworek, Heewoo Jun, Qim-ing Yuan, Henrique Ponde de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, Alex Ray, Raul Puri, Gretchen Krueger, Michael Petrov, Heidy Khlaaf, Girish Sastry, Pamela Mishkin, Brooke Chan, Scott Gray, Nick Ryder, Mikhail Pavlov, Alethea Power, Lukasz Kaiser, Mo-hammad Bavarian, Clemens Winter, Philippe Tillet, Felipe Petroski Such, Dave Cummings, Matthias Plappert, Fotios Chantzis, Elizabeth Barnes, Ariel Herbert-Voss, William Hebgen Guss, Alex Nichol, Alex Paino, Nikolas Tezak, Jie Tang, Igor Babuschkin, Suchir Balaji, Shan-tanu Jain, William Saunders, Christopher Hesse, Andrew N. Carr, Jan Leike, Josh Achiam, Vedant Misra, Evan Morikawa, Alec Radford, Matthew Knight, Miles Brundage, Mira Murati, Katie Mayer, Peter Welinder, Bob McGrew, Dario Amodei, Sam McCandlish, Ilya Sutskever, and Wojciech Zaremba. 2021. Evaluating large lan-guage models trained on code. arXiv preprint ,arXiv:2107.03374. Tianyu Chen, Shaohan Huang, Yuan Xie, Binxing Jiao, Daxin Jiang, Haoyi Zhou, Jianxin Li, and Furu Wei. 2022. Task-specific expert pruning for sparse mixture-of-experts. arXiv preprint ,arXiv:2206.00277. Yuanteng Chen, Yuantian Shao, Peisong Wang, and Jian Cheng. 2025b. EAC-MoE: Expert-selection aware compressor for mixture-of-experts large language models. In Proceedings of the 63rd Annual Meeting of the Association for Compu-tational Linguistics (Volume 1: Long Papers) ,pages 12942–12963, Vienna, Austria. Associa-tion for Computational Linguistics. Zhixuan Chen, Xing Hu, Dawei Yang, Zukang Xu, Xu Chen, Zhihang Yuan, Sifan Zhou, and Jiangy-ong Yu. 2025c. MoEQuant: Enhancing quan-tization for mixture-of-experts large language models via expert-balanced sampling and affin-ity guidance. In Proceedings of the 42nd In-ternational Conference on Machine Learning ,volume 267 of Proceedings of Machine Learn-ing Research , pages 8245–8260. PMLR. Juhwan Choi, JungMin Yun, Kyohoon Jin, and YoungBin Kim. 2024. Multi-news+: Cost-efficient dataset cleansing via LLM-based data annotation. In Proceedings of the 2024 Confer-ence on Empirical Methods in Natural Language Processing , pages 15–29, Miami, Florida, USA. Association for Computational Linguistics. George Chrysostomou, Zhixue Zhao, Miles Williams, and Nikolaos Aletras. 2024. Inves-tigating hallucinations in pruned large language models for abstractive summarization. Trans-actions of the Association for Computational Linguistics , 12:1163–1181. Karl Cobbe, Vineet Kosaraju, Mohammad Bavar-ian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. 2021. Training verifiers to solve math word problems. arXiv preprint ,arXiv:2110.14168. Tri Dao. 2024. FlashAttention-2: Faster attention with better parallelism and work partitioning. In 
+
+Proceedings of the Twelfth International Confer-ence on Learning Representations .Zican Dong, Han Peng, Peiyu Liu, Xin Zhao, Dong Wu, Feng Xiao, and Zhifeng Wang. 2025. Domain-specific pruning of large mixture-of-experts models with few-shot demonstrations. In Advances in Neural Information Processing Systems , volume 38, pages 103552–103577. Cur-ran Associates, Inc. Nan Du, Yanping Huang, Andrew M Dai, Simon Tong, Dmitry Lepikhin, Yuanzhong Xu, Maxim Krikun, Yanqi Zhou, Adams Wei Yu, Orhan Fi-rat, Barret Zoph, Liam Fedus, Maarten P Bosma, Zongwei Zhou, Tao Wang, Emma Wang, Kellie Webster, Marie Pellat, Kevin Robinson, Kath-leen Meier-Hellstern, Toju Duke, Lucas Dixon, Kun Zhang, Quoc Le, Yonghui Wu, Zhifeng Chen, and Claire Cui. 2022. GLaM: Efficient scaling of language models with mixture-of-experts. In Proceedings of the 39th International Conference on Machine Learning , volume 162 of Proceedings of Machine Learning Research ,pages 5547–5569. PMLR. Elias Frantar and Dan Alistarh. 2024. QMoE: Sub-1-bit compression of trillion parameter models. In Proceedings of Machine Learning and Sys-tems , volume 6, pages 439–451. Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. 2023. OPTQ: Accurate quantiza-tion for generative pre-trained transformers. In 
+
+Proceedings of the Eleventh International Con-ference on Learning Representations .Yao Fu, Runchao Li, Xianxuan Long, Haotian Yu, Xiaotian Han, Yu Yin, and Pan Li. 2025a. Prun-ing weights but not truth: Safeguarding truth-fulness while pruning LLMs. In Findings of the Association for Computational Linguistics: EMNLP 2025 , pages 20750–20768, Suzhou, China. Association for Computational Linguis-tics. Yao Fu, Xianxuan Long, Runchao Li, Haotian Yu, Mu Sheng, Xiaotian Han, Yu Yin, and Pan Li. 2025b. Quantized but deceptive? a multi-dimensional truthfulness evaluation of quantized LLMs. In Proceedings of the 2025 Conference on Empirical Methods in Natural Language Pro-cessing , pages 30435–30458, Suzhou, China. As-sociation for Computational Linguistics. Leo Gao, Jonathan Tow, Baber Abbasi, Stella Bi-derman, Sid Black, Anthony DiPofi, Charles Foster, Laurence Golding, Jeffrey Hsu, Alain Le Noac’h, Haonan Li, Kyle McDonell, Niklas Muennighoff, Chris Ociepa, Jason Phang, Laria Reynolds, Hailey Schoelkopf, Aviya Skowron, Lintang Sutawika, Eric Tang, Anish Thite, Ben Wang, Kevin Wang, and Andy Zou. 2023. A framework for few-shot language model evaluation. https://zenodo.org/records/ 10256836 .Wenhan Han, Meng Fang, Zihan Zhang, Yu Yin, Zirui Song, Ling Chen, Mykola Pechenizkiy, and Qingyu Chen. 2024. MedINST: Meta dataset of biomedical instructions. In Findings of the Asso-ciation for Computational Linguistics: EMNLP 2024 , pages 8221–8240, Miami, Florida, USA. Association for Computational Linguistics. Shwai He, Run-Ze Fan, Liang Ding, Li Shen, Tianyi Zhou, and Dacheng Tao. 2023. Merg-ing experts into one: Improving computational efficiency of mixture of experts. In Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing , pages 14685– 14691, Singapore. Association for Computa-tional Linguistics. Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. 2021. Measuring massive multitask language understanding. In Proceedings of the Nineth International Conference on Learning Representations .Junyuan Hong, Jinhao Duan, Chenhui Zhang, Zhangheng Li, Chulin Xie, Kelsey Lieber-man, James Diffenderfer, Brian R. Bartold-son, Ajay Kumar Jaiswal, Kaidi Xu, Bhavya Kailkhura, Dan Hendrycks, Dawn Song, Zhangyang Wang, and Bo Li. 2024. Decoding compressed trust: Scrutinizing the trustworthi-ness of efficient LLMs under compression. In 
+
+Proceedings of the 41st International Confer-ence on Machine Learning , volume 235 of Pro-ceedings of Machine Learning Research , pages 18611–18633. PMLR. Wentao Hu, Mingkuan Zhao, Shuangyong Song, Xiaoyan Zhu, Xin Lai, and Jiayin Wang. 2026. Mosaic pruning: A hierarchical framework for generalizable pruning of mixture-of-experts models. Proceedings of the AAAI Conference on Artificial Intelligence , 40(26):21885–21893. Wei Huang, Yue Liao, Jianhui Liu, Ruifei He, Haoru Tan, Shiming Zhang, Hongsheng Li, Si Liu, and XIAOJUAN QI. 2025. Mixture com-pressor for mixture-of-experts LLMs gains more. In Proceedings of the Thirteenth International Conference on Learning Representations .Jeffrey Ip and Kritin Vongthongsri. 2026. deepeval. GitHub repository. Ajay Jaiswal, Jianyu Wang, Yixiao Li, Pingzhi Li, Tianlong Chen, Zhangyang Wang, Chong Wang, Ruoming Pang, and Xianzhi Du. 2025. Finding fantastic experts in moes: A unified study for ex-pert dropping strategies and observations. arXiv preprint , arXiv:2504.05586. Ziwei Ji, Nayeon Lee, Rita Frieske, Tiezheng Yu, Dan Su, Yan Xu, Etsuko Ishii, Ye Jin Bang, An-drea Madotto, and Pascale Fung. 2023. Survey of hallucination in natural language generation. 
+
+ACM Computing Surveys , 55(12). Di Jin, Eileen Pan, Nassim Oufattole, Wei-Hung Weng, Hanyi Fang, and Peter Szolovits. 2021. What disease does this patient have? a large-scale open domain question answering dataset from medical exams. Applied Sciences , 11(14). Qiao Jin, Bhuwan Dhingra, Zhengping Liu, William Cohen, and Xinghua Lu. 2019. Pub-MedQA: A dataset for biomedical research ques-tion answering. In Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Process-ing (EMNLP-IJCNLP) , pages 2567–2577, Hong Kong, China. Association for Computational Linguistics. Young Jin Kim, Ammar Ahmad Awan, Alexandre Muzio, Andres Felipe Cruz Salinas, Liyang Lu, Amr Hendy, Samyam Rajbhandari, Yuxiong He, and Hany Hassan Awadalla. 2021. Scalable and efficient MoE training for multitask multilingual models. arXiv preprint , arXiv:2109.10465. Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. 2023. Ef-ficient memory management for large language model serving with PagedAttention. In Proceed-ings of the 29th Symposium on Operating Sys-tems Principles , SOSP ’23, page 611–626, New York, NY, USA. Association for Computing Ma-chinery. Mateusz Lango and Ondrej Dusek. 2023. Critic-driven decoding for mitigating hallucinations in data-to-text generation. In Proceedings of the 2023 Conference on Empirical Methods in Nat-ural Language Processing , pages 2853–2862, Singapore. Association for Computational Lin-guistics. Mike Lasby, Ivan Lazarevich, Nish Sinnadu-rai, Sean Lie, Yani Ioannou, and Vithursan Thangarasa. 2026. REAP the experts: Why pruning prevails for one-shot moe compression. In Proceedings of the Fourteenth International Conference on Learning Representations .Quentin Lhoest, Albert Villanova del Moral, Yacine Jernite, Abhishek Thakur, Patrick von Platen, Suraj Patil, Julien Chaumond, Mariama Drame, Julien Plu, Lewis Tunstall, Joe Davi-son, Mario Šaško, Gunjan Chhablani, Bhav-itvya Malik, Simon Brandeis, Teven Le Scao, Victor Sanh, Canwen Xu, Nicolas Patry, An-gelina McMillan-Major, Philipp Schmid, Syl-vain Gugger, Clément Delangue, Théo Ma-tussière, Lysandre Debut, Stas Bekman, Pier-ric Cistac, Thibault Goehringer, Victor Mustar, François Lagunas, Alexander Rush, and Thomas Wolf. 2021. Datasets: A community library for natural language processing. In Proceed-ings of the 2021 Conference on Empirical Meth-ods in Natural Language Processing: System Demonstrations , pages 175–184, Online and Punta Cana, Dominican Republic. Association for Computational Linguistics. Pingzhi Li, Xiaolong Jin, Zhen Tan, Yu Cheng, and Tianlong Chen. 2024a. QuantMoE-Bench: Ex-amining post-training quantization for mixture-of-experts. arXiv preprint , arXiv:2406.08155. Pingzhi Li, Zhenyu Zhang, Prateek Yadav, Yi-Lin Sung, Yu Cheng, Mohit Bansal, and Tianlong Chen. 2024b. Merge, then compress: Demystify efficient SMoE with hints from its routing pol-icy. In Proceedings of the Twelfth International Conference on Learning Representations .Chin-Yew Lin. 2004. ROUGE: A package for auto-matic evaluation of summaries. In Text Summa-rization Branches Out , pages 74–81, Barcelona, Spain. Association for Computational Linguis-tics. Zongfang Liu, Shengkun Tang, Boyang Sun, Zhiqiang Shen, and Xin Yuan. 2026. EvoE-SAP: Non-uniform expert pruning for sparse moe. arXiv preprint , arXiv:2603.06003. Xudong Lu, Qi Liu, Yuhui Xu, Aojun Zhou, Siyuan Huang, Bo Zhang, Junchi Yan, and Hongsheng Li. 2024. Not all experts are equal: Efficient ex-pert pruning and skipping for mixture-of-experts large language models. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Pa-pers) , pages 6159–6172, Bangkok, Thailand. As-sociation for Computational Linguistics. Yao Lu, Yue Dong, and Laurent Charlin. 2020. Multi-XScience: A large-scale dataset for ex-treme multi-document summarization of scien-tific articles. In Proceedings of the 2020 Confer-ence on Empirical Methods in Natural Language Processing (EMNLP) , pages 8068–8074, Online. Association for Computational Linguistics. Michael Moor, Oishi Banerjee, Zahra Shakeri Hos-sein Abad, Harlan M. Krumholz, Jure Leskovec, Eric J. Topol, and Pranav Rajpurkar. 2023. Foun-dation models for generalist medical artificial intelligence. Nature , 616(7956):259–265. Alexandre Muzio, Alex Sun, and Churan He. 2024. SEER-MoE: Sparse expert efficiency through regularization for mixture-of-experts. arXiv preprint , arXiv:2404.05089. NVIDIA, Aaron Blakeman, Aaron Grattafiori, Aarti Basant, Abhibha Gupta, Abhinav Khat-tar, Adi Renduchintala, Aditya Vavre, Akanksha Shukla, Akhiad Bercovich, Aleksander Ficek, Aleksandr Shaposhnikov, Alex Kondratenko, Alexander Bukharin, Alexandre Milesi, Ali Taghibakhshi, Alisa Liu, Amelia Barton, Ameya Sunil Mahabaleshwarkar, Amir Klein, Amit Zuker, Amnon Geifman, Amy Shen, Anahita Bhiwandiwalla, Andrew Tao, Anjulie Agrusa, Ankur Verma, Ann Guan, Anubhav Mandarwal, Arham Mehta, Ashwath Aithal, Ashwin Poojary, Asif Ahamed, Asit Mishra, Asma Kuriparambil Thekkumpate, Ayush Dattagupta, Banghua Zhu, Bardiya Sadeghi, Barnaby Simkin, Ben Lanir, Benedikt Schif-ferer, Besmira Nushi, Bilal Kartal, Bita Darvish Rouhani, Boris Ginsburg, Brandon Norick, Brandon Soubasis, Branislav Kisacanin, Brian Yu, Bryan Catanzaro, Carlo del Mundo, Chantal Hwang, Charles Wang, Cheng-Ping Hsieh, Chenghao Zhang, Chenhan Yu, Chetan Mungekar, Chintan Patel, Chris Alexiuk, Christopher Parisien, Collin Neale, Cyril Meuril-lon, Damon Mosk-Aoyama, Dan Su, Dane Corneil, Daniel Afrimi, Daniel Lo, Daniel Rohrer, Daniel Serebrenik, Daria Gitman, Daria Levy, Darko Stosic, David Mosallanezhad, Deepak Narayanan, Dhruv Nathawani, Dima Rekesh, Dina Yared, Divyanshu Kakwani, Dong Ahn, Duncan Riach, Dusan Stosic, Edgar Mi-nasyan, Edward Lin, Eileen Long, Eileen Peters Long, Elad Segal, Elena Lantz, Ellie Evans, El-liott Ning, Eric Chung, Eric Harper, Eric Tramel, Erick Galinkin, Erik Pounds, Evan Briones, Evelina Bakhturina, Evgeny Tsykunov, Faisal Ladhak, Fay Wang, Fei Jia, Felipe Soares, Feng Chen, Ferenc Galko, Frank Sun, Frankie Si-ino, Gal Hubara Agam, Ganesh Ajjanagadde, Gantavya Bhatt, Gargi Prasad, George Arm-strong, Gerald Shen, Gorkem Batmaz, Grigor Nalbandyan, Haifeng Qian, Harsh Sharma, Hay-ley Ross, Helen Ngo, Herbert Hum, Herman Sahota, Hexin Wang, Himanshu Soni, Hiren Upadhyay, Huizi Mao, Huy C Nguyen, Huy Q Nguyen, Iain Cunningham, Ido Galil, Ido Sha-haf, Igor Gitman, Ilya Loshchilov, Itamar Schen, Itay Levy, Ivan Moshkov, Izik Golan, Izzy Putterman, Jan Kautz, Jane Polak Scowcroft, Jared Casper, Jatin Mitra, Jeffrey Glick, Jenny Chen, Jesse Oliver, Jian Zhang, Jiaqi Zeng, Jie Lou, Jimmy Zhang, Jinhang Choi, Jining Huang, Joey Conway, Joey Guman, John Ka-malu, Johnny Greco, Jonathan Cohen, Joseph Jennings, Joyjit Daw, Julien Veron Vialard, Junkeun Yi, Jupinder Parmar, Kai Xu, Kan Zhu, Kari Briski, Katherine Cheung, Katherine Luna, Keith Wyss, Keshav Santhanam, Kevin Shih, Kezhi Kong, Khushi Bhardwaj, Kirthi Shankar, Krishna C. Puvvada, Krzysztof Pawelec, Kumar Anik, Lawrence McAfee, Laya Sleiman, Leon Derczynski, Li Ding, Lizzie Wei, Lucas Lieben-wein, Luis Vega, Maanu Grover, Maarten Van Segbroeck, Maer Rodrigues de Melo, Mahdi Nazemi, Makesh Narsimhan Sreedhar, Manoj Kilaru, Maor Ashkenazi, Marc Romeijn, Marcin Chochowski, Mark Cai, Markus Kliegl, Maryam Moosaei, Matt Kulka, Matvei Novikov, Mehrzad Samadi, Melissa Corpuz, Mengru Wang, Mered-ith Price, Michael Andersch, Michael Boone, Michael Evans, Miguel Martinez, Mikail Khona, Mike Chrzanowski, Minseok Lee, Mohammad Dabbah, Mohammad Shoeybi, Mostofa Pat-wary, Nabin Mulepati, Najeeb Nabwani, Na-talie Hereth, Nave Assaf, Negar Habibi, Neta Zmora, Netanel Haber, Nicola Sessions, Nidhi Bhatia, Nikhil Jukar, Nikki Pope, Nikolai Lud-wig, Nima Tajbakhsh, Nir Ailon, Nirmal Ju-luru, Nishant Sharma, Oleksii Hrinchuk, Olek-sii Kuchaiev, Olivier Delalleau, Oluwatobi Olabiyi, Omer Ullman Argov, Omri Puny, Oren Tropp, Ouye Xie, Parth Chadha, Pasha Shamis, Paul Gibbons, Pavlo Molchanov, Pawel Mork-isz, Peter Dykas, Peter Jin, Pinky Xu, Piotr Januszewski, Pranav Prashant Thombre, Prasoon Varshney, Pritam Gundecha, Przemek Tredak, Qing Miao, Qiyu Wan, Rabeeh Karimi Ma-habadi, Rachit Garg, Ran El-Yaniv, Ran Zil-berstein, Rasoul Shafipour, Rich Harang, Rick Izzo, Rima Shahbazyan, Rishabh Garg, Ri-tika Borkar, Ritu Gala, Riyad Islam, Robert Hesse, Roger Waleffe, Rohit Watve, Roi Ko-ren, Ruoxi Zhang, Russell Hewett, Russell J. Hewett, Ryan Prenger, Ryan Timbrook, Sadegh Mahdavi, Sahil Modi, Samuel Kriman, Sangkug Lim, Sanjay Kariyappa, Sanjeev Satheesh, Saori Kaji, Satish Pasumarthi, Saurav Muralidharan, Sean Narentharen, Sean Narenthiran, Seon-myeong Bak, Sergey Kashirsky, Seth Poulos, Shahar Mor, Shanmugam Ramasamy, Shantanu Acharya, Shaona Ghosh, Sharath Turuvekere Sreenivas, Shelby Thomas, Shiqing Fan, Shreya Gopal, Shrimai Prabhumoye, Shubham Pachori, Shubham Toshniwal, Shuoyang Ding, Siddharth Singh, Simeng Sun, Smita Ithape, Somshubra Majumdar, Soumye Singhal, Stas Sergienko, Ste-fania Alborghetti, Stephen Ge, Sugam Dipak De-vare, Sumeet Kumar Barua, Suseella Panguluri, Suyog Gupta, Sweta Priyadarshi, Syeda Nahida Akter, Tan Bui, Teodor-Dumitru Ene, Terry Kong, Thanh Do, Tijmen Blankevoort, Tim Moon, Tom Balough, Tomer Asida, Tomer Bar Natan, Tomer Ronen, Tugrul Konuk, Twin-kle Vashishth, Udi Karpas, Ushnish De, Vahid Noorozi, Vahid Noroozi, Venkat Srinivasan, Ven-mugil Elango, Victor Cui, Vijay Korthikanti, Vinay Rao, Vitaly Kurin, Vitaly Lavrukhin, Vladimir Anisimov, Wanli Jiang, Wasi Uddin Ahmad, Wei Du, Wei Ping, Wenfei Zhou, Will Jennings, William Zhang, Wojciech Prazuch, Xiaowei Ren, Yashaswi Karnati, Yejin Choi, Yev Meyer, Yi-Fu Wu, Yian Zhang, Yigong Qin, Ying Lin, Yonatan Geifman, Yonggan Fu, Yoshi Subara, Yoshi Suhara, Yubo Gao, Zach Moshe, Zhen Dong, Zhongbo Zhu, Zihan Liu, Zijia Chen, and Zijie Yan. 2025. NVIDIA Nemotron 3: Efficient and open intelligence. 
+
+arXiv preprint , arXiv:2512.20856. OpenAI, Sandhini Agarwal, Lama Ahmad, Ja-son Ai, Sam Altman, Andy Applebaum, Ed-win Arbus, Rahul K. Arora, Yu Bai, Bowen Baker, Haiming Bao, Boaz Barak, Ally Bennett, Tyler Bertao, Nivedita Brett, Eugene Brevdo, Greg Brockman, Sebastien Bubeck, Che Chang, Kai Chen, Mark Chen, Enoch Cheung, Aidan Clark, Dan Cook, Marat Dukhan, Casey Dvo-rak, Kevin Fives, Vlad Fomenko, Timur Garipov, Kristian Georgiev, Mia Glaese, Tarun Gogineni, Adam Goucher, Lukas Gross, Katia Gil Guz-man, John Hallman, Jackie Hehir, Johannes Heidecke, Alec Helyar, Haitang Hu, Romain Huet, Jacob Huh, Saachi Jain, Zach Johnson, Chris Koch, Irina Kofman, Dominik Kundel, Jason Kwon, Volodymyr Kyrylov, Elaine Ya Le, Guillaume Leclerc, James Park Lennon, Scott Lessans, Mario Lezcano-Casado, Yuanzhi Li, Zhuohan Li, Ji Lin, Jordan Liss, Lily, Liu, Jiancheng Liu, Kevin Lu, Chris Lu, Zoran Marti-novic, Lindsay McCallum, Josh McGrath, Scott McKinney, Aidan McLaughlin, Song Mei, Steve Mostovoy, Tong Mu, Gideon Myles, Alexan-der Neitz, Alex Nichol, Jakub Pachocki, Alex Paino, Dana Palmie, Ashley Pantuliano, Gi-ambattista Parascandolo, Jongsoo Park, Leher Pathak, Carolina Paz, Ludovic Peran, Dmitry Pimenov, Michelle Pokrass, Elizabeth Proehl, Huida Qiu, Gaby Raila, Filippo Raso, Hongyu Ren, Kimmy Richardson, David Robinson, Bob Rotsted, Hadi Salman, Suvansh Sanjeev, Max Schwarzer, D. Sculley, Harshit Sikchi, Kendal Si-mon, Karan Singhal, Yang Song, Dane Stuckey, Zhiqing Sun, Philippe Tillet, Sam Toizer, Foivos Tsimpourlas, Nikhil Vyas, Eric Wallace, Xin Wang, Miles Wang, Olivia Watkins, Kevin Weil, Amy Wendling, Kevin Whinnery, Cedric Whit-ney, Hannah Wong, Lin Yang, Yu Yang, Michi-hiro Yasunaga, Kristen Ying, Wojciech Zaremba, Wenting Zhan, Cyril Zhang, Brian Zhang, Ed-die Zhang, and Shengjia Zhao. 2025. gpt-oss-120b & gpt-oss-20b model card. arXiv preprint ,arXiv:2508.10925. Ankit Pal, Logesh Kumar Umapathi, and Malaikan-nan Sankarasubbu. 2023. Med-HALT: Medi-cal domain hallucination test for large language models. In Proceedings of the 27th Conference on Computational Natural Language Learning (CoNLL) , pages 314–334, Singapore. Associa-tion for Computational Linguistics. Maja Popovi´ c. 2017. chrF++: words helping char-acter n-grams. In Proceedings of the Second Conference on Machine Translation , pages 612– 618, Copenhagen, Denmark. Association for Computational Linguistics. Qwen Team. 2026. Qwen3.6-35B-A3B: Agentic coding power, now open to all. Blog post. Red Hat AI and vLLM Project. 2024. LLM Com-pressor. GitHub reporitory. Manpreet Singh and Hassan Sajjad. 2025. Inter-preting the effects of quantization on LLMs. In 
+
+Proceedings of the 14th International Joint Con-ference on Natural Language Processing and the 4th Conference of the Asia-Pacific Chapter of the Association for Computational Linguistics ,pages 2267–2281, Mumbai, India. The Asian Federation of Natural Language Processing and The Association for Computational Linguistics. Karan Singhal, Shekoofeh Azizi, Tao Tu, S. Sara Mahdavi, Jason Wei, Hyung Won Chung, Nathan Scales, Ajay Tanwani, Heather Cole-Lewis, Stephen Pfohl, Perry Payne, Martin Seneviratne, Paul Gamble, Chris Kelly, Abubakr Babiker, Nathanael Schärli, Aakanksha Chowd-hery, Philip Mansfield, Dina Demner-Fushman, Blaise Agüera y Arcas, Dale Webster, Greg S. Corrado, Yossi Matias, Katherine Chou, Juraj Gottweis, Nenad Tomasev, Yun Liu, Alvin Ra-jkomar, Joelle Barral, Christopher Semturs, Alan Karthikesalingam, and Vivek Natarajan. 2023. Large language models encode clinical knowl-edge. Nature , 620(7972):172–180. Team Olmo, Allyson Ettinger, Amanda Bertsch, Bailey Kuehl, David Graham, David Heineman, Dirk Groeneveld, Faeze Brahman, Finbarr Tim-bers, Hamish Ivison, Jacob Morrison, Jake Poz-nanski, Kyle Lo, Luca Soldaini, Matt Jordan, Mayee Chen, Michael Noukhovitch, Nathan Lambert, Pete Walsh, Pradeep Dasigi, Robert Berry, Saumya Malik, Saurabh Shah, Scott Geng, Shane Arora, Shashank Gupta, Taira Anderson, Teng Xiao, Tyler Murray, Tyler Romero, Victo-ria Graf, Akari Asai, Akshita Bhagia, Alexan-der Wettig, Alisa Liu, Aman Rangapur, Chloe Anastasiades, Costa Huang, Dustin Schwenk, Harsh Trivedi, Ian Magnusson, Jaron Lochner, Jiacheng Liu, Lester James V. Miranda, Maarten Sap, Malia Morgan, Michael Schmitz, Michal Guerquin, Michael Wilson, Regan Huff, Ro-nan Le Bras, Rui Xin, Rulin Shao, Sam Skjons-berg, Shannon Zejiang Shen, Shuyue Stella Li, Tucker Wilde, Valentina Pyatkin, Will Merrill, Yapei Chang, Yuling Gu, Zhiyuan Zeng, Ashish Sabharwal, Luke Zettlemoyer, Pang Wei Koh, Ali Farhadi, Noah A. Smith, and Hannaneh Hajishirzi. 2025. Olmo 3. arXiv preprint ,arXiv:2512.13961. Byron C. Wallace, Sayantan Saha, Frank Soboczen-ski, and Iain J. Marshall. 2021. Generating (Fac-tual?) Narrative Summaries of RCTs: Experi-ments with Neural Multi-Document Summariza-tion. In AMIA Summits on Translational Science Proceedings .Qianli Wang, Nils Feldhus, Pepa Atanasova, Fedor Splitt, Simon Ostermann, Sebastian Möller, and Vera Schmitt. 2026. Can large language models still explain themselves? investigating the im-pact of quantization on self-explanations. arXiv preprint , arXiv:2601.00282. Laura Weidinger, Jonathan Uesato, Maribeth Rauh, Conor Griffin, Po-Sen Huang, John Mellor, Amelia Glaese, Myra Cheng, Borja Balle, Atoosa Kasirzadeh, Courtney Biles, Sasha Brown, Zac Kenton, Will Hawkins, Tom Steple-ton, Abeba Birhane, Lisa Anne Hendricks, Laura Rimell, William Isaac, Julia Haas, Sean Legas-sick, Geoffrey Irving, and Iason Gabriel. 2022. Taxonomy of risks posed by language models. In Proceedings of the 2022 ACM Conference on Fairness, Accountability, and Transparency ,FAccT ’22, page 214–229, New York, NY, USA. Association for Computing Machinery. Miles Williams, George Chrysostomou, and Niko-laos Aletras. 2025. Self-calibration for language model quantization and pruning. In Proceedings of the 2025 Conference of the Nations of the Americas Chapter of the Association for Com-putational Linguistics: Human Language Tech-nologies (Volume 1: Long Papers) , pages 10149– 10167, Albuquerque, New Mexico. Association for Computational Linguistics. Miles Williams, George Chrysostomou, Vi-tor Amancio Jeronymo, and Nikolaos Aletras. 2026. Compressing language models for spe-cialized domains. In Proceedings of the 19th Conference of the European Chapter of the Asso-ciation for Computational Linguistics (Volume 1: Long Papers) , pages 7393–7415, Rabat, Mo-rocco. Association for Computational Linguis-tics. Thomas Wolf, Lysandre Debut, Victor Sanh, Julien Chaumond, Clement Delangue, Anthony Moi, Pierric Cistac, Tim Rault, Remi Louf, Morgan Funtowicz, Joe Davison, Sam Shleifer, Patrick von Platen, Clara Ma, Yacine Jernite, Julien Plu, Canwen Xu, Teven Le Scao, Sylvain Gugger, Mariama Drame, Quentin Lhoest, and Alexan-der Rush. 2020. Transformers: State-of-the-art natural language processing. In Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing: System Demon-strations , pages 38–45, Online. Association for Computational Linguistics. An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, Chu-jie Zheng, Dayiheng Liu, Fan Zhou, Fei Huang, Feng Hu, Hao Ge, Haoran Wei, Huan Lin, Jia-long Tang, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxi Yang, Jing Zhou, Jingren Zhou, Junyang Lin, Kai Dang, Ke-qin Bao, Kexin Yang, Le Yu, Lianghao Deng, Mei Li, Mingfeng Xue, Mingze Li, Pei Zhang, Peng Wang, Qin Zhu, Rui Men, Ruize Gao, Shixuan Liu, Shuang Luo, Tianhao Li, Tianyi Tang, Wenbiao Yin, Xingzhang Ren, Xinyu Wang, Xinyu Zhang, Xuancheng Ren, Yang Fan, Yang Su, Yichang Zhang, Yinger Zhang, Yu Wan, Yuqiong Liu, Zekun Wang, Zeyu Cui, Zhenru Zhang, Zhipeng Zhou, and Zihan Qiu. 2025a. Qwen3 technical report. arXiv preprint ,arXiv:2505.09388. Cheng Yang, Yang Sui, Jinqi Xiao, Lingyi Huang, Yu Gong, Yuanlin Duan, Wenqi Jia, Miao Yin, Yu Cheng, and Bo Yuan. 2024. MoE-i 2: Com-pressing mixture of experts models through inter-expert pruning and intra-expert low-rank decom-position. In Findings of the Association for Computational Linguistics: EMNLP 2024 , pages 10456–10466, Miami, Florida, USA. Associa-tion for Computational Linguistics. Jinluan Yang, Dingnan Jin, Anke Tang, Li Shen, Didi Zhu, Zhengyu Chen, Ziyu Zhao, Daixin Wang, Qing Cui, Zhiqiang Zhang, Jun Zhou, Fei Wu, and Kun Kuang. 2025b. Mix data or merge models? balancing the helpfulness, honesty, and harmlessness of large language model via model merging. In Advances in Neural Information Processing Systems , volume 38, pages 112467– 112496. Curran Associates, Inc. Yuping Yuan, Zhao You, Shulin Feng, Dan Su, Yanchun Liang, Xiaohu Shi, and Dong Yu. 2023. Compressed MoE ASR Model Based on Knowl-edge Distillation and Quantization. In Proceed-ings of the 24th Annual Conference of the In-ternational Speech Communication Association ,pages 3337–3341. Tianyi Zhang, Varsha Kishore, Felix Wu, Kilian Q. Weinberger, and Yoav Artzi. 2020. BERTScore: Evaluating text generation with BERT. In Pro-ceedings of the Eighth International Conference on Learning Representations .Zeliang Zhang, Xiaodong Liu, Hao Cheng, Chen-liang Xu, and Jianfeng Gao. 2025. Diversifying the expert knowledge for task-agnostic pruning in sparse mixture-of-experts. In Findings of the Association for Computational Linguistics: ACL 2025 , pages 86–102, Vienna, Austria. Associa-tion for Computational Linguistics. Lianmin Zheng, Wei-Lin Chiang, Ying Sheng, Siyuan Zhuang, Zhanghao Wu, Yonghao Zhuang, Zi Lin, Zhuohan Li, Dacheng Li, Eric Xing, Hao Zhang, Joseph E. Gonzalez, and Ion Stoica. 2023. Judging LLM-as-a-judge with MT-bench and chatbot arena. In Proceedings of the Thirty-seventh Conference on Neural Informa-tion Processing Systems Datasets and Bench-marks Track .Jeffrey Zhou, Tianjian Lu, Swaroop Mishra, Sid-dhartha Brahma, Sujoy Basu, Yi Luan, Denny Zhou, and Le Hou. 2023. Instruction-following evaluation for large language models. arXiv preprint , arXiv:2311.07911. Yixiao Zhou, Ziyu Zhao, Dongzhou Cheng, Zhil-iang Wu, Jie Gui, Yi Yang, Fei Wu, Yu Cheng, and Hehe Fan. 2025. Dropping experts, re-combining neurons: Retraining-free pruning for sparse mixture-of-experts LLMs. In Findings of the Association for Computational Linguistics: EMNLP 2025 , pages 15169–15186, Suzhou, China. Association for Computational Linguis-tics. A Implementation Details 
+
+Software. We utilize Hugging Face (HF) datasets (Lhoest et al., 2021, v3.6.0) for data preprocessing, alongside HF transformers (Wolf et al., 2020, v5.5.4), FlashAttention-2 (Dao, 2024, v2.7.4), and PyTorch (Ansel et al., 2024, v2.10.0) for the pruning framework. We employ lm-evaluation-harness (Gao et al., 2023, v0.4.10) for IFEval, GSM8K, HumanEval, and MMLU evalu-ation. For MedHALT, we use the official repos-itories (Pal et al., 2023, Commit: bd4408a). 5
+
+For HaluEval, we adopt the dataset from the official HF repository. 6 For RCT, we obtain the dataset from the official repository (Wallace et al., 2021, Commit: de10c27). 7 Similarly, for Multi-News+, we load the dataset from the official repository (Choi et al., 2024, Commit: e347c8e). 8 Due to API cost constraints during LLM-as-a-Judge evaluation, we randomly sub-sample 50 documents from the Multi-News+ test set for our evaluation. For MedINST, we exe-cute the official script (Han et al., 2024, Commit: dc13b2b). 9 For absolute judgment, we leverage the pre-configured HallucinationMetric of DeepE-val (Ip and Vongthongsri, 2026, v3.9.6). Infer-ence is executed using the vLLM (Kwon et al., 2023, v0.19.1) engine for faster inference. For post-training weight quantization analysis, we apply 4-bit GPTQ using the llmcompressor library (Red Hat AI and vLLM Project, 2024, v0.12.0). 
+
+Hardware. We use a single NVIDIA A100 80GB GPU with CUDA 12.9 for experiments. No-tably, the expert pruning process completes within 775 seconds (using the largest model: Qwen3.6 with the context-aware EASY-EP method) and in-troduces no substantial computational overhead. 
+
+Prompt Templates. We prioritize official prompt templates to maintain standardized evaluation con-ditions, while using custom templates only as re-quired. We use the default prompt templates for 
+
+> 5https://github.com/medhalt/medhalt/tree/ bd4408a16aff36626e934aa5b012edd9fa7b6194
+> 6https://huggingface.co/datasets/pminervini/ HaluEval
+> 7https://github.com/bwallace/ RCT-summarization-data/tree/ de10c2712873efa1733859f2d7113af60427d7b2
+> 8https://github.com/c-juhwan/multi_news_plus/ tree/e347c8eedb78a09b4971bc0011a8865e11dfafdb
+> 9https://github.com/aialt/MedINST/blob/ dc13b2be29cdaae01cddceb6e4134e7dc6df1134/ evaluation.py
+
+MultiMedQA, IFEval, GSM8K, HumanEval, and MMLU provided by lm-evaluation-harness. For MedINST, MedHALT, and HaluEval, we utilize their official prompt templates. For summarization tasks, including RCT and Multi-News+, we apply the custom prompt templates listed in Appendix B. For LLM-as-a-Judge and human evaluation, we employ the off-the-shelf DeepEval template for ab-solute judgment and a custom prompt based on Chrysostomou et al. (2024) for relative judgment; both are documented in Appendix B. 
+
+Hyperparameters. During evaluation, we re-strict the maximum sequence length to 4,096 to-kens and set the temperature parameter to 0.0, except for Multi-News+, which uses a sequence length of 8,192 tokens. We disable the thinking mode for Qwen3.6 and Nemotron3 and assign a low reasoning effort setting for GPT-OSS by default. For quantization, we employ a W4A16 quan-tization scheme (4-bit weights and 16-bit activa-tions) targeting all linear layers in the model. The language modeling head ( lm_head ) and the MoE gate/router layers ( gate and router parameters) are excluded from quantization and kept in bfloat16 precision. For calibration, we use the same calibra-tion set as in pruning (i.e., 128 randomly sampled instances from MedINST). 
+
+Human Evaluation Protocol. To validate the LLM-as-a-Judge evaluation framework, we con-duct a manual annotation study to compare LLM judgments with human annotations. We recruit three PhD student volunteers with experience in natural language processing and computer science. Because the evaluation protocol relies strictly on textual grounding, i.e., verifying whether statements in the generated summary are logically entailed by the provided source documents, rather than requiring external clinical diagnostic knowledge, these annotators are highly qualified to evaluate semantic alignment and omission errors. The human annotators are provided with the same instructions and prompt guidelines as the LLM judges (documented in Appendix B). Specifically, for absolute judgment, we ask the annotators to classify the summaries generated by the pruned models as either faithful or hallucinated. For relative judgment, they compare the summaries from the unpruned baseline against the pruned models across four dimensions (hallucinations, omissions, repetition, and semantic alignment). Both evaluations are conducted using only the provided source documents. The human evaluation is conducted on a subset of 30 randomly selected documents from the RCT and Multi-XScience datasets. The sample distribu-tion of these 30 evaluation cases across datasets, generator models, pruning methods, and pruning ratios is structured as follows: • Dataset Balance : 15 samples from RCT and 15 samples from Multi-XScience. • Generator Model Balance :
+
+– GPT-OSS : 8 samples (4 RCT, 4 Multi-XScience) 
+
+– Qwen3 : 7 samples (4 RCT, 3 Multi-XScience) 
+
+– Qwen3.6 : 7 samples (3 RCT, 4 Multi-XScience) 
+
+– Nemotron3 : 8 samples (4 RCT, 4 Multi-XScience) • Pruning Method Balance : 5 samples per pruning method, distributed evenly across all six approaches (Random, Frequency, Gate, EAN, EASY-EP, and REAP). • Pruning Ratio Balance :
+
+– Ratio 0.125: 4 samples 
+
+– Ratio 0.250: 4 samples 
+
+– Ratio 0.375: 5 samples 
+
+– Ratio 0.500: 4 samples 
+
+– Ratio 0.625: 4 samples 
+
+– Ratio 0.750: 5 samples 
+
+– Ratio 0.875: 4 samples All pruning ratios within each individual (dataset, generator model, pruning method) group are guar-anteed to be distinct for the selected samples to ensure a representative and unbiased distribution across the entire pruning range. 
+
+B Prompt Templates 
+
+RCT prompt template 
+
+> You are a medical evidence summarization assistant. Given a randomized controlled trial abstract, write a concise factual summary in 2-4 sentences. Do not include information that is not supported by the abstract. Source documents:
+> {source} Summary:
+
+Multi-News+ prompt template 
+
+> You are a news summarization assistant. Given documents from multiple news sources about the same event, write a concise factual summary in 2-4 sentences. Do not include information that is not supported by the source. Source documents: {source} Summary:
+
+Absolute judgment prompt template          
+
+> Given alist of factual alignments and contradictions, which highlights align-ment/contradictions between the ‘actual output’ and ‘contexts’, use it to provide a reason for the hallucination score CONCISELY. Note that the hallucination score ranges from 0 - 1, and the lower the better. ** IMPORTANT: Please make sure to only return in JSON format, with the ‘reason’ key providing the reason. Example JSON: {{ "reason": "The score is <hallucination_score> because <your_reason>." }} ** Factual Alignments: {factual_alignments} Contradictions: {contradictions} Hallucination Score: {score} JSON:
+
+Relative judgment prompt template 
+
+> You are an impartial evaluator. Compare Sum-mary A vs Summary B against the Source Doc-ument. Use ONLY the Source Document to judge sup-port. Do NOT use outside knowledge.
+
+Be strict about factual support. Answer these questions: Q1. Hallucinations: Which summary contains MORE hallucinations (unsupported content)? Q2. Omission: Which summary is missing MORE crucial information from the document? Q3. Repetition: Which summary contains MORE repetitive information? Q4. Alignment: Which summary is MORE semantically aligned with the source document? Return ONLY valid JSON with exactly these keys: - q1_hallucinations_more: "A" or "B" - q2_omission_more: "A" or "B" - q3_repetition_more: "A" or "B" - q4_alignment_more: "A" or "B" Rules: - You MUST choose ‘A’ or ‘B’ (no ties). - Keep outputs to JSON only (no markdown). Source Document: «<DOC {document} DOC»> Summary A: «<A {summary_a} A»> Summary B: «<B {summary_b} B»> C Supplementary Results 
+
+Dataset Overall Fleiss’ κ
+
+Multi-News .577 Multi-XScience .513 RCT .535 Table 4: Inter-annotator agreement (Fleiss’ κ) for abso-lute judgments among three LLMs. 
+
+Dataset Question Overall Fleiss’ κ
+
+Multi-News Q1: Hallucination .503 Q2: Omission .447 Q3: Repetition .285 Q4: Alignment .519 Multi-XScience Q1: Hallucination .484 Q2: Omission .336 Q3: Repetition .456 Q4: Alignment .555 RCT Q1: Hallucination .483 Q2: Omission .492 Q3: Repetition .370 Q4: Alignment .470 Table 5: Inter-annotator agreement (Fleiss’ κ) for rela-tive judgments among three LLMs. .00             
+
+> .05
+> .10
+> .15
+> .20
+> ROUGE-L
+> .50
+> .60
+> .70
+> .80
+> BERTScore
+> .00
+> .05
+> .10
+> .15
+> .20
+> ROUGE-L
+> .50
+> .60
+> .70
+> .80
+> BERTScore
+> .00
+> .05
+> .10
+> .15
+> .20
+> ROUGE-L
+> .50
+> .60
+> .70
+> .80
+> GPT-OSS
+> BERTScore
+> .00
+> .05
+> .10
+> .15
+> .20
+> .50
+> .60
+> .70
+> .80
+> .00
+> .05
+> .10
+> .15
+> .20
+> .50
+> .60
+> .70
+> .80
+> .00
+> .05
+> .10
+> .15
+> .20
+> .50
+> .60
+> .70
+> .80
+> Nemotron3
+> .00
+> .05
+> .10
+> .15
+> .20
+> .50
+> .60
+> .70
+> .80
+> .00
+> .05
+> .10
+> .15
+> .20
+> .50
+> .60
+> .70
+> .80
+> .00
+> .05
+> .10
+> .15
+> .20
+> .50
+> .60
+> .70
+> .80
+> Qwen3
+> .25 .50 .75
+> .00
+> .05
+> .10
+> .15
+> .20
+> .25 .50 .75
+> .50
+> .60
+> .70
+> .80
+> .25 .50 .75
+> .00
+> .05
+> .10
+> .15
+> .20
+> .25 .50 .75
+> .50
+> .60
+> .70
+> .80
+> .25 .50 .75
+> .00
+> .05
+> .10
+> .15
+> .20
+> .25 .50 .75
+> .50
+> .60
+> .70
+> .80
+> Qwen3.6
+
+RCT Multi-XScience Multi-News+ 
+
+Pruning ratio 
+
+> Random
+> Frequency
+> Gate
+> EAN
+> EASY-EP
+> REAP
+> Baseline (Source)
+
+Figure 7: Summarization performance across different pruning ratios and approaches. 
+
+Approach IFEval GSM8K HumanEval MMLU 
+
+> GPT-OSS
+
+Source .750 .056 .817 .843 Random .221 .008 .009 .015 .163 .135 .265 .130 
+
+Frequency .267 .001 .001 .001 .018 .009 .656 .006 
+
+Gate .251 .010 .007 .003 .012 .000 .660 .003 
+
+EAN .252 .003 .001 .002 .073 .006 .534 .015 
+
+EASY-EP .261 .007 .003 .003 .014 .004 .655 .006 
+
+REAP .260 .004 .005 .002 .012 .000 .656 .002 
+
+> Nemotron3
+
+Source .813 .879 .848 .723 Random .555 .034 .378 .040 .053 .039 .497 .021 
+
+Frequency .668 .019 .148 .011 .006 .000 .545 .001 
+
+Gate .683 .005 .159 .007 .010 .004 .552 .008 
+
+EAN .653 .015 .372 .031 .254 .029 .526 .003 
+
+EASY-EP .702 .015 .472 .022 .012 .006 .565 .007 
+
+REAP .689 .008 .441 .028 .006 .000 .565 .005 
+
+> Qwen3
+
+Source .806 .835 .939 .801 Random .424 .100 .320 .198 .021 .004 .437 .126 
+
+Frequency .578 .015 .547 .034 .000 .000 .569 .013 
+
+Gate .663 .016 .573 .066 .000 .000 .585 .005 
+
+EAN .717 .008 .836 .011 .882 .015 .559 .002 
+
+EASY-EP .779 .012 .692 .008 .014 .004 .668 .005 
+
+REAP .779 .003 .695 .006 .008 .004 .656 .003 
+
+> Qwen3.6
+
+Source .824 .880 .970 .814 Random .581 .084 .178 .200 .217 .057 .530 .104 
+
+Frequency .770 .004 .106 .047 .018 .006 .644 .020 
+
+Gate .773 .011 .128 .044 .008 .004 .642 .006 
+
+EAN .776 .021 .862 .010 .780 .012 .680 .013 
+
+EASY-EP .746 .015 .778 .027 .083 .009 .719 .008 
+
+REAP .774 .004 .766 .008 .039 .009 .663 .003 
+
+Table 6: Downstream performance on general-domain benchmarks (IFEval, GSM8K, HumanEval, and MMLU) at 50% expert pruning ratio. Scores that are better than Source are highlighted in green . The best and second-best approaches for each model family are in bold and underlined , respectively. Subscripts denote standard deviation across three seeds. Approach SUM MT QA NER NED RE COREF EE 
+
+> GPT-OSS
+
+Source .100 .585 .768 .538 .331 .342 .419 .290 Random .066 .011 .078 .042 .216 .255 .124 .025 .035 .005 .089 .059 .008 .006 .088 .039 
+
+Frequency .097 .000 .536 .004 .715 .008 .505 .007 .309 .009 .345 .024 .521 .060 .274 .017 
+
+Gate .096 .002 .531 .011 .738 .005 .507 .005 .313 .001 .358 .007 .492 .099 .283 .006 
+
+EAN .119 .001 .285 .022 .636 .003 .331 .007 .162 .000 .351 .010 .368 .044 .138 .005 
+
+EASY-EP .102 .003 .498 .028 .722 .009 .517 .006 .317 .009 .316 .030 .447 .045 .280 .016 
+
+REAP .103 .004 .485 .018 .726 .006 .516 .005 .317 .019 .317 .033 .459 .050 .283 .015 
+
+> Nemotron3
+
+Source .148 .515 .735 .445 .334 .384 .695 .244 Random .130 .007 .319 .013 .580 .068 .355 .009 .183 .007 .370 .016 .648 .020 .158 .031 
+
+Frequency .132 .001 .305 .037 .692 .005 .431 .003 .276 .004 .354 .006 .695 .045 .199 .004 
+
+Gate .136 .000 .375 .015 .686 .007 .434 .001 .286 .004 .366 .008 .698 .077 .228 .016 
+
+EAN .135 .002 .441 .017 .676 .008 .422 .003 .266 .004 .353 .012 .714 .050 .235 .010 
+
+EASY-EP .137 .003 .365 .064 .682 .006 .439 .002 .298 .002 .356 .007 .757 .012 .215 .002 
+
+REAP .139 .001 .435 .052 .684 .015 .438 .002 .296 .003 .382 .015 .751 .015 .236 .003 
+
+> Qwen3
+
+Source .115 .615 .663 .566 .407 .396 .802 .368 Random .114 .019 .371 .054 .603 .035 .366 .033 .154 .031 .366 .030 .729 .049 .202 .048 
+
+Frequency .118 .002 .450 .024 .597 .018 .529 .013 .347 .010 .393 .025 .747 .038 .336 .018 
+
+Gate .119 .001 .484 .003 .665 .025 .545 .001 .355 .012 .394 .014 .825 .003 .360 .003 
+
+EAN .132 .002 .442 .019 .663 .007 .555 .002 .271 .004 .370 .006 .793 .016 .355 .006 
+
+EASY-EP .114 .002 .499 .003 .752 .006 .575 .003 .410 .001 .382 .020 .823 .014 .368 .003 
+
+REAP .116 .002 .488 .004 .753 .002 .571 .001 .402 .006 .377 .008 .794 .017 .374 .005 
+
+> Qwen3.6
+
+Source .154 .624 .566 .714 .427 .479 .899 .304 Random .133 .012 .540 .009 .614 .066 .519 .016 .204 .038 .430 .021 .764 .099 .218 .065 
+
+Frequency .157 .001 .617 .003 .760 .015 .702 .006 .407 .012 .475 .018 .926 .018 .323 .007 
+
+Gate .154 .002 .617 .002 .653 .048 .704 .003 .423 .004 .494 .007 .928 .018 .322 .004 
+
+EAN .158 .003 .605 .009 .795 .005 .690 .007 .366 .009 .449 .002 .907 .004 .286 .019 
+
+EASY-EP .152 .003 .612 .007 .797 .011 .700 .018 .427 .018 .480 .017 .928 .014 .333 .010 
+
+REAP .154 .003 .617 .004 .595 .032 .710 .002 .437 .002 .499 .009 .887 .011 .341 .009 
+
+Table 7: Zero-shot performance on unseen MedINST downstream tasks. Scores that are better than Source are highlighted in green . The best and second-best adaptation approaches for each model family are indicated in bold 
+
+and underlined, respectively. Subscripts denote standard deviation across three seeds. Approach PMQA MQA4 MMCQA Anat CK CM MG PM CB 
+
+> GPT-OSS
+
+Source .688 .791 .653 .793 .834 .850 .940 .915 .944 Random .347 .260 .081 .042 .140 .089 .232 .137 .260 .168 .229 .110 .233 .150 .114 .042 .319 .211 
+
+Frequency .667 .011 .719 .014 .568 .004 .731 .033 .792 .004 .721 .027 .807 .015 .871 .007 .829 .041 
+
+Gate .682 .024 .732 .012 .569 .003 .689 .020 .794 .029 .707 .018 .827 .045 .881 .024 .808 .008 
+
+EAN .713 .004 .312 .011 .337 .002 .363 .013 .499 .008 .459 .022 .417 .038 .391 .009 .521 .032 
+
+EASY-EP .722 .016 .721 .005 .553 .004 .694 .031 .801 .014 .730 .003 .813 .023 .864 .025 .838 .016 
+
+REAP .717 .018 .705 .006 .552 .004 .719 .026 .777 .021 .730 .007 .813 .021 .864 .004 .833 .014 
+
+> Nemotron3
+
+Source .440 .636 .545 .704 .770 .717 .840 .831 .875 Random .479 .021 .364 .066 .348 .042 .410 .009 .513 .047 .499 .023 .507 .021 .506 .024 .507 .025 
+
+Frequency .381 .041 .510 .010 .436 .008 .580 .026 .657 .023 .640 .009 .767 .023 .713 .007 .653 .021 
+
+Gate .398 .026 .502 .021 .449 .005 .595 .011 .669 .034 .651 .033 .737 .021 .729 .006 .671 .011 
+
+EAN .609 .021 .434 .006 .404 .012 .479 .041 .575 .014 .559 .009 .723 .025 .614 .017 .667 .025 
+
+EASY-EP .397 .012 .532 .007 .472 .006 .607 .022 .709 .016 .682 .015 .747 .031 .745 .014 .713 .004 
+
+REAP .427 .031 .520 .004 .471 .003 .605 .004 .702 .007 .678 .009 .740 .026 .733 .011 .706 .034 
+
+> Qwen3
+
+Source .700 .761 .670 .778 .879 .821 .930 .890 .924 Random .599 .045 .359 .078 .360 .032 .378 .181 .454 .132 .432 .139 .420 .075 .415 .160 .463 .149 
+
+Frequency .661 .029 .645 .012 .553 .008 .709 .024 .779 .019 .701 .009 .817 .015 .786 .018 .889 .007 
+
+Gate .671 .013 .667 .017 .565 .014 .728 .017 .784 .023 .734 .010 .817 .015 .821 .024 .870 .011 
+
+EAN .633 .008 .432 .005 .398 .004 .393 .013 .591 .023 .563 .023 .593 .015 .569 .017 .632 .000 
+
+EASY-EP .695 .010 .744 .007 .646 .002 .773 .030 .835 .004 .782 .007 .870 .010 .880 .002 .917 .000 
+
+REAP .699 .010 .737 .003 .640 .002 .770 .020 .830 .008 .786 .006 .873 .015 .873 .004 .921 .004 
+
+> Qwen3.6
+
+Source .794 .620 .700 .874 .906 .838 .940 .614 .931 Random .759 .013 .208 .152 .317 .124 .469 .062 .625 .100 .528 .115 .580 .151 .315 .226 .604 .097 
+
+Frequency .789 .005 .681 .097 .657 .005 .812 .026 .848 .006 .800 .029 .927 .021 .787 .131 .907 .004 
+
+Gate .794 .002 .739 .019 .654 .007 .788 .019 .853 .008 .802 .020 .897 .015 .517 .142 .907 .011 
+
+EAN .796 .007 .506 .196 .319 .101 .669 .015 .745 .038 .748 .019 .783 .012 .751 .073 .859 .004 
+
+EASY-EP .789 .001 .822 .012 .675 .002 .835 .023 .863 .011 .813 .039 .903 .021 .926 .006 .914 .004 
+
+REAP .797 .002 .550 .057 .663 .005 .835 .015 .853 .010 .778 .038 .910 .020 .271 .061 .921 .008 
+
+Table 8: Downstream performance on biomedical multiple-choice and QA datasets. Scores that are better than Source are highlighted in green . The best and second-best adaptation approaches for each model family are indicated in bold and underlined, respectively. Subscripts denote standard deviation across three seeds.

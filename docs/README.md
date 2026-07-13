@@ -6,92 +6,65 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-06-14 ~ 2026-07-13
-- 运行时间：2026-07-13 13:47:06 UTC
+- 最新运行日期：2026-07-13
+- 运行时间：2026-07-13 20:13:03 UTC
 - 运行状态：成功
-- 本次总论文数：24
-- 精读区：13
-- 速读区：11
+- 本次总论文数：15
+- 精读区：6
+- 速读区：9
 
 ### 今日简报（AI）
-本期日报聚焦MoE路由优化与机器人操控扩散模型，精读《SoftMoE》和《CoRDE》均获9.0高分。最值得看的是混合专家模型的可微分路由机制，以及利用概念先验驱动扩散模型实现机器人结构泛化。建议优先精读《SoftMoE》理解软路由原理，再结合速读中关于MoE剪枝与初始化的工作（如《SPRI》《几何分析》）深化认识。
-- 详情：[/20260614-20260713/README](/20260614-20260713/README)
+今日精选15篇论文，重点研究了6篇，其中《TriRoute》与《Communication-Aware Placement and Pruning》分别以10分和9分高居精读榜首。最值得关注的是统一路由学习方案（TriRoute）和面向MoE推理的通信感知剪枝与放置策略，两者均致力于提升混合专家模型的效率。建议读者优先精读这两篇高分论文，深入理解其自适应路由与资源分配机制。
+- 详情：[/202607/13/README](/202607/13/README)
 
 ### 精读区论文标签
-1. [SoftMoE: Soft Differentiable Routing for Mixture-of-Experts in LLMs](/20260614-20260713/2606.17952v1-softmoe-soft-differentiable-routing-for-mixture-of-experts-in-llms)  
+1. [TriRoute: Unified Learned Routing for Joint Adaptive Attention, Experts, and KV-Cache Allocation](/202607/13/2607.06601v1-triroute-unified-learned-routing-for-joint-adaptive-attention-experts-and-kv-cache-allocation)  
+   标签：评分：10.0/10、query:moe-special
+   evidence：统一学习路由用于MoE专家选择
+2. [Communication-Aware Placement and Pruning for Efficient Mixture-of-Experts Inference](/202607/13/2607.05116v1-communication-aware-placement-and-pruning-for-efficient-mixture-of-experts-inference)  
    标签：评分：9.0/10、query:moe-special
-   evidence：MoE的软可微分路由
-2. [CoRDE: Concept-Prior Routed Diffusion Experts for Structural Generalization in Robot Manipulation](/20260614-20260713/2606.21935v1-corde-concept-prior-routed-diffusion-experts-for-structural-generalization-in-robot-manipulation)  
+   evidence：专注于MoE推理中的专家放置与剪枝，直接涉及专家选择
+3. [NEST: Tackling Dataset-Level Distribution Shifts via Regime-Oriented Mixture-of-Experts](/202607/13/2607.06607v1-nest-tackling-dataset-level-distribution-shifts-via-regime-oriented-mixture-of-experts)  
    标签：评分：9.0/10、query:moe-special
-   evidence：基于概念先验的路由避免扩散专家路由坍缩
-3. [How Modular Is a Frontier Mixture-of-Experts? A Pre-registered Causal Test in Which Apparent Expert Modularity Mostly Dissolves](/20260614-20260713/2606.25092v1-how-modular-is-a-frontier-mixture-of-experts-a-pre-registered-causal-test-in-which-apparent-expert-modularity-mostly-dissolves)  
+   evidence：提出基于状态的混合专家架构
+4. [ProMoE-FL: Prototype-conditioned Mixture of Experts for Multimodal Federated Learning with Missing Modalities](/202607/13/2607.06633v1-promoe-fl-prototype-conditioned-mixture-of-experts-for-multimodal-federated-learning-with-missing-modalities)  
    标签：评分：9.0/10、query:moe-special
-   evidence：对专家模块性和专业化的因果测试
-4. [Learning Subset-Shared Invariances for Domain Generalization with Mixture-of-Experts](/20260614-20260713/2606.25665v1-learning-subset-shared-invariances-for-domain-generalization-with-mixture-of-experts)  
+   evidence：原型条件混合专家在多模态联邦学习中的应用
+5. [It Takes a MAESTRO To Prune Bad Experts](/202607/13/2607.08601v1-it-takes-a-maestro-to-prune-bad-experts)  
    标签：评分：9.0/10、query:moe-special
-   evidence：使用混合专家架构学习子集共享不变性，实现专家专业化
-5. [SARA: Unlocking Multilingual Knowledge in Mixture-of-Experts via Semantically Anchored Routing Alignment](/20260614-20260713/2606.25821v1-sara-unlocking-multilingual-knowledge-in-mixture-of-experts-via-semantically-anchored-routing-alignment)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：跨语言专家专业化的路由对齐方法
-6. [Fisher-Routed Mixture of Experts for Federated Class-Incremental Learning](/20260614-20260713/2606.28835v1-fisher-routed-mixture-of-experts-for-federated-class-incremental-learning)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：联邦类增量学习中的自适应专家专业化与Fisher路由
-7. [TF-MoE: Time-Frequency Mixture-of-Experts for Efficient Speech Separation](/20260614-20260713/2606.29575v2-tf-moe-time-frequency-mixture-of-experts-for-efficient-speech-separation)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：时间和频率维度的动态专家专业化
-8. [Does Role Specialization Matter for Explanation Faithfulness in Mixture-of-Experts?](/20260614-20260713/2606.29613v1-does-role-specialization-matter-for-explanation-faithfulness-in-mixture-of-experts)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：角色专业化及其对MoE解释忠实性的影响
-9. [Residual-Guided Expert Specialization for Incomplete Multimodal Learning](/20260614-20260713/2606.30355v1-residual-guided-expert-specialization-for-incomplete-multimodal-learning)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：基于残差引导的专家专业化用于不完整多模态学习
-10. [Learning to Select, Not Relearn: Hard-Routed Mixtures of Reasoning LoRAs](/20260614-20260713/2606.31413v1-learning-to-select-not-relearn-hard-routed-mixtures-of-reasoning-loras)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：推理LoRA专家的硬路由选择
-11. [Generic Expert Coverage for Pruning SparseMixture-of-Experts Language Models](/20260614-20260713/2607.01710v1-generic-expert-coverage-for-pruning-sparsemixture-of-experts-language-models)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：稀疏MoE专家剪枝方法
-12. [RoME: Robust Mixture of Low-Rank Experts against Multiple Adversarial Perturbations](/20260614-20260713/2607.06109v1-rome-robust-mixture-of-low-rank-experts-against-multiple-adversarial-perturbations)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：低秩专家混合增强对抗鲁棒性，解决专家专业化
-13. [On the Design of Mixture-of-Experts for Dynamic Gaussian Splatting](/20260614-20260713/2607.08250v1-on-the-design-of-mixture-of-experts-for-dynamic-gaussian-splatting)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：利用混合专家实现多变形建模以重建动态3D场景
+   evidence：使用马尔可夫链路由分析进行MoE专家结构剪枝
+6. [BrownoutMoE: Structure-Aware Expert Grouping for Efficient and Accurate LLM Web-based Services](/202607/13/2607.04164v1-brownoutmoe-structure-aware-expert-grouping-for-efficient-and-accurate-llm-web-based-services)  
+   标签：评分：8.0/10、query:moe-special
+   evidence：提出BrownoutMoE，通过结构感知的专家分组来优化稀疏专家激活的MoE推理效率
 
 ### 速读区论文标签
-1. [How to Score Experts for One-Shot MoE Expert Pruning: A Unified Formulation and Selection Principle](/20260614-20260713/2606.15716v1-how-to-score-experts-for-one-shot-moe-expert-pruning-a-unified-formulation-and-selection-principle)  
+1. [GeMoE: Gating Entropy is All You Need for Uncertainty-aware Adaptive Routing in MoE-based Large Vision-Language Models](/202607/13/2606.26287v1-gemoe-gating-entropy-is-all-you-need-for-uncertainty-aware-adaptive-routing-in-moe-based-large-vision-language-models)  
    标签：评分：8.0/10、query:moe-special
-   evidence：统一的一步专家剪枝准则公式
-2. [SPRI: SVD-Partitioned Residual Initialization for Data-Constrained MoE Upcycling](/20260614-20260713/2606.16456v1-spri-svd-partitioned-residual-initialization-for-data-constrained-moe-upcycling)  
+   evidence：基于门控熵的不确定性感知自适应路由
+2. [FRAME: Learning the Adaptation Domain with a Mixture of Fractional-Fourier Experts](/202607/13/2607.00162v1-frame-learning-the-adaptation-domain-with-a-mixture-of-fractional-fourier-experts)  
    标签：评分：8.0/10、query:moe-special
-   evidence：SVD分区残差初始化提升MoE上循环中的专家多样性
-3. [Geometric and Stochastic Analysis of Discontinuities in Sparse Mixture-of-Experts](/20260614-20260713/2606.19036v1-geometric-and-stochastic-analysis-of-discontinuities-in-sparse-mixture-of-experts)  
+   evidence：每个专家学习可分数阶傅里叶变换的混合专家适配器，促进专业化
+3. [On the Utility and Factual Reliability of Pruned Mixture-of-Experts Models in the Biomedical Domain](/202607/13/2607.01444v1-on-the-utility-and-factual-reliability-of-pruned-mixture-of-experts-models-in-the-biomedical-domain)  
    标签：评分：8.0/10、query:moe-special
-   evidence：对Top-k专家选择导致的不连续性进行几何和随机分析
-4. [Grouped Query Experts: Mixture-of-Experts on GQA Self-Attention](/20260614-20260713/2606.20945v2-grouped-query-experts-mixture-of-experts-on-gqa-self-attention)  
+   evidence：研究专家剪枝对生物医学MoE模型多样性与可靠性的影响
+4. [H-SAGE: Holistic Speaker-Aware Guided Experts for MoE-based Multi-Talker ASR](/202607/13/2607.01566v1-h-sage-holistic-speaker-aware-guided-experts-for-moe-based-multi-talker-asr)  
    标签：评分：8.0/10、query:moe-special
-   evidence：自注意力中查询头专家路由的MoE层
-5. [MoECa: Aligning Feature Reuse with Expert Decomposition in Diffusion Transformers](/20260614-20260713/2606.15615v1-moeca-aligning-feature-reuse-with-expert-decomposition-in-diffusion-transformers)  
+   evidence：基于MoE的语音识别中说话人感知引导专家与路由
+5. [EPnG: Adaptive Expert Prune-and-Grow for Parameter-Efficient MoE Fine-tuning](/202607/13/2607.01789v1-epng-adaptive-expert-prune-and-grow-for-parameter-efficient-moe-fine-tuning)  
+   标签：评分：8.0/10、query:moe-special
+   evidence：基于路由器门概率的专家重要性进行剪枝与扩展
+6. [WPG-MoE: Weak-Prior-Guided Dense Mixture-of-Experts for User-Level Social Media Depression Detection](/202607/13/2607.04350v1-wpg-moe-weak-prior-guided-dense-mixture-of-experts-for-user-level-social-media-depression-detection)  
+   标签：评分：8.0/10、query:moe-special
+   evidence：提出WPG-MoE，一个用于用户级抑郁症检测的密集混合专家框架
+7. [Mixture of Enhanced-View Experts for Multi-Query Vehicle ReID and A Large-Scale Benchmark](/202607/13/2607.08085v1-mixture-of-enhanced-view-experts-for-multi-query-vehicle-reid-and-a-large-scale-benchmark)  
+   标签：评分：8.0/10、query:moe-special
+   evidence：提出了一种名为EV-MoE的混合专家模型
+8. [SpaR3D-MoE: Adaptive 3D Spatial Reasoning from Sparse Views Meets Geometry-Inductive Mixture-of-Experts](/202607/13/2607.06620v1-spar3d-moe-adaptive-3d-spatial-reasoning-from-sparse-views-meets-geometry-inductive-mixture-of-experts)  
    标签：评分：7.0/10、query:moe-special
-   evidence：DiT-MoE中专家分支级别的特征重用
-6. [Conflict-Aware Federated Fine-Tuning of Large Language Models with Mixture-of-Experts](/20260614-20260713/2606.15625v1-conflict-aware-federated-fine-tuning-of-large-language-models-with-mixture-of-experts)  
-   标签：评分：7.0/10、query:moe-special
-   evidence：联邦MoE中数据异构导致专家优化冲突
-7. [Attribution-Guided and Coverage-Maximized Pruning for Structural MoE Compression](/20260614-20260713/2606.18304v1-attribution-guided-and-coverage-maximized-pruning-for-structural-moe-compression)  
-   标签：评分：7.0/10、query:moe-special
-   evidence：结构剪枝分析专家通道重要性
-8. [Toward Calibrated Mixture-of-Experts Under Distribution Shift](/20260614-20260713/2606.20544v1-toward-calibrated-mixture-of-experts-under-distribution-shift)  
-   标签：评分：7.0/10、query:moe-special
-   evidence：研究分布偏移下路由机制与专家校准的交互
-9. [Tying the Loop -- Tied Expert Layers in Mixture-of-Experts Language Models](/20260614-20260713/2606.16825v1-tying-the-loop----tied-expert-layers-in-mixture-of-experts-language-models)  
+   evidence：提出几何归纳混合专家用于3D空间推理
+9. [SHAP-Weighted Cross-Modal Expert Fusion for Emotion and Sentiment Recognition: Evidence and Limits](/202607/13/2607.08573v1-shap-weighted-cross-modal-expert-fusion-for-emotion-and-sentiment-recognition-evidence-and-limits)  
    标签：评分：6.0/10、query:moe-special
-   evidence：在MoE语言模型中跨层共享专家参数
-10. [MODE: Modality-Decomposed Expert-Level Mixed-Precision Quantization for MoE Multimodal LLMs](/20260614-20260713/2606.17118v1-mode-modality-decomposed-expert-level-mixed-precision-quantization-for-moe-multimodal-llms)  
-   标签：评分：6.0/10、query:moe-special
-   evidence：多模态MoE量化中的专家重要性估计
-11. [Systematic Exploration of 4-Expert Heterogeneous Mixture-of-Experts via Automated Pipeline Search](/20260614-20260713/2606.23739v1-systematic-exploration-of-4-expert-heterogeneous-mixture-of-experts-via-automated-pipeline-search)  
-   标签：评分：6.0/10、query:moe-special
-   evidence：异构MoE架构的自动搜索
+   evidence：基于SHAP权重的树状混合专家融合
 
 
 <div class="dpr-home-promo-card">

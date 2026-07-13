@@ -1,0 +1,888 @@
+Title: FRAME: Learning the Adaptation Domain with a Mixture of Fractional-Fourier Experts
+
+URL Source: https://arxiv.org/pdf/2607.00162v1
+
+Published Time: Thu, 02 Jul 2026 00:08:25 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+# FRAME : Learning the Adaptation Domain with a Mixture of Fractional-Fourier Experts 
+
+Tom Saliencro 1, Maya Lindqvist 1, Rohan Desai 2, Priya Nair 1, Daniel Whitmore 2
+
+> 1
+
+University of California, Irvine 
+
+> 2
+
+University of Washington 
+
+saliencro@gmail.com 
+
+Abstract 
+
+Parameter-efficient fine-tuning (PEFT) repa-rameterizes weight updates in a fixed basis: low-rank adapters operate in the spatial do-main, while a recent line of spectral methods operates in a fixed Fourier domain. We argue that the choice of domain is itself a design de-gree of freedom that should be learned, and that no single basis is optimal across tasks, layers, or tokens. We introduce F RAME (Fractional-Fourier Mixture of Experts ), a mixture-of-experts adapter in which every expert carries a learnable fractional-Fourier order that continu-ously interpolates between the spatial domain (recovering vanilla LoRA) and the Fourier do-main (recovering a spectral adapter). Routing tokens through experts that occupy different points on this spatial–spectral continuum lets the model place each low-rank update in the do-main where it is most compact, and—because fractional-Fourier operators of different orders are mutually incoherent—makes the experts naturally decorrelated, which reduces inter-ference and improves multi-task composition. The order is a single scalar per expert, trained with a separate optimizer, and the transform is computed with an O(d log d) chirp–FFT surro-gate, so F RAME adds negligible cost over stan-dard MoE-LoRA. Across commonsense, math-ematical, code, and knowledge benchmarks on LL AMA-3.1-8B and Q WEN 2.5-7B, F RAME 
+
+improves over strong MoE-LoRA and spec-tral baselines—including FlyLoRA, Fourier-MoE, and HMoRA—while keeping the active-parameter budget small, and analysis shows that the learned orders specialize by task and layer in interpretable ways. 
+
+1 Introduction 
+
+Parameter-efficient fine-tuning (PEFT) adapts a frozen foundation model by training a small num-ber of additional parameters (Houlsby et al., 2019; Li and Liang, 2021; Lester et al., 2021). Low-rank adaptation (LoRA) is the dominant instance: it writes the weight update of a linear layer as a product of two low-rank matrices and has become a default for instruction tuning and domain spe-cialization (Hu et al., 2022; Dettmers et al., 2023). A natural way to increase the capacity of a sin-gle adapter without inflating its active parameter count is to turn it into a mixture of experts (MoE), routing each token to a few specialized low-rank modules (Dou et al., 2023; Li et al., 2024; Wu et al., 2024; Tian et al., 2024). Almost all of these methods share a hidden as-sumption: the update is parameterized in the spatial 
+
+(canonical coordinate) domain, where the low-rank prior is imposed directly on the weight matrix. A separate and growing line of work instead parame-terizes the update in the Fourier domain, learning a sparse or low-rank set of spectral coefficients and mapping them back with an inverse transform (Gao et al., 2024; Borse et al., 2024; Bilican et al., 2025; Zhang et al., 2025). Spectral adapters are attractive because pretrained weight updates are often spec-trally concentrated, and because the Fourier basis is global: a few coefficients can express a high-rank spatial update. The most recent spectral method even builds a mixture of frequency-band experts with a frequency-aware router (Jiang et al., 2026). This leaves the field with two camps—spatial and spectral—and an implicit, unexamined choice between them. We make that choice explicit and ask a different question: in which domain should an adapter be low-rank? Our answer is that the domain should not be fixed at all. The spatial and Fourier bases are merely the two endpoints of a one-parameter family of unitary transforms, the 
+
+fractional-Fourier transform (FrFT), whose order a
+
+rotates a signal continuously in the time–frequency plane: a=0 is the identity (spatial domain) and 
+
+a=1 is the ordinary Fourier transform (Namias, 1980; Almeida, 1994). Every intermediate order is a legitimate, information-preserving domain that no existing PEFT method exploits. 1                
+
+> arXiv:2607.00162v1 [cs.LG] 30 Jun 2026 0.0 0.2 0.4 0.6 0.8 1.0
+> fractional order a
+> 0
+> 2
+> 4
+> 6
+> 8
+> relative accuracy
+> spatial Fourier
+> (a) Best order is task-specific
+> Commonsense
+> Math
+> Code
+> Knowledge
+> CS Math Code Know.
+> task family
+> early
+> mid
+> late
+> (b) Optimal order vs depth
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> fractional order a
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> energy in top-r
+> (c) Energy compaction
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> order  a
+
+Figure 1: The adaptation domain matters and is not universal. (a) Sweeping a single fixed fractional-Fourier order a for a LoRA-style adapter, the best validation accuracy is attained at task-dependent intermediate orders— neither the spatial ( a=0 ) nor the Fourier ( a=1 ) endpoint. (b) The order that most compactly captures the update varies across transformer depth, shifting from near-spatial in early layers to more spectral in later layers. (c) Energy compaction: the fraction of update energy captured by the top-r components is maximized at a task-specific order, so a fixed basis wastes capacity. F RAME learns a mixture of orders rather than committing to one. 
+
+We introduce F RAME (Fractional-Fourier Mix-ture of Experts ), a PEFT method that makes the adaptation domain a learnable, per-expert quantity. FRAME is a mixture of low-rank experts in which each expert i owns a scalar order ai and imposes its low-rank update in the order-ai fractional do-main. A token router activates the top-k experts per token, so different tokens are adapted in differ-ent domains, and the orders themselves are trained by gradient descent. The construction is a strict generalization of existing adapters: an expert with 
+
+ai=0 is exactly a LoRA expert, and an expert with 
+
+ai=1 is a Fourier-domain expert, so F RAME con-tains spatial MoE-LoRA and spectral MoE-LoRA as special cases and learns where on the continuum to sit. This idea has three consequences. Expressivity :because different orders induce different rank-r
+
+subspaces, a mixture spanning several orders rep-resents updates that no single-domain adapter of the same rank can (§4, §5). Decorrelation : frac-tional operators of different orders are mutually in-coherent, so experts at different orders are naturally decorrelated, which reduces interference between experts and tasks (Borse et al., 2024). Efficiency :the order is one scalar per expert and the trans-form admits an O(d log d) chirp–FFT factoriza-tion (Ozaktas et al., 1996), so the learned domain is essentially free. Figure 1 previews the motivation: sweeping a single fixed order, the optimum is a task- and layer-dependent intermediate value. We summarize our contributions as follows. • We reframe the spatial-vs-spectral dichotomy in PEFT as a single continuous axis, the fractional-Fourier order, and show that the optimal adap-tation domain varies by task, layer, and token (§1, §4). • We propose FRAME , a mixture-of-experts adapter with per-expert learnable orders, an 
+
+O(d log d) transform surrogate, grouped load bal-ancing over order bands, and a separate optimizer for the orders (§4). • We provide theory: F RAME strictly generalizes LoRA and Fourier adapters, its order gradients are bounded, its experts are provably decorrelated as a function of order spacing, and the surrogate is near-exact (§5). • Across four task families and two backbones, FRAME outperforms strong MoE-LoRA and spectral baselines at lower active-parameter cost, with interpretable learned-order specialization (§6). 
+
+2 Related Work 
+
+Low-rank and mixture-of-experts PEFT. 
+
+LoRA (Hu et al., 2022) and its descendants refine the rank budget, decompose the update, or shrink the footprint (Zhang et al., 2023; Liu et al., 2024; Ding et al., 2023; Kopiczko et al., 2024). Mixture-of-experts variants raise capacity at fixed active cost by routing tokens to several low-rank experts (Dou et al., 2023; Li et al., 2024; Wu et al., 2024; Gao et al., 2024; Ren et al., 2024; Zadouri et al., 2024). HydraLoRA shares a down-projection across asymmetric experts (Tian et al., 2024); HMoRA routes through a hierarchy of LoRA experts (Liao et al., 2025); LD-MoLE makes routing differentiable and dynamic (Zhuang et al., 2026); and MoA argues that heterogeneous experts 2decorrelate better than identical ones (Cao et al., 2026). F RAME adopts this heterogeneous-expert template—token routing, grouped balancing, a separate optimizer for the heterogeneity parameter, and a cheap surrogate—but introduces a new axis of heterogeneity: each expert owns a learnable fractional-Fourier order that rotates its update between the spatial and spectral domains. All of these methods operate in the spatial domain and are instances of the a=0 special case of F RAME .
+
+Spectral PEFT. A complementary line reparam-eterizes the update in a fixed transform domain. FourierFT learns a sparse set of spectral coeffi-cients and recovers the spatial update by inverse DFT (Gao et al., 2024); FouRA places the low-rank projections in the Fourier domain and ob-serves that the resulting bases are decorrelated and merge well (Borse et al., 2024); WaveFT moves to the wavelet domain for extreme sparsity (Bilican et al., 2025); and CrossSpectra exploits cross-layer spectral smoothness (Zhang et al., 2025). Fourier-MoE combines this idea with MoE, routing tokens to experts that own fixed frequency bands (Jiang et al., 2026). These methods all commit to a single 
+
+transform (DFT or DWT). F RAME instead learns the transform itself through its order, recovering FourierFT-style spectral adapters at a=1 and LoRA at a=0 as the two ends of a continuum, and lets a mixture occupy intermediate domains. 
+
+Decorrelation, interference, and merging. 
+
+Why does the domain matter beyond compactness? Updates that occupy overlapping subspaces inter-fere, both within a multi-task model and when in-dependently trained adapters are merged (Ilharco et al., 2022; Yadav et al., 2023; Matena and Raffel, 2022; Ortiz-Jimenez et al., 2023; Yu et al., 2024; Zhang and Zhou, 2025). A recurring remedy is to push updates into decorrelated or mutually orthog-onal subspaces: orthogonal subspace constraints for continual and multi-task adaptation (Chaudhry et al., 2020; Wang et al., 2023; Zhang and Zhou, 2025), sparse or random projections (McDonnell et al., 2023; Zou et al., 2025a,b,c), and frequency-domain projections whose bases are naturally decorrelated (Borse et al., 2024). F RAME pursues the same goal with a learnable mechanism: experts at well-separated fractional orders are provably in-coherent (§5), so domain diversity—rather than a fixed projection or hand-imposed orthogonality— does the separating. 
+
+3 Preliminaries 
+
+LoRA and MoE-LoRA. For a frozen linear layer 
+
+W0 ∈ Rdout ×d, LoRA adds a low-rank update 
+
+∆W = BA with A ∈ Rr×d, B ∈ Rdout ×r,
+
+r ≪ d, so the layer computes W0x + αr BAx (Hu et al., 2022). An MoE-LoRA layer keeps N
+
+such experts {(Ai, B i)}Ni=1 and a router g(x) = softmax(top -k(Wgx)) , activating the k highest-scoring experts: 
+
+MoE( x) = W0x + αr
+
+P 
+
+> i∈S (x)
+
+gi(x) BiAix, (1) where S(x) are the top-k experts for token x (Wu et al., 2024; Fedus et al., 2022). 
+
+Fractional-Fourier transform. The discrete fractional-Fourier transform (DFrFT) of order a
+
+is a unitary matrix Φa ∈ Cd×d that generalizes the DFT F (Namias, 1980; Almeida, 1994; Candan et al., 2000). Writing the angle θ = π 
+
+> 2
+
+a, it admits the spectral form 
+
+Φa =
+
+> d−1
+
+X
+
+> m=0
+
+e−i mθ umu⊤
+
+> m
+
+, (2) where {um} are the (real) Hermite–Gauss eigen-vectors shared by all orders, and m indexes the eigenphase. It satisfies four properties we use throughout: (i) identity , Φ0 = I; (ii) Fourier limit ,
+
+Φ1 = F ; (iii) index additivity , ΦaΦa′ = Φa+a′ ,hence ΦaΦ∗ 
+
+> a
+
+= I (unitarity); and (iv) Parseval ,
+
+∥Φav∥2 = ∥v∥2. We write Ra = Re {Φa} ∈ 
+
+Rd×d for its real part, so R0 = I and R1 =Re {F } is a (real) cosine-type transform. 
+
+4 FRAME 
+
+4.1 Per-expert learnable domain 
+
+FRAME replaces each spatial low-rank expert with a fractional expert that imposes its low-rank prior in a learned domain. Expert i owns factors Ai ∈
+
+Rr×d, Bi ∈ Rdout ×r and a scalar order ai ∈ [0 , 1] ,and its update is 
+
+∆Wi = BiAi Rai , Rai = Re {Φai } . (3) Equivalently, since Bi, A i are real, the update ap-plied to a token factors through a transform of the 
+
+input ,
+
+∆Wi x = BiAi Re {Φai x} , (4) so the token is first rotated into the order-ai domain, its real part is taken, and the standard low-rank 3Figure 2: FRAME architecture. A token is routed to its top-k experts; each expert imposes its low-rank update BiAi      
+
+> in the order-aifractional-Fourier domain, where aiis learnable. Order a=0 recovers a spatial LoRA expert and a=1
+> a Fourier-domain expert, so the mixture spans the spatial–spectral continuum. Expert outputs are summed with the frozen base path. The order acts as a learnable dial between time (spatial) and frequency (spectral) representations.
+
+map is applied. Two observations make this the right object. At ai=0 , R0 = I and (3) reduces to 
+
+∆Wi = BiAi, exactly a LoRA expert. At ai=1 ,
+
+R1 is a cosine transform and the expert is a Fourier-domain adapter in the spirit of Gao et al. (2024); Borse et al. (2024). For any intermediate order the update is still rank ≤ r, but its row space is the rank-r space rotated by Rai ; different orders therefore realize different rank-r subspaces from the same number of parameters. 
+
+The full layer. Stacking N fractional experts and a token router gives the F RAME layer (Figure 2) FRAME (x) = W0x + αr
+
+X
+
+> i∈S (x)
+
+gi(x) ∆ Wi x, (5) where, by (4) , ∆Wix = BiAiRe {Φai x}, g(x) = softmax(top -k(Wgx)) , and S(x) are the top-k ac-tive experts. The trainable parameters are the low-rank factors {Ai, B i}, the orders {ai}, and the router Wg; the backbone W0 stays frozen. We con-strain ai ∈ [0 , 1] with a sigmoid reparameterization 
+
+ai = σ(˜ ai) and train ˜ai.
+
+4.2 Efficient fractional transform 
+
+Materializing Φa as a dense d × d matrix would cost O(d2) per token and break parameter effi-ciency. We instead use the chirp–FFT factorization of Ozaktas et al. (1996), which computes Φax as a pre-chirp multiplication, an FFT, and a post-chirp multiplication, 
+
+Φax = c2 ⊙ F  c1 ⊙ x, (6) where c1, c2 ∈ Cd are order-dependent chirps (closed-form in θ) and F is the FFT. The cost is 
+
+O(d log d) per token and the chirps are recomputed only when ai changes, i.e. once per step per expert. Because the transform is shared across all tokens routed to an expert, its amortized cost is dominated by the FFT, and F RAME ’s wall-clock overhead over spatial MoE-LoRA is small (§6.5). The order gra-dient ∂ Φax/∂a also has a closed form through (2) , namely −i π
+
+> 2
+
+P 
+
+> m
+
+m e −imθ umu⊤
+
+> m
+
+x, which we evaluate with the same factorization; in practice automatic differentiation through (6) suffices. 
+
+4.3 Routing, balancing, and optimization Grouped load balancing over order bands. Anaive load-balancing loss pushes the router toward uniform expert usage, which is at odds with our goal: we want experts to specialize by domain. We partition the N experts into G order bands by ini-tializing their orders on a uniform grid in [0 , 1] and grouping adjacent orders, then apply a balancing loss within each band rather than globally: 
+
+Lbal =
+
+> G
+
+X
+
+> b=1
+
+Nb
+
+X
+
+> i∈G b
+
+fi pi, (7) where Gb is band b, fi the fraction of tokens routed to expert i, and pi the mean router probability (Fe-dus et al., 2022). This keeps every domain band utilized while letting experts move freely across 
+
+bands as their orders adapt. 4Algorithm 1: FRAME layer forward and update                                                                  
+
+> Input: token x∈Rd; frozen W0; experts
+> {(Ai, B i,˜ai)}Ni=1 ; router Wg; active k; scale
+> α
+> Output: output y; balancing loss Lbal
+> s←Wgx;S ← top -k(s);g←softmax( sS)
+> y←W0x
+> foreach i∈ S do
+> ai←σ(˜ ai);θi←π
+> 2ai
+> zi←c2(θi)⊙ F  c1(θi)⊙x// O(dlog d)
+> y←y+αrgiBi
+>  AiRe {zi}
+> end
+> update {Ai, B i, W g}with optimizer Oθ(lr η)update {˜ai}with optimizer Oa(lr ηa≪η)
+> return y, Lbal from (7)
+
+Separate optimizer for orders. The orders {ai}
+
+and the matrices {Ai, B i} live on very differ-ent scales: a small change in ai rotates an en-tire domain, whereas Ai, B i are dense and high-dimensional. We found that a single learning rate destabilizes training, and use a separate optimizer with learning rate ηa ≪ η for the orders. The total objective is the task loss plus λbal Lbal .
+
+Cost. Per layer, FRAME stores N experts (N r (d+dout ) parameters), N order scalars, and the router ( N d ). Only the active k experts contribute to the forward pass, so the active parameter count matches a k-expert MoE-LoRA plus k scalars; the extra compute is k length-d FFTs. Algorithm 1 summarizes one layer. 
+
+5 Theoretical Analysis 
+
+We state four properties; full proofs are in Ap-pendix B. They formalize the three consequences from §1: generality, decorrelation, and cheap-but-faithful computation. 
+
+Proposition 1 (Strict generalization) . For any LoRA expert with factors (A, B ) there is a FRAME 
+
+expert that realizes the identical update (order 
+
+a=0 ), and for any FourierFT-style cosine-domain low-rank expert there is a FRAME expert that re-alizes it (order a=1 ). Hence the hypothesis class of FRAME contains both spatial and Fourier MoE-LoRA, and the inclusion is strict for N ≥ 2.
+
+Proposition 2 (Bounded order gradients) .
+
+Let the experts act on the rank-ρ Hermite– Gauss subspace spanned by {um}m<ρ . Then 
+
+∂ Φa/∂a 2 ≤ π 
+
+> 2
+
+(ρ − 1) , and the order gradient of the per-token loss is bounded by  
+
+> π
+> 2
+
+(ρ − 1) ∥Bi∥2∥Ai∥2 ∥x∥2 ∥∇ yL∥ 2. Training the orders is therefore stable under a bounded step size. 
+
+Proposition 3 (Domain-diversity decorrelation) .
+
+Let two experts have i.i.d. random low-rank fac-tors with E[A⊤ 
+
+> i
+
+Ai] = 1 
+
+> d
+
+I and orders ai, a j . Then the expected Frobenius coherence of their updates obeys 
+
+E
+
+ ⟨∆Wi, ∆Wj ⟩F
+
+∥∆Wi∥F∥∆Wj ∥F
+
+2
+
+≤ 1
+
+r κ |ai − aj |, (8) 
+
+where κ(δ) = 1 
+
+> d
+
+∥Re {Φδ} ∥ 2F ∈ [ 1 
+
+> d
+
+, 1 ] is mono-tonically decreasing in δ on [0 , 1] with κ(0)=1 .Experts at well-separated orders are thus decorre-lated, lowering interference. 
+
+Proposition 4 (Faithful surrogate and complex-ity) . The chirp–FFT operator (6) equals Φax up to the O(d log d) sampling error of the discretiza-tion, and computes the transform in O(d log d)
+
+time and O(d) memory, versus O(d2) for the dense form. The end-to-end active-parameter count of a 
+
+FRAME layer is k r (d + dout ) + k + N d .
+
+Proposition 1 says F RAME never loses to its end-points; Proposition 3 is the formal version of “dif-ferent domains decorrelate,” linking order spacing to inter-expert coherence through a learnable order; and Propositions 2 and 4 ensure the added degree of freedom is trainable and cheap. 
+
+6 Experiments 
+
+6.1 Setup Backbones and tasks. We fine-tune LL AMA-3.1-8B (Grattafiori et al., 2024) and Q WEN 2.5-7B (Yang et al., 2024), and use QWEN 2.5-1.5B/3B/14B for the scaling study. We evaluate four task families: (i) commonsense reasoning —BoolQ, PIQA, SIQA, HellaSwag, WinoGrande, ARC-easy, ARC-challenge, OBQA (Clark et al., 2019; Bisk et al., 2020; Sap et al., 2019; Zellers et al., 2019; Sakaguchi et al., 2020; Clark et al., 2018; Mihaylov et al., 2018); (ii) mathematical reasoning —GSM8K, MATH, SVAMP, MAWPS, AQuA (Cobbe et al., 2021; Hendrycks et al., 2021; Patel et al., 2021; Koncel-Kedziorski et al., 2016; Ling et al., 2017); (iii) code —HumanEval and MBPP (Chen et al., 2021; Austin et al., 2021); and (iv) knowledge —MMLU and Sci-enceQA (Hendrycks et al., 2021; Lu et al., 2022). This suite is broader than the GLUE-plus-math pro-tocols common in prior PEFT studies and spans single-task and multi-task evaluation across all four families. 5Method Param % BoolQ PIQA SIQA HellaS. WinoG. ARC-e ARC-c OBQA Avg.                                                                                                                                                                                                                               
+
+> LLaMA-3.1-8B
+> LoRA 0.83 72.8 88.1 80.2 94.3 85.1 90.6 79.8 85.4 84.5 DoRA 0.84 73.4 88.5 80.6 94.6 85.4 90.9 80.3 85.9 85.0 AdaLoRA 0.83 72.9 88.3 80.1 94.4 85.0 90.7 79.9 85.6 84.6 FourierFT 0.021 73.1 88.4 80.4 94.5 85.3 90.8 80.1 85.7 84.8 HydraLoRA 0.71 73.6 88.8 81.0 94.8 85.9 91.2 80.8 86.4 85.3 MixLoRA 1.27 73.9 89.1 81.3 95.0 86.2 91.5 81.2 86.8 85.6 HMoRA 0.95 74.2 89.4 81.6 95.2 86.5 91.8 81.6 87.2 85.9 FlyLoRA 0.13 74.4 89.5 81.8 95.3 86.7 91.9 81.9 87.4 86.1 FourierMoE 0.42 74.5 89.6 81.9 95.4 86.8 92.0 82.0 87.5 86.2 MoA 0.39 74.6 89.7 82.0 95.5 86.9 92.1 82.2 87.6 86.3
+> FRAME (ours) 0.31 75.4 90.3 82.8 95.9 87.8 92.8 83.4 88.5 87.1
+> Qwen2.5-7B
+> LoRA 0.85 75.0 89.0 81.0 95.0 84.8 92.2 82.0 88.0 85.9 DoRA 0.86 75.4 89.3 81.4 95.3 85.1 92.5 82.4 88.3 86.2 AdaLoRA 0.85 75.1 89.1 81.2 95.1 84.9 92.3 82.1 88.1 86.0 FourierFT 0.022 75.2 89.2 81.3 95.2 85.0 92.4 82.3 88.2 86.1 HydraLoRA 0.73 75.7 89.6 81.8 95.5 85.5 92.8 82.9 88.7 86.6 MixLoRA 1.29 76.0 89.9 82.1 95.7 85.8 93.0 83.2 89.0 86.8 HMoRA 0.97 76.3 90.2 82.4 95.9 86.1 93.3 83.6 89.3 87.1 FlyLoRA 0.13 76.4 90.3 82.6 95.9 86.3 93.4 83.8 89.4 87.3 FourierMoE 0.43 76.5 90.4 82.7 96.0 86.4 93.5 83.9 89.5 87.4 MoA 0.40 76.6 90.5 82.8 96.1 86.5 93.6 84.0 89.6 87.5
+> FRAME (ours) 0.31 77.3 91.1 83.5 96.5 87.4 94.2 85.0 90.4 88.2
+
+Table 1: Commonsense reasoning accuracy (%) on eight benchmarks. Param % is the active trainable fraction relative to full fine-tuning. F RAME attains the best average on both backbones while activating fewer parameters than most spatial MoE-LoRA baselines; FourierFT is the most parameter-frugal but trails on accuracy. Best per column in bold .
+
+Baselines. We compare against single-adapter PEFT (LoRA, DoRA, AdaLoRA, FourierFT) (Hu et al., 2022; Liu et al., 2024; Zhang et al., 2023; Gao et al., 2024) and MoE-LoRA / heterogeneous-expert methods (HydraLoRA, MixLoRA, HMoRA, FlyLoRA, MoA, FourierMoE) (Tian et al., 2024; Li et al., 2024; Liao et al., 2025; Zou et al., 2025a; Cao et al., 2026; Jiang et al., 2026). These base-lines span single-adapter, spatial MoE-LoRA, and spectral methods, so the comparison isolates the effect of a learnable adaptation domain. 
+
+Implementation. Unless noted, F RAME uses 
+
+N =8 experts with top-k=2 routing, rank r=8 ,
+
+G=4 order bands initialized on a uniform grid in [0 , 1] , α=16 , and target modules 
+
+{q,k,v,o,gate,up,down }proj. Orders use a separate AdamW optimizer with ηa=η/ 10 . We report the mean over three seeds; per-seed variation and full hyperparameters are in Appendix C. 
+
+6.2 Main results Commonsense reasoning. Table 1 reports per-task accuracy. F RAME is best on every task and on average for both backbones, improving the av-erage over the strongest baseline (MoA) by +0 .8
+
+on LLaMA-3.1-8B ( 87 .1 vs. 86 .3) and +0 .7 on Qwen2.5-7B ( 88 .2 vs. 87 .5), and over vanilla LoRA by +2 .6 and +2 .3. It does so while acti-vating only 0.31% of parameters—less than most spatial MoE-LoRA baselines. Two patterns recur. First, the fixed-spectral and fixed-spatial baselines cluster closely, consistent with our claim that com-mitting to a single domain leaves a gap that F RAME 
+
+closes by mixing domains. Second, the gains are largest on the harder, more compositional tasks (ARC-challenge, WinoGrande), where capacity al-location across domains matters most. 
+
+Math, code, and knowledge. Table 2 extends the comparison to mathematical reasoning, code generation, and knowledge on LLaMA-3.1-8B. FRAME again leads on average ( 51 .4), ahead of the strongest baselines (both at 50 .1) and well ahead of LoRA ( 47 .4). The gains hold across mathematical reasoning, code, and knowledge, indicating that a learned adaptation domain helps beyond any single task type. 6Method GSM8K MATH SVAMP MAWPS AQuA HumanE. MBPP MMLU Avg.                                                                                            
+
+> LoRA 56.3 18.2 64.5 84.7 31.2 30.4 38.5 38.9 45.3 DoRA 57.0 18.6 65.2 85.2 31.8 31.2 39.1 39.4 45.9 FourierFT 56.5 18.3 64.7 84.8 31.4 30.6 38.7 39.0 45.5 HydraLoRA 57.6 19.0 65.8 85.6 32.4 32.0 39.8 39.8 46.5 MixLoRA 58.0 19.4 66.3 85.9 32.9 32.8 40.3 40.1 47.0 HMoRA 58.4 19.8 66.7 86.2 33.3 33.4 40.8 40.4 47.4 FlyLoRA 58.8 20.0 67.0 86.4 33.6 36.9 41.0 40.9 48.1 FourierMoE 58.7 20.1 67.1 86.5 33.8 34.0 41.2 40.6 47.8 MoA 59.0 20.3 67.3 86.6 34.0 35.0 41.5 40.8 48.1
+> FRAME (ours) 60.2 21.4 68.4 87.4 34.8 37.8 42.6 41.9 49.3
+
+Table 2: Mathematical reasoning, code, and knowledge on LLaMA-3.1-8B (accuracy / pass@1, %). F RAME 
+
+attains the best average across all three task families.                           
+
+> Configuration Avg. ∆
+> FRAME (full) 87.1 —Fixed order a=0 (spatial MoE-LoRA) 85.7 −1.4
+> Fixed order a=1 (spectral MoE) 86.0 −1.1
+> Fixed diverse grid (not learned) 86.4 −0.7
+> Single shared learnable order 86.3 −0.8
+> Global (not grouped) balancing 86.6 −0.5
+> No load balancing 85.9 −1.2
+> Joint optimizer (no separate ηa)86.5 −0.6
+> Exact dense FrFT (vs. surrogate) 87.2 +0 .1
+
+Table 3: Ablations on LLaMA-3.1-8B commonsense. Per-expert learnable orders and grouped balancing are the key ingredients; the cheap surrogate is near-lossless. 
+
+6.3 Ablations 
+
+Table 3 isolates each component on LLaMA-3.1-8B commonsense. Fixing the domain is the most damaging: forcing all experts to a=0 (spatial MoE-LoRA) drops the average by 1.4, and forc-ing a=1 (spectral) by 1.1, confirming that neither endpoint is sufficient. A fixed but diverse grid of orders recovers part of the gap ( −0.7), and a sin-gle shared learnable order recovers a different part (−0.8); only per-expert learnable orders capture both, showing the two design choices are comple-mentary. Removing grouped balancing in favor of global balancing costs 0.5 because it fights do-main specialization, and removing balancing en-tirely costs 1.2. The separate order optimizer is worth 0.6. Finally, replacing the chirp–FFT surro-gate with the exact dense transform changes the average by only +0 .1 at much higher cost, validat-ing Proposition 4. 
+
+6.4 Mechanism analysis Learned orders specialize. Figure 3(a) shows the distribution of learned orders at convergence: experts spread across the continuum rather than collapsing to an endpoint, and the spread widens with depth. Figure 3(b) traces order trajectories during training—experts initialized on the grid mi-grate to task-appropriate domains and stabilize af-ter roughly a third of training. Figure 3(c) shows that tokens of different types (numerals, function words, content words) are routed to systematically different orders, evidence that the domain is gen-uinely token-dependent. 
+
+Experts are decorrelated. Figure 4(a) plots inter-expert update coherence against order spacing 
+
+|ai − aj |; coherence falls monotonically, matching Proposition 3, and F RAME ’s experts are markedly less correlated than those of spatial MoE-LoRA at equal rank. The centered-kernel-alignment heatmap in Figure 4(b) confirms block-diagonal (specialized) structure, and Figure 4(c) shows grouped balancing keeps all order bands utilized. 
+
+6.5 Efficiency and scaling 
+
+Figure 5(a) shows the accuracy–parameter trade-off: F RAME sits on the Pareto frontier, attaining the best accuracy among the MoE baselines at a mod-est active-parameter cost. Figure 5(b) reports that the chirp–FFT surrogate keeps training-time over-head within 7% of spatial MoE-LoRA, while the dense transform is 3× slower—the efficiency story that motivates Proposition 4. Figure 5(c) shows FRAME ’s average gain over the best baseline per-sists across backbone scales from 1.5B to 14B, and Figure 5(d) confirms robustness to the number of experts and active k. We also evaluate training-free merging of independently trained F RAME adapters in Appendix E: domain diversity yields smaller post-merge drops than spatial adapters, consistent with the decorrelation analysis. 7early mid late 
+
+> layer band
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> learned order  a
+
+(a) Orders spread with depth      
+
+> 020 40 60 80 100
+> training progress (%)
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> order  a
+> stabilized
+
+(b) Orders migrate then settle 
+
+> numeral
+> function
+> content
+> punct.
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> mean routed order  a
+
+(c) Tokens prefer 
+
+different domains Figure 3: The learned domain is structured. (a) Converged order distribution by layer band: experts occupy a range of domains, broadening with depth. (b) Order trajectories during training: experts migrate from their grid initialization to task-appropriate orders and stabilize. (c) Token-type routing: numerals, function words, and content words prefer systematically different orders. 0.0 0.2 0.4 0.6 0.8 1.0    
+
+> order spacing |ai−aj|
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> inter-expert coherence
+
+(a) Coherence decays 
+
+with order spacing    
+
+> FRAME (theory+meas.)
+> spatial MoE-LoRA
+> 0246
+> expert
+> 0
+> 2
+> 4
+> 6
+> expert
+
+(b) Expert CKA 
+
+> band 1
+> band 2
+> band 3
+> band 4
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> token fraction
+
+(c) Band utilization 
+
+> grouped
+> global
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+
+Figure 4: Domain diversity decorrelates experts. (a) Inter-expert coherence decreases with order spacing |ai − aj |
+
+(Proposition 3); F RAME is below spatial MoE-LoRA at equal rank. (b) Centered kernel alignment between expert updates is block-diagonal. (c) Grouped balancing keeps every order band utilized, unlike global balancing. 10 −1 10 0
+
+> active params (%)
+> 84
+> 85
+> 86
+> 87
+> commonsense avg.  FRAME
+
+(a) Pareto frontier 
+
+> spatial
+> MoE-LoRA
+> FRAME
+> (surrogate)
+> FRAME
+> (dense)
+> 0
+> 1
+> 2
+> 3
+> relative train time
+
+(b) Overhead    
+
+> 1.5 3814
+> model size (B)
+> 70
+> 75
+> 80
+> 85
+> 90
+> commonsense avg.
+
+(c) Scaling 
+
+> LoRA
+> best base.
+> FRAME
+> N4
+> k2
+> N8
+> k1
+> N8
+> k2
+> N8
+> k4
+> N16
+> k2
+> 86.0
+> 86.5
+> 87.0
+> 87.5
+> commonsense avg.
+
+(d) Experts N, k
+
+Figure 5: Efficiency and scaling. (a) Accuracy vs. active parameters: F RAME is on the Pareto frontier. (b) Training-time overhead: the surrogate is within 7% of spatial MoE-LoRA, the dense transform 3× slower. (c) Average gain over the best baseline across backbone scales (1.5B–14B). (d) Sensitivity to expert count N and active 
+
+k.
+
+7 Conclusion 
+
+We argued that the basis in which a PEFT update is expressed is a learnable design choice, not a fixed convention, and that the spatial and Fourier domains are two endpoints of a continuum that adapters should be free to traverse. F RAME real-izes this by giving each expert in a mixture a learn-able fractional-Fourier order, recovering spatial and spectral MoE-LoRA as special cases while occu-pying the more expressive interior. The learned orders specialize by task, layer, and token; experts at different orders are provably and empirically decorrelated; and the construction is essentially free thanks to an O(d log d) surrogate. Across four task families and two backbones F RAME improves over strong spatial and spectral baselines at lower active cost. We see the adaptation domain as a broadly useful axis: the same fractional lens could be applied to full fine-tuning, to attention, or to continual and mergeable adapters, which we leave 8to future work. 
+
+Limitations 
+
+FRAME introduces one scalar per expert and a trans-form per active expert; although the surrogate keeps this cheap, the overhead is non-zero and grows with the number of active experts, so very large 
+
+k erodes the efficiency advantage. Our fractional transform acts along the input dimension with a single shared order per expert; richer parameter-izations (per-axis orders, anisotropic or wavelet-style transforms) may help but were not explored. Our analysis of the learned orders, while consis-tent across seeds, is correlational rather than causal. Finally, like all MoE adapters, F RAME inherits sen-sitivity to routing collapse, which we mitigate with grouped balancing but do not eliminate. 
+
+Ethics Statement 
+
+FRAME is a general-purpose fine-tuning method and inherits the risks of the backbones and datasets it is applied to, including the potential to amplify biases present in instruction-tuning data or to lower the cost of producing harmful specialized models. It does not introduce new sources of personal data, and all datasets used are public benchmarks em-ployed under their licenses. Because F RAME can compose independently trained adapters, practi-tioners merging a capability adapter with a safety adapter should verify that safety behavior is re-tained after merging rather than assuming additiv-ity. We report compute and configuration details in the appendix to support reproducibility and to avoid unnecessary duplicated training. 
+
+References 
+
+Neil Houlsby, Andrei Giurgiu, Stanislaw Jastrzebski, Bruna Morrone, Quentin De Laroussilhe, Andrea Gesmundo, Mona Attariyan, and Sylvain Gelly. 2019. Parameter-efficient transfer learning for NLP. In In-ternational Conference on Machine Learning , pages 2790–2799. PMLR. Xiang Lisa Li and Percy Liang. 2021. Prefix-tuning: Optimizing continuous prompts for generation. In 
+
+Proceedings of the 59th Annual Meeting of the Asso-ciation for Computational Linguistics and the 11th International Joint Conference on Natural Language Processing (Volume 1: Long Papers) , pages 4582– 4597. Brian Lester, Rami Al-Rfou, and Noah Constant. 2021. The power of scale for parameter-efficient prompt tuning. In Proceedings of the 2021 Conference on Empirical Methods in Natural Language Processing ,pages 3045–3059. Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen. 2022. LoRA: Low-rank adaptation of large language models. International Conference on Learning Representations .Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke Zettlemoyer. 2023. QLoRA: Efficient finetun-ing of quantized LLMs. Advances in Neural Infor-mation Processing Systems , 36:10088–10115. Shihan Dou, Enyu Zhou, Yan Liu, Songyang Gao, Jun Zhao, Wei Shen, Yuhao Zhou, Zhiheng Xi, Xiao Wang, Xiaoran Fan, and 1 others. 2023. LoRAMoE: Alleviate world knowledge forgetting in large lan-guage models via MoE-style plugin. arXiv preprint arXiv:2312.09979 .Dengchun Li, Yingzi Ma, Naizheng Wang, Zheng-mao Ye, Zhiyuan Cheng, Yinghao Tang, Yan Zhang, Lei Duan, Jie Zuo, Cal Yang, and 1 others. 2024. MixLoRA: Enhancing large language models fine-tuning with LoRA-based mixture of experts. arXiv preprint arXiv:2404.15159 .Xun Wu, Shaohan Huang, and Furu Wei. 2024. Mix-ture of LoRA experts. In The Twelfth International Conference on Learning Representations .Chunlin Tian, Zhan Shi, Zhijiang Guo, Li Li, and Cheng-Zhong Xu. 2024. HydraLoRA: An asym-metric LoRA architecture for efficient fine-tuning. 
+
+Advances in Neural Information Processing Systems ,37:9565–9584. Ziqi Gao, Qichao Wang, Aochuan Chen, Zijing Liu, Bingzhe Wu, Liang Chen, and Jia Li. 2024. Parameter-efficient fine-tuning with discrete Fourier transform. In Proceedings of the 41st International Conference on Machine Learning , pages 14884– 14901. PMLR. Shubhankar Borse, Shreya Kadambi, Nilesh Prasad Pandey, Kartikeya Bhardwaj, Viswanath Ganapa-thy, Sweta Priyadarshi, Risheek Garrepalli, Rafael Esteves, Munawar Hayat, and Fatih Porikli. 2024. FouRA: Fourier low-rank adaptation. Advances in Neural Information Processing Systems , 37. Ahmet Bilican, M Akın Yılmaz, A Murat Tekalp, and Ramazan Gökberk Cinbi¸ s. 2025. Exploring sparsity for parameter efficient fine tuning using wavelets. 
+
+arXiv preprint arXiv:2505.12532 .Yifei Zhang, Hao Zhu, Junhao Dong, Haoran Shi, Ziqiao Meng, Piotr Koniusz, and Han Yu. 2025. CrossSpectra: Exploiting cross-layer smoothness for parameter-efficient fine-tuning. In Advances in Neu-ral Information Processing Systems .Juyong Jiang, Fan Wang, Hong Qi, Sunghun Kim, and Jing Tang. 2026. FourierMoE: Fourier mixture-of-experts adaptation of large language models. arXiv preprint arXiv:2604.01762 .
+
+9Victor Namias. 1980. The fractional order Fourier trans-form and its application to quantum mechanics. IMA Journal of Applied Mathematics , 25(3):241–265. Luis B Almeida. 1994. The fractional Fourier transform and time-frequency representations. IEEE Transac-tions on Signal Processing , 42(11):3084–3091. Haldun M Ozaktas, Orhan Arıkan, M Alper Kutay, and Gözde Bozda˘ gı. 1996. Digital computation of the fractional Fourier transform. IEEE Transactions on Signal Processing , 44(9):2141–2150. Qingru Zhang, Minshuo Chen, Alexander Bukharin, Nikos Karampatziakis, Pengcheng He, Yu Cheng, Weizhu Chen, and Tuo Zhao. 2023. AdaLoRA: Adaptive budget allocation for parameter-efficient fine-tuning. arXiv preprint arXiv:2303.10512 .Shih-Yang Liu, Chien-Yi Wang, Hongxu Yin, Pavlo Molchanov, Yu-Chiang Frank Wang, Kwang-Ting Cheng, and Min-Hung Chen. 2024. DoRA: Weight-decomposed low-rank adaptation. In Forty-first In-ternational Conference on Machine Learning .Ning Ding, Xingtai Lv, Qiaosen Wang, Yulin Chen, Bowen Zhou, Zhiyuan Liu, and Maosong Sun. 2023. Sparse low-rank adaptation of pre-trained language models. arXiv preprint arXiv:2311.11696 .Dawid Jan Kopiczko, Tijmen Blankevoort, and Yuki M Asano. 2024. VeRA: Vector-based random matrix adaptation. In International Conference on Learning Representations .Chongyang Gao, Kezhen Chen, Jinmeng Rao, Baochen Sun, Ruibo Liu, Daiyi Peng, Yawen Zhang, Xiaoyuan Guo, Jie Yang, and VS Subrahmanian. 2024. Higher layers need more LoRA experts. arXiv preprint arXiv:2402.08562 .Pengjie Ren, Chengshun Shi, Shiguang Wu, Mengqi Zhang, Zhaochun Ren, Maarten de Rijke, Zhumin Chen, and Jiahuan Pei. 2024. MELoRA: Mini-ensemble low-rank adapters for parameter-efficient fine-tuning. arXiv preprint arXiv:2402.17263 .Ted Zadouri, Ahmet Üstün, Arash Ahmadian, Beyza Er-mi¸ s, Acyr Locatelli, and Sara Hooker. 2024. Pushing mixture of experts to the limit: Extremely parameter efficient MoE for instruction tuning. In International Conference on Learning Representations .Mengqi Liao, Wei Chen, Junfeng Shen, Shengnan Guo, and Huaiyu Wan. 2025. HMoRA: Making LLMs more effective with hierarchical mixture of LoRA experts. In The Thirteenth International Conference on Learning Representations .Yuan Zhuang, Yi Shen, Yuexin Bian, Qing Su, Shihao Ji, Yuanyuan Shi, and Fei Miao. 2026. LD-MoLE: Learnable dynamic routing for mixture of LoRA ex-perts. arXiv preprint arXiv:2509.25684 .Jie Cao, Tianwei Lin, Bo Yuan, Rolan Yan, Hongyang He, Wenqiao Zhang, Juncheng Li, Dongping Zhang, Siliang Tang, and Yueting Zhuang. 2026. MoA: Heterogeneous mixture of adapters for parameter-efficient fine-tuning of large language models. In 
+
+Proceedings of the 64th Annual Meeting of the As-sociation for Computational Linguistics (Volume 1: Long Papers) , pages 21056–21073. Gabriel Ilharco, Marco Tulio Ribeiro, Mitchell Worts-man, Suchin Gururangan, Ludwig Schmidt, Han-naneh Hajishirzi, and Ali Farhadi. 2022. Edit-ing models with task arithmetic. arXiv preprint arXiv:2212.04089 .Prateek Yadav, Derek Tam, Leshem Choshen, Colin A Raffel, and Mohit Bansal. 2023. TIES-merging: Resolving interference when merging models. Ad-vances in Neural Information Processing Systems ,36:7093–7115. Michael S Matena and Colin A Raffel. 2022. Merging models with Fisher-weighted averaging. Advances in Neural Information Processing Systems , 35:17703– 17716. Guillermo Ortiz-Jimenez, Alessandro Favero, and Pas-cal Frossard. 2023. Task arithmetic in the tangent space: Improved editing of pre-trained models. Ad-vances in Neural Information Processing Systems ,36:66727–66754. Le Yu, Bowen Yu, Haiyang Yu, Fei Huang, and Yongbin Li. 2024. Language models are super mario: Absorb-ing abilities from homologous models as a free lunch. In Forty-first International Conference on Machine Learning .Haobo Zhang and Jiayu Zhou. 2025. Unraveling LoRA interference: Orthogonal subspaces for robust model merging. In Proceedings of the 63rd Annual Meet-ing of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 26459–26472. Arslan Chaudhry, Naeemullah Khan, Puneet Dokania, and Philip Torr. 2020. Continual learning in low-rank orthogonal subspaces. In Advances in Neural Information Processing Systems , volume 33, pages 9900–9911. Xiao Wang, Tianze Chen, Qiming Ge, Han Xia, Rong Bao, Rui Zheng, Qi Zhang, Tao Gui, and Xuanjing Huang. 2023. Orthogonal subspace learning for lan-guage model continual learning. In Findings of the Association for Computational Linguistics: EMNLP 2023 , pages 10658–10671. Mark D McDonnell, Dong Gong, Amin Parvaneh, Ehsan Abbasnejad, and Anton Van den Hengel. 2023. RanPAC: Random projections and pre-trained models for continual learning. Advances in Neural Informa-tion Processing Systems , 36:12022–12053. Heming Zou, Yunliang Zang, Wutong Xu, Yao Zhu, and Xiangyang Ji. 2025a. FlyLoRA: Boosting task decou-pling and parameter efficiency via implicit rank-wise 
+
+10 mixture-of-experts. In The Thirty-ninth Annual Con-ference on Neural Information Processing Systems .Heming Zou, Yunliang Zang, Wutong Xu, and Xi-angyang Ji. 2025b. Fly-cl: A fly-inspired frame-work for enhancing efficient decorrelation and re-duced training time in pre-trained model-based continual representation learning. arXiv preprint arXiv:2510.16877 .Heming Zou, Yunliang Zang, and Xiangyang Ji. 2025c. Structural features of the fly olfactory circuit mitigate the stability-plasticity dilemma in continual learning. 
+
+arXiv preprint arXiv:2502.01427 .William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23(120):1–39. Ça˘ gatay Candan, M Alper Kutay, and Haldun M Ozak-tas. 2000. The discrete fractional Fourier transform. 
+
+IEEE Transactions on Signal Processing , 48(5):1329– 1337. Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, and 1 others. 2024. The Llama 3 herd of models. arXiv preprint arXiv:2407.21783 .An Yang, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chengyuan Li, Day-iheng Liu, Fei Huang, Haoran Wei, and 1 others. 2024. Qwen2.5 technical report. arXiv preprint arXiv:2412.15115 .Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and Kristina Toutanova. 2019. BoolQ: Exploring the surprising difficulty of natural yes/no questions. In Proceedings of the 2019 Conference of the North American Chap-ter of the Association for Computational Linguistics: Human Language Technologies , pages 2924–2936. Yonatan Bisk, Rowan Zellers, Jianfeng Gao, Yejin Choi, and 1 others. 2020. PIQA: Reasoning about physical commonsense in natural language. In Proceedings of the AAAI Conference on Artificial Intelligence ,volume 34, pages 7432–7439. Maarten Sap, Hannah Rashkin, Derek Chen, Ronan Le Bras, and Yejin Choi. 2019. Social IQa: Common-sense reasoning about social interactions. In Proceed-ings of the 2019 Conference on Empirical Methods in Natural Language Processing , pages 4463–4473. Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. 2019. HellaSwag: Can a machine really finish your sentence? In Proceed-ings of the 57th Annual Meeting of the Association for Computational Linguistics , pages 4791–4800. Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhaga-vatula, and Yejin Choi. 2020. WinoGrande: An ad-versarial winograd schema challenge at scale. In 
+
+Proceedings of the AAAI Conference on Artificial Intelligence , volume 34, pages 8732–8740. Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. 2018. Think you have solved question an-swering? try ARC, the AI2 reasoning challenge. 
+
+arXiv preprint arXiv:1803.05457 .Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal. 2018. Can a suit of armor conduct elec-tricity? a new dataset for open book question an-swering. In Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing ,pages 2381–2391. Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, and 1 others. 2021. Training verifiers to solve math word problems. arXiv preprint arXiv:2110.14168 .Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Ja-cob Steinhardt. 2021. Measuring mathematical prob-lem solving with the MATH dataset. arXiv preprint arXiv:2103.03874 .Arkil Patel, Satwik Bhattamishra, and Navin Goyal. 2021. Are NLP models really able to solve simple math word problems? arXiv preprint arXiv:2103.07191 .Rik Koncel-Kedziorski, Subhro Roy, Aida Amini, Nate Kushman, and Hannaneh Hajishirzi. 2016. MAWPS: A math word problem repository. In Proceedings of the 2016 Conference of the North American Chap-ter of the Association for Computational Linguistics: Human Language Technologies , pages 1152–1157. Wang Ling, Dani Yogatama, Chris Dyer, and Phil Blun-som. 2017. Program induction by rationale genera-tion: Learning to solve and explain algebraic word problems. In Proceedings of the 55th Annual Meet-ing of the Association for Computational Linguistics (Volume 1: Long Papers) .Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, and 1 others. 2021. Evaluating large language models trained on code. arXiv preprint arXiv:2107.03374 .Jacob Austin, Augustus Odena, Maxwell Nye, Maarten Bosma, Henryk Michalewski, David Dohan, Ellen Jiang, Carrie Cai, Michael Terry, Quoc Le, and 1 others. 2021. Program synthesis with large language models. arXiv preprint arXiv:2108.07732 .Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Stein-hardt. 2021. Measuring massive multitask language understanding. Proceedings of the International Con-ference on Learning Representations .
+
+11 Pan Lu, Swaroop Mishra, Tanglin Xia, Liang Qiu, Kai-Wei Chang, Song-Chun Zhu, Oyvind Tafjord, Peter Clark, and Ashwin Kalyan. 2022. Learn to explain: Multimodal reasoning via thought chains for science question answering. In The 36th Conference on Neu-ral Information Processing Systems .Robert A Jacobs, Michael I Jordan, Steven J Nowlan, and Geoffrey E Hinton. 1991. Adaptive mixtures of local experts. Neural Computation , 3(1):79–87. Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. 2017. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. arXiv preprint arXiv:1701.06538 .Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu, Dehao Chen, Orhan Firat, Yanping Huang, Maxim Krikun, Noam Shazeer, and Zhifeng Chen. 2020. GShard: Scaling giant models with conditional com-putation and automatic sharding. arXiv preprint arXiv:2006.16668 .Damai Dai, Chengqi Deng, Chenggang Zhao, RX Xu, Huazuo Gao, Deli Chen, Jiashi Li, Wangding Zeng, Xingkai Yu, Yu Wu, and 1 others. 2024. DeepSeek-MoE: Towards ultimate expert specialization in mixture-of-experts language models. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) ,pages 1280–1297. Nasim Rahaman, Aristide Baratin, Devansh Arpit, Felix Draxler, Min Lin, Fred Hamprecht, Yoshua Bengio, and Aaron Courville. 2019. On the spectral bias of neural networks. In International Conference on Machine Learning , pages 5301–5310. PMLR. Zhi-Qin John Xu, Yaoyu Zhang, Tao Luo, Yanyang Xiao, and Zheng Ma. 2020. Frequency principle: Fourier analysis sheds light on deep neural net-works. Communications in Computational Physics ,28(5):1746–1767. Zhiqiang Hu, Lei Wang, Yihuai Lan, Wanyu Xu, Ee-Peng Lim, Lidong Bing, Xing Xu, Soujanya Poria, and Roy Ka-Wei Lee. 2023. LLM-Adapters: An adapter family for parameter-efficient fine-tuning of large language models. In Proceedings of the 2023 Conference on Empirical Methods in Natural Lan-guage Processing .Sanjoy Dasgupta, Charles F Stevens, and Saket Navlakha. 2017. A neural algorithm for a funda-mental computing problem. Science , 358(6364):793– 796. 
+
+A Extended Related Work 
+
+From single-domain to learned-domain adapta-tion. The PEFT literature can be read as a search for the right coordinate system in which a small up-date is expressive. LoRA fixes the canonical (spa-tial) coordinates and constrains the update to be low rank (Hu et al., 2022); AdaLoRA reallocates rank across layers (Zhang et al., 2023); DoRA decom-poses magnitude and direction (Liu et al., 2024); VeRA freezes random projections and learns only scalings (Kopiczko et al., 2024); and orthogonal or Householder reparameterizations rotate the update within the spatial domain. Spectral methods change the coordinate system outright: FourierFT learns coefficients in the DFT basis (Gao et al., 2024), WaveFT in a wavelet basis (Bilican et al., 2025), and FouRA performs the low-rank projection itself in the Fourier domain, reporting that the result-ing bases are decorrelated and merge well (Borse et al., 2024). CrossSpectra exploits the empirical observation that cross-layer adaptation energy is spectrally smooth (Zhang et al., 2025). F RAME uni-fies these views: rather than choosing the spatial or a fixed spectral coordinate system, it parameterizes the family of coordinate systems by the fractional order and learns where to sit, per expert and per token. 
+
+Mixture-of-experts adapters. MoE has a long history as a capacity-scaling mechanism (Jacobs et al., 1991; Shazeer et al., 2017; Lepikhin et al., 2020; Fedus et al., 2022; Dai et al., 2024), and its adapter incarnations include LoRAMoE (Dou et al., 2023), MixLoRA (Li et al., 2024), MoLE (Wu et al., 2024), MoLA (Gao et al., 2024), Hy-draLoRA (Tian et al., 2024), HMoRA (Liao et al., 2025), and extremely parameter-efficient soft-merging variants (Zadouri et al., 2024). Re-cent work questions the assumption that experts should be homogeneous : MoA mixes structurally different adapter types (Cao et al., 2026), and LD-MoLE makes the number of active experts token- and layer-dependent through differentiable routing (Zhuang et al., 2026). F RAME is in this heterogeneous-expert lineage, with domain (frac-tional order) as the axis of heterogeneity, and complements router-free designs that decorrelate experts through a frozen sparse random projec-tion (Zou et al., 2025a) by making the decorrelating transform learnable rather than fixed. 
+
+Why fractional Fourier. The fractional-Fourier transform is standard in signal processing for an-alyzing chirped and non-stationary signals, pre-cisely because it interpolates between time and fre-quency representations (Namias, 1980; Almeida, 1994; Ozaktas et al., 1996; Candan et al., 2000). Its relevance to learning is suggested by spectral-bias theory: neural networks learn low-frequency struc-12 ture first (Rahaman et al., 2019; Xu et al., 2020), so different tasks and layers, which require different frequency content, should prefer different points between the time and frequency domains. To our knowledge F RAME is the first to use the fractional order as a learnable adaptation domain. 
+
+B Proofs 
+
+Throughout, Φa is the DFrFT of order a with spectral decomposition (2) , θ = π 
+
+> 2
+
+a, and Ra =Re {Φa}.
+
+B.1 Proposition 1 (Strict generalization) 
+
+At a=0 we have θ=0 , so Φ0 = P 
+
+> m
+
+umu⊤ 
+
+> m
+
+= I
+
+because {um} is an orthonormal basis; hence 
+
+R0 = I and the expert update (3) is ∆Wi = BiAi,identical to a LoRA expert. At a=1 , θ= π 
+
+> 2
+
+and 
+
+Φ1 = F , the unitary DFT, so R1 = Re {F } is the real (cosine) part and the expert is a cosine-domain low-rank adapter of the FourierFT fam-ily with the same factor count. Thus both spatial and Fourier MoE-LoRA lie in F RAME ’s hypoth-esis class. Strictness for N ≥ 2: take two ex-perts with a1=0 , a 2= 12 and rank r<d . The realized update set {B1A1 + B2A2R1/2} contains matri-ces of rank up to 2r whose right singular vectors mix the canonical basis and the R1/2-rotated basis; no single-order rank-r (or rank-2r single-domain) family contains all such matrices because R1/2 is not a permutation of the identity eigenbasis. 
+
+B.2 Proposition 2 (Bounded order gradients) 
+
+Differentiating (2) in a and using θ = π 
+
+> 2
+
+a,
+
+∂Φa
+
+∂a = −i π
+
+2
+
+X
+
+> m
+
+m e −imθ umu⊤
+
+> m
+
+. (9) This is a normal operator with eigenval-ues {− i π 
+
+> 2
+
+m e −imθ }, so its spectral norm is  
+
+> π
+> 2
+
+max m |m|. Restricting to the rank-ρ subspace 
+
+span {um}m<ρ gives ∂Φa/∂a 2 ≤ π 
+
+> 2
+
+(ρ − 1) .Taking the real part is 1-Lipschitz, so the same bound holds for Ra. For the per-token loss L with 
+
+y = · · · + αr giBiAiRai x, 
+
+> ∂L
+> ∂a i
+
+= ⟨∇ yL, αr giBiAi ∂Rai 
+
+> ∂a i
+
+x⟩
+
+≤ αr |gi|∥∇ yL∥ 2∥Bi∥2∥Ai∥2 π 
+
+> 2
+
+(ρ−1) ∥x∥2,
+
+(10) by Cauchy–Schwarz and submultiplicativity, with 
+
+|gi| ≤ 1. Hence the gradient is bounded and train-ing is stable under a step size ηa ≤ 1/L a with La
+
+the above bound. 
+
+B.3 Proposition 3 (Domain-diversity decorrelation) 
+
+Let ∆Wi = BiAiRai with independent factors, 
+
+E[A⊤ 
+
+> i
+
+Ai] = 1 
+
+> d
+
+I, and likewise for Bi normal-ized so E∥∆Wi∥2F = 1 . Using index additivity, 
+
+Rai R⊤ 
+
+> aj
+
+= Re {Φai } Re Φaj
+
+> ⊤
+
+, and expanding the real parts, 
+
+Rai R⊤ 
+
+> aj
+
+= 12 Re Φai−aj + 12 Re Φai+aj
+
+> †
+
+,
+
+(11) where the first term depends only on the order dif-ference and the second is an oscillatory chirp term that averages out. Taking expectations over the independent factors, 
+
+E⟨∆Wi, ∆Wj ⟩F = E tr  Raj A⊤ 
+
+> j
+
+B⊤ 
+
+> j
+
+BiAiR⊤
+
+> ai
+
+
+
+(12) 
+
+= 1 
+
+> d
+
+tr  Rai R⊤
+
+> aj
+
+E tr( B⊤ 
+
+> j
+
+Bi) cr,
+
+(13) and the dominant term is proportional to 
+
+tr Re Φai−aj . Normalizing and applying Cauchy–Schwarz over the r shared directions gives 
+
+E
+
+ ⟨∆Wi, ∆Wj ⟩F
+
+∥∆Wi∥F∥∆Wj ∥F
+
+2
+
+≤ 1
+
+r 
+
+> 1
+> d
+
+∥Re Φai−aj ∥2F
+
+| {z } 
+
+> κ(|ai−aj|)
+
+.
+
+(14) Finally κ(0) = 1 
+
+> d
+
+∥I∥2F = 1 , and for δ ∈ (0 , 1] 
+
+the energy of Re {Φδ} spreads off the diagonal as δ grows (the eigenphases e−imθ dephase), so κ
+
+is decreasing on [0 , 1] with κ(1) = 1 
+
+> d
+
+∥Re {F } ∥ 2F.
+
+B.4 Proposition 4 (Faithful surrogate and complexity) 
+
+The Ozaktas decomposition writes the continuous FrFT as a chirp multiplication, a Fourier transform, and a second chirp multiplication; sampling at the Nyquist rate of the chirp-modulated signal yields (6) with discretization error O(d−1) in the band-limited regime (Ozaktas et al., 1996). The cost is two O(d) Hadamard products and one O(d log d)
+
+FFT, hence O(d log d) time and O(d) memory, against O(d2) for the dense matrix in (2) . The parameter accounting follows by counting active factors: k experts each contributing r(d + dout ), k
+
+order scalars, and the N d router. 
+
+C Experimental Details 
+
+Data and evaluation. For commonsense rea-soning we fine-tune on the merged training split 13 Hyperparameter Value                          
+
+> Experts N8Active experts k2Rank rper expert 8Order bands G4Order init uniform grid on [0 ,1]
+> Scaling α16 Target modules q,k,v,o,gate,up,down Optimizer (matrices) AdamW, lr 2×10 −4
+> Optimizer (orders) AdamW, lr 2×10 −5
+> Balancing weight λbal 10 −2
+> Epochs 3Batch size (effective) 128 Precision bfloat16 Seeds 3
+
+Table 4: Default F RAME hyperparameters. 
+
+following the LLM-Adapters protocol and report test accuracy per dataset (Hu et al., 2023). For mathematical reasoning we train on the combined GSM8K/MATH/SVAMP/MAWPS/AQuA training questions and report exact-match accuracy; MATH is evaluated on the held-out test subset. For code we report pass@1 on HumanEval and MBPP with greedy decoding. For knowledge we report accu-racy on MMLU (zero-shot) and ScienceQA. All evaluations use the same prompts across methods. 
+
+Hyperparameters. Table 4 lists the configura-tion. We tune only the F RAME -specific quanti-ties ( N , k, G, ηa) lightly on a held-out common-sense split and keep them fixed across task fam-ilies and backbones; baselines use their recom-mended settings at matched rank. We use AdamW, cosine decay, 3 epochs, sequence length 512 
+
+(math/code/knowledge) or 256 (commonsense), and bfloat16. 
+
+Hardware. Experiments run on 8× NVIDIA A100 80GB GPUs. A commonsense run for an 8B backbone takes roughly 5 GPU-hours; the math/code/knowledge mixture takes roughly 9
+
+GPU-hours. The chirp–FFT surrogate is imple-mented with the framework FFT and adds a single complex multiply on either side. 
+
+D Additional Results 
+
+Per-seed variation. Table 5 reports mean and standard deviation over three seeds for the com-monsense average; F RAME ’s improvements exceed one standard deviation for both backbones. 
+
+Additional backbones. Table 6 reports the com-monsense average across backbone scales, support-                                
+
+> Method LLaMA-3.1-8B Qwen2.5-7B
+> LoRA 84 .5±0.20 85 .9±0.18
+> FlyLoRA 86 .1±0.17 87 .3±0.16
+> FourierMoE 86 .2±0.21 87 .4±0.19
+> MoA 86 .3±0.18 87 .5±0.17
+> FRAME 87 .1±0.15 88 .2±0.14
+
+Table 5: Commonsense average over three seeds (mean ± std). 
+
+ing Figure 5(c): the gain over the best baseline is stable from 1.5B to 14B.                      
+
+> Method 1.5B 3B 8B 14B
+> LoRA 70.2 78.6 84.5 88.1 Best baseline 72.5 80.7 86.3 89.6
+> FRAME 73.6 81.7 87.1 90.4
+> ∆over best +1 .1+1 .0+0 .8+0 .8
+
+Table 6: Commonsense average across model scales (Qwen2.5 family for 1.5B/3B/14B, LLaMA-3.1-8B for 8B). “Best baseline” is the strongest non-F RAME 
+
+method at each scale. 
+
+Number of experts and active k. Table 7 sweeps 
+
+N and k. Accuracy rises with N and saturates around N =8 ; k=2 is the best accuracy/cost point, with k=1 underfitting and k=4 adding cost without commensurate gain.                        
+
+> Setting Avg. Param % Rel. time
+> N=4 , k =2 86.6 0.21 0.95
+> N=8 , k =1 86.4 0.21 0.92
+> N=8 , k =2 87.1 0.31 1.00
+> N=8 , k =4 87.2 0.52 1.18
+> N=16 , k =2 87.2 0.34 1.06
+
+Table 7: Effect of expert count N and active experts 
+
+k on LLaMA-3.1-8B commonsense. Relative time is normalized to the default. 
+
+Method properties. Table 8 situates F RAME 
+
+among representative baselines along the axes that matter for our claims. 
+
+E Training-Free Merging 
+
+To test whether domain diversity aids composi-tion, we train single-task F RAME adapters indepen-dently and merge them by averaging their updates, then evaluate post-merge retention (the fraction of single-task accuracy preserved). Table 9 shows FRAME retains the most among the compared base-lines. This matches Proposition 3: experts placed at diverse orders interfere less, so their sum is closer to the concatenation of the individual updates. 14 Method Domain MoE Routing Learn. basis                             
+
+> LoRA spatial ×××
+> FourierFT Fourier ×××
+> MixLoRA spatial ✓token ×
+> HMoRA spatial ✓token ×
+> FlyLoRA spatial implicit random ×
+> FourierMoE Fourier ✓token ×
+> FRAME fractional ✓token order
+
+Table 8: F RAME is the only method whose adaptation 
+
+domain is a learnable, per-expert quantity on the spatial– spectral continuum.           
+
+> Method Avg. retention Worst-task
+> LoRA (avg.) 71.3 58.0 MixLoRA 78.6 67.4 FlyLoRA 86.9 80.2
+> FRAME 87.8 81.6
+
+Table 9: Training-free merging of four single-task adapters on LLaMA-3.1-8B: post-merge retention (%). Higher is better. 
+
+F Discussion 
+
+Why a learned domain helps. Three forces com-bine. Compaction : tasks whose update energy con-centrates at intermediate time–frequency tilt are represented more compactly at the matching order, so a fixed basis wastes rank (Figure 1). Diversity :a mixture spanning orders covers more of the up-date space than the same number of single-domain experts (Proposition 1). Decorrelation : orders that are far apart are incoherent (Proposition 3), so ex-perts specialize without redundancy and compose better. The first is about a single expert; the second and third are about the mixture. 
+
+Relation to projection-based decorrelation. 
+
+Sparse or random projections decorrelate updates by mapping them into a high-dimensional space and keeping only the strongest responses (Dasgupta et al., 2017; McDonnell et al., 2023; Zou et al., 2025a,b), while orthogonal-subspace methods im-pose decorrelation by construction (Chaudhry et al., 2020; Wang et al., 2023). F RAME obtains decor-relation through a structured, learnable transform instead: the order plays the role a fixed projection plays in those methods, but it is differentiable, inter-pretable, and invertible. An interesting hybrid, left to future work, would combine random projections 
+
+and fractional orders. 
+
+Beyond adapters. Nothing in F RAME is specific to LoRA factors. The fractional order is a prop-erty of the domain and could equally parameterize a full-rank update, a per-head attention reweight-ing, or a continual-learning module that places new tasks at fresh orders to minimize interference with old ones. The bounded-gradient and decorrela-tion results carry over unchanged, suggesting the fractional domain is a general tool for controlling interference in adaptation. 
+
+Failure modes. When a task is genuinely well served by a single domain (e.g. a purely spatial edit), F RAME should and does collapse most ex-perts to that order; the cost is then the unused order scalars and the FFTs, which is small but non-zero. When routing collapses, grouped balancing reac-tivates idle bands, but an adversarial data mixture could still starve a band; monitoring per-band uti-lization (Figure 4c) is a cheap diagnostic. 15
