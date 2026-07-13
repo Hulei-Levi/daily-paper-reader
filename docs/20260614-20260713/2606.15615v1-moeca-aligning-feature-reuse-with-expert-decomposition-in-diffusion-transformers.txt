@@ -1,0 +1,970 @@
+Title: MoECa: Aligning Feature Reuse with Expert Decomposition in Diffusion Transformers
+
+URL Source: https://arxiv.org/pdf/2606.15615v1
+
+Published Time: Tue, 16 Jun 2026 01:01:46 GMT
+
+Number of Pages: 12
+
+Markdown Content:
+# MoECa: Aligning Feature Reuse with Expert Decomposition in Diffusion Transformers 
+
+## Maoliang Li 1,∗, Haojing Chen 2,∗, Jiayu Chen 1, Zihao Zheng 1, Xinhao Sun 1, Hailong Zou 1, Xiang Chen 1,†
+
+> 1
+
+School of Computer Science, Peking University, Beijing, China 
+
+> 2
+
+School of Software Engineering, University of Electronic Science and Technology of China, Chengdu, China 
+
+## Abstract 
+
+Diffusion Transformers with Mixture-of-Experts (DiT-MoE) im-prove model capacity under sparse activation, but diffusion infer-ence is still bottlenecked by redundant computation across timesteps. Existing caching methods mainly operate at the token level, which becomes suboptimal in DiT-MoE because each token update is in-ternally decomposed into multiple routed expert branches. Our analysis shows that cross-timestep redundancy in DiT-MoE is bet-ter characterized at the expert-branch level than at the whole-token level. Based on this observation, we propose MoECa, a fine-grained caching framework that performs branch-level feature reuse across timesteps. MoECa further introduces expert-aware adaptive control and synchronized cache updates across MoE and attention paths to maintain stable intermediate states. Experiments on multiple DiT-MoE models show that MoECa consistently achieves a better speed-quality trade-off than prior caching methods, with up to 2.83 × inference speedup and minimal quality degradation. 
+
+## CCS Concepts 
+
+• Information systems → Multimedia content creation .
+
+## Keywords 
+
+Diffusion, Feature Cache, Acceleration, Mixture-of-Experts 
+
+ACM Reference Format: 
+
+Maoliang Li 1,∗, Haojing Chen 2,∗, Jiayu Chen 1, Zihao Zheng 1, Xinhao Sun 1,Hailong Zou 1, Xiang Chen 1,† . 2026. MoECa: Aligning Feature Reuse with Expert Decomposition in Diffusion Transformers . In Proceedings of arXiv preprint (arXiv). ACM, New York, NY, USA, 12 pages. https://doi. org/10.1145/nnnnnnn.nnnnnnn 
+
+## 1 Introduction 
+
+Diffusion models, especially Diffusion Transformers (DiTs) [ 11 ], have become a dominant paradigm for visual generation due to their strong scalability and generation quality. As model sizes continue to grow, researchers [ 5, 16 ] have begun to introduce sparse Mixture-of-Experts (MoE) [ 15 ] into DiT, as illustrated in Fig. 1, to improve model capacity while keeping the number of activated parameters relatively low. More fundamentally, the effect of MoE is not limited to the capacity gain brought by sparse activation. By replacing the original dense transformation with multiple routed expert branches, MoE reorganizes the feature evolution process of each token into the joint progression of multiple expert branch features. Beyond model capacity, the inference efficiency of diffusion mod-els is still fundamentally constrained by the iterative denoising pro-cess. In addition to reducing the number of sampling steps through   
+
+> ∗Both authors contributed equally to this research
+> †Corresponding author: Xiang Chen, xiang.chen@pku.edu.cn
+
+𝑿 𝒕 -#
+
+Self -Attn   
+
+> Cond
+> AdaLN
+> AdaLN
+> MLP AdaLN
+> MoE Layer
+> DiT Block
+
+𝑿 𝒕 𝑿 𝒕 -#
+
+Self -Attn 
+
+Router 
+
+Output 
+
+ES E1 E2 E3
+
+𝑿 𝒕 $%
+
+E4
+
+ToCa -like 
+
+Router 
+
+Output 
+
+ES E1 E2 E3 E4
+
+> Cache
+> Compute
+
+MoECa 
+
+> Token
+> Heterogeneity
+> Expert
+> Heterogeneity
+
+Figure 1: Conceptualization of expert heterogeneity and mis-alignment between token-level cache and MoE models. 
+
+improved samplers [ 17 ] or distillation [ 20 ], feature caching has become one of the most widely adopted acceleration paradigms for diffusion inference. The underlying motivation is that features at adjacent timesteps often exhibit considerable similarity, making it possible to cache and reuse previously computed features to avoid redundant computation. Existing studies further show that tempo-ral variation is heterogeneous across different granularities, such as layers [ 8], blocks [ 21 ], and tokens [ 14 , 22 ], and that selective reuse strategies can therefore achieve favorable speed-quality trade-offs. In dense DiTs, token-level reuse is a natural design choice because token heterogeneity is one of the primary sources of temporal redundancy in visual representations. However, in MoE models, to-ken features are further decomposed into multiple expert branches. With token as the atomic unit for selective update, the branch-level heterogeneity introduced by expert decomposition is ignored. To this end, the temporal evolution of noisy features over experts and expert branches becomes the key to understanding why token-level reuse is suboptimal in DiT-MoE. We first present two prelimi-nary observations in Fig. 2. From the perspective of cross-timestep feature evolution, Fig. 2(a) shows that the branch-wise feature evo-lution within the same token becomes highly heterogeneous, while each individual branch still exhibits noticeable temporal similarity. From the perspective of expert specialization, Fig. 2(b) shows that different experts exhibit different response affinities over content positions and denoising stages. Consequently, the information car-ried by different experts is not identical, which further suggests that different experts should not be treated as equally sensitive to caching error. Taken together, the internal representation evolution in DiT-MoE simultaneously exhibits cross-timestep similarity and                                 
+
+> arXiv:2606.15615v1 [cs.LG] 14 Jun 2026 arXiv, 2026, Maoliang Li 1,∗, Haojing Chen 2,∗, Jiayu Chen 1, Zihao Zheng 1, Xinhao Sun 1, Hailong Zou 1, Xiang Chen 1,†(b) Expert Affinity Distribution (a) Temporal Feature Evolution
+> DSMoE -S-E16 Pos=0, Class 0
+> DSMoE -S-E16 Pos=64 , Class 0
+> DSMoE -L-E16 Pos=0 , Class 100
+> DSMoE -L-E16 Pos=64 , Class 100
+> Expert  ID
+> Denoising Progress
+> 0
+> 16
+> 8
+> 0
+> 16
+> 8
+> 0
+> 16
+> 8
+> 0
+> 16
+> 8
+> 0250 200 150 100 50
+> 1.0
+> 0.8
+> 0.6
+> 0.4
+> 0.2
+> 0.0 Expert Weight
+> Async Progression & Transition
+> Sub Feature Similarity
+> Generation Stage Affinity
+> Content Position Affinity
+> Expert ID
+> 048
+> Timestep
+> 0
+> 250
+> 125
+> 048048048
+> 0
+> 250
+> 125
+> Patch ID
+> 048048048048
+> 0
+> 250
+> 125
+> 0
+> 250
+> 125
+> L1
+> L2
+> L3
+> L4
+> L5
+> L6
+> L7
+> L8
+> L1
+> L2
+> L3
+> L4
+> L5
+> L6
+> L7
+> L8
+
+# ×
+
+Feature - and Structure -Awared Caching Mechanism 
+
+Figure 2: Preliminary Observation: (a) Temporal progression of feature weight in MoE layer for example tokens; (b) Expert activation count across both Image Patch and Timestep. 
+
+cross-expert / cross-branch heterogeneity . Therefore, as illustrated in Fig. 1, existing token-level caching leads to suboptimal reuse deci-sions in DiT-MoE. On one hand, recomputing the entire token to avoid error accumulation forces stable branches to be unnecessarily recomputed, introducing redundancy. On the other, reusing the en-tire token for more acceleration causes rapidly changing branches to be excessively reused, resulting in larger error. To address this problem, we propose MoECa , a feature- and structure-aware caching mechanism for MoE-based DiTs. Instead of treating each token as the atomic caching unit, MoECa pushes the caching granularity down to the expert-branch level, so that caching decisions are aligned with the internal computation de-composition structure of MoE and its feature evolution pattern. On top of this design, MoECa builds a branch-wise caching and update framework, introduces an expert-aware adaptive control mecha-nism, and further coordinates the MoE path and the attention path to reduce inference overhead while preserving generation quality as much as possible. Our contributions are summarized as follows: 
+
+• We analyze the cross-timestep evolution of features in DiT-MoE from the perspective of expert decomposition and spe-cialization, and reveal the structural mismatch between caching granularity and feature representations of MoE. 
+
+• We propose MoECa , a fine-grained caching framework for DiT-MoE, which enables more efficient feature reuse through expert-branch-level caching and update. 
+
+• We evaluate MoECa on multiple DiT-MoE models, demon-strating significant inference overhead reduction while main-taining generation quality, achieving better speed–quality trade-off than existing caching methods. 
+
+## 2 Backgrounds 2.1 Diffusion Models and Transformers 
+
+Diffusion models are built upon two complementary stochas-tic processes: a forward noising process and a reverse denoising process. In the forward process, Gaussian perturbations are progres-sively injected into a clean sample until it approaches an isotropic Gaussian distribution. In the reverse process, a learnable network iteratively removes noise and maps a noisy sample back to the data manifold. Let 𝑡 denote the diffusion timestep and 𝛽 𝑡 the variance schedule. The reverse transition can be written as 
+
+𝑝 𝜃 (𝑥 𝑡 −1 | 𝑥 𝑡 ) = N
+
+
+
+𝑥 𝑡 −1; 1
+
+√𝛼 𝑡 
+
+
+
+𝑥 𝑡 − 1 − 𝛼 𝑡 
+
+√1 − ¯𝛼 𝑡 
+
+𝜖 𝜃 (𝑥 𝑡 , 𝑡 )
+
+
+
+, 𝛽 𝑡 I
+
+
+
+, (1) where 𝛼 𝑡 = 1 − 𝛽 𝑡 and ¯𝛼 𝑡 = Î𝑡 𝑖 =1 𝛼 𝑖 . Here, 𝜖 𝜃 (·) is the denoiser parameterized by 𝜃 , which predicts the noise component from 
+
+(𝑥 𝑡 , 𝑡 ). The denoiser is repeatedly invoked over 𝑇 timesteps during sampling, dominating both generation quality and inference cost. Recent diffusion systems commonly instantiate 𝜖 𝜃 with a Trans-former, yielding Diffusion Transformers (DiT). A DiT stacks 𝐿 
+
+blocks, each typically containing self-attention and MLP sublayers. 
+
+G = 𝑔 1 ◦ 𝑔 2 ◦ · · · ◦ 𝑔 𝐿 , 𝑔 𝑙 = F 𝑙  
+
+> SA
+
+◦ F 𝑙 
+
+> MLP
+
+. (2) The input at timestep 𝑡 is represented as a token sequence x𝑡 =
+
+{𝑥 𝑖 }𝐻 ×𝑊 𝑖 =1 , where each token corresponds to an image (or latent) patch. For a generic sublayer 𝑓 , the block-level update is usually implemented in residual form, F ( x) = x + AdaLN ◦ 𝑓 (x), where AdaLN modulates normalized activations according to diffusion timestep (and optional condition signals), enabling the model to adapt computation across denoising stages. 
+
+## 2.2 Feature Caching for Diffusion Acceleration 
+
+Feature caching accelerates DiT models by reusing intermediate features across nearby timesteps. Let {𝑡, 𝑡 + 1, . . . , 𝑡 + 𝑁 − 1} be a window of 𝑁 adjacent denoising steps. At the first step 𝑡 (refresh step), the model executes normally and writes intermediate features into cache memory. Denoting the cache at layer index 𝑙 as C [ 𝑙 ],cache is assigned as: 
+
+C [ 𝑙 ] := F𝑙 
+
+
+
+x𝑙 −1
+
+> 𝑡
+
+
+
+, 𝑙 = 1, . . . , 𝐿, (3) For each following step 𝑡 + 𝑖 with 𝑖 ∈ { 1, . . . , 𝑁 − 1}, naive caching directly reuses the stored intermediate feature: 
+
+F𝑙 
+
+
+
+x𝑙 −1 
+
+> 𝑡 +𝑖
+
+
+
+:= C [ 𝑙 ], 𝑙 = 1, . . . , 𝐿. (4) In practice, one refresh step is amortized over several reuse steps to reduce attention/MLP computation, but overly long reuse windows can cause cache staleness and quality degradation. From the perspective of feature granularity, caching methods can be divided into step-, block-, layer-, and token-level, by hi-erarchy of re-use decision in DiT architecture. Finer reuse better preserves quality but requires higher control overhead. ToCa is a representative token-level method that selectively recomputes only high-variation tokens, which effectively exploits feature hetero-geneity across various tokens. 
+
+## 2.3 MoE and DiT-MoE 
+
+Mixture-of-Experts (MoE) replaces the dense FFN in Transformer structure with multiple routed experts and a router. For token input 
+
+𝑢 𝑡 , the standard MoE FFN output (without shared experts) is 
+
+ℎ𝑡 = 𝑢 𝑡 +
+
+> 𝑁 𝑟
+
+∑︁ 
+
+> 𝑖 =1
+
+𝑔 𝑖,𝑡 FFN (𝑟 ) 
+
+> 𝑖
+
+(𝑢 𝑡 ), (5) where 𝑁 𝑟 is the number of routed experts. Since such structure is inherently compatible with the DiT paradigm, DSMoE [ 9], a MoECa: Aligning Feature Reuse with Expert Decomposition in Diffusion Transformers arXiv, 2026, (b) Routing Distance Comparison           
+
+> DSMoE -S-E48 Token128 Output Distance
+> DSMoE -S-E48 Output Distance
+> -0.1
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> -0.1
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 020 40 60 80 100
+> 020 40 60 80 100
+
+(a) Feature Distance Comparison                
+
+> 020 40 60 80 100
+> 020 40 60 80 100
+> 0.00
+> 0.01
+> 0.02
+> 0.03
+> 0.04
+> 0.05
+> 0.06
+> 0.00
+> 0.01
+> 0.02
+> 0.03
+> 0.04
+> 0.05
+> DSMoE -S-E16 MoE Routing L1 Per Layer Distance
+> DSMoE -S-E48 MoE Routing L1 Per Layer Distance
+> Sampling Progress (%) Sampling Progress (%)
+
+Figure 3: Temporal Feature Evolution Analysis: (a) Distance between adjacent timesteps of token- and branch-level fea-tures. The upper figure sets distance to 0 for branch transition. (b) Distance between adjacent timesteps of routing output. 
+
+practical DiT-MoE training recipe with sparse routed and shared experts, and DiT-MoE [ 5 ] introduce MoE to DiT models without significant modification to model structure. Following DeepSeek MoE [ 4], shared experts are further introduced in addition to routed experts, so the output of original FFN becomes: 
+
+ℎ𝑡 = 𝑢 𝑡 +
+
+> 𝑁 𝑠
+
+∑︁ 
+
+> 𝑖 =1
+
+FFN (𝑠 ) 
+
+> 𝑖
+
+(𝑢 𝑡 ) + 
+
+> 𝑁 𝑟
+
+∑︁ 
+
+> 𝑖 =1
+
+𝑔 𝑖,𝑡 FFN (𝑟 ) 
+
+> 𝑖
+
+(𝑢 𝑡 ), (6) where 𝑁 𝑠 and 𝑁 𝑟 are the numbers of shared experts and routed experts, FFN (𝑠 ) 
+
+> 𝑖
+
+(·) denotes the 𝑖 -th shared expert, and FFN (𝑟 ) 
+
+> 𝑖
+
+(·) 
+
+denotes the 𝑖 -th routed expert. Overall, the role of MoE in DiT is not limited to sparse activa-tion for a better capacity–efficiency trade-off. More importantly, token-wise routing decomposes the original dense FFN update into multiple expert-conditioned branch updates, so the representation evolution of each token is no longer governed by a single homoge-neous computation path. Since experts in DiT-MoE often exhibit different preferences over spatial positions and denoising stages, MoE also changes how noisy features are internally updated and evolve across timesteps. As a result, this structural change is di-rectly relevant to feature reuse during diffusion inference, where whole-token reuse decisions may no longer align well with the branch-wise computation induced by expert decomposition. 
+
+## 3 Analysis 
+
+To understand the intrinsic pattern of cross-timestep feature reuse in DiT-MoE, we further analyze how noisy features evolve across timesteps under MoE decomposition, and discuss in detail why such feature evolution characteristics are misaligned with token-level caching decisions. 
+
+## 3.1 Temporal Similarity Distribution under Expert Decomposition 
+
+Existing DiT caching methods typically treat each token as the atomic reuse unit. The underlying rationale is that, across adjacent timesteps, most token-level features remain highly similar, while only a small subset of tokens undergo relatively large changes. (a) Accumulated Activation (b) Activation Progression 
+
+Denoising Process             
+
+> Expert 0 Expert 1 Expert 2 Expert 3
+> Expert 4 Expert 5 Expert 6 Expert 7
+> Expert 8 Expert 9 Expert 10 Expert 11
+> Expert 12 Expert 13 Expert 14 Expert 15
+> Expert 6
+> Expert 4
+> Expert 15
+> Expert 5
+
+Reference Image 
+
+Figure 4: Expert Activation Distribution Analysis: (a) Token count routed to each expert accumulated across all steps in DSMoE-S-E16. (b) Token count accumulated for different steps of selected experts. 
+
+We further examine the phenomenon illustrated in Fig. 2(a). As shown in Fig. 3(a), we compare the distances of the aggregated token-level features and the expert-branch features between ad-jacent timesteps. The results reveal that, due to the Top-𝐾 gating mechanism in expert routing, expert-branch features may exhibit discontinuous jumps when branch activation changes, and the variation of the token feature is aligned with these branch-level transitions. In contrast, for branches that remain activated across adjacent timesteps, their features usually still preserve high sim-ilarity. Meanwhile, different branches exhibit clear discrepancies in both the timing and the magnitude of their changes. These ob-servations suggest that feature reuse in DiT-MoE still possesses substantial temporal redundancy. However, such redundancy is no longer distributed uniformly over the token as a whole; instead, it is redistributed over different expert branches. Based on this observation, we further analyze the evolution of expert activation states across adjacent timesteps. As shown in Fig. 3(b), we measure the routing weight distance of different layers throughout the sampling trajectory to characterize the variation of expert activation strength. The results show that, for most layers, the routing weight distance remains low over the majority of the denoising process, with only brief increases in the early stage or in a few local intervals. This indicates that, although expert activation is dynamic, its variation is usually limited for most timesteps. In other words, expert branches generally preserve strong temporal similarity across adjacent timesteps, making branch-level feature reuse mechanistically feasible. Therefore, in DiT-MoE, the natural reuse unit across timesteps is closer to the expert branch than to the whole token. When caching decisions are still made atomically at the token level, branches with different degrees of change are forced to be reused or recomputed together, resulting in a mismatch between cache granularity and the internal computation structure. 
+
+## 3.2 Spatial Heterogeneity Across Experts 
+
+Beyond branch-level continuity across timesteps, another key prop-erty of DiT-MoE is that different experts do not play identical roles in representation updating. arXiv, 2026, Maoliang Li 1,∗, Haojing Chen 2,∗, Jiayu Chen 1, Zihao Zheng 1, Xinhao Sun 1, Hailong Zou 1, Xiang Chen 1,†
+
+From a structural perspective, MoE commonly exhibits clear ex-pert specialization. As shown in Fig. 4(a), we count how frequently each token is selected by different experts across all MoE layers throughout the denoising process, and map these statistics back to spatial positions. As shown in Fig. 4(b), we further examine how these activation patterns evolve along the denoising trajectory. The results show that different experts exhibit markedly differ-ent spatial response patterns. Some experts display more localized and concentrated activation distributions, mainly responding to re-gions with richer semantic variation or more complex structures. In contrast, other experts respond over broader and smoother spatial regions, covering more background areas or low-frequency struc-tures. Meanwhile, their preferences over denoising stages are also different: some experts are more concentrated in specific stages, whereas others participate in representation updating over a much wider temporal range. These observations indicate that different experts carry different feature components. More importantly, such structural differences suggest that caching control should not implicitly assume that all experts share the same tolerance to reuse error. 
+
+## 3.3 Discussion 
+
+The above analysis leads to the following conclusion: the intro-duction of MoE to DiT reorganizes the internal evolution of noisy features throughout the diffusion process. Under this structure, tem-poral continuity and temporal variation are no longer expressed uniformly at the token level, but are redistributed over branch-level updates associated with different experts. Therefore, the limitation of existing caching methods in DiT-MoE does not primarily stem from an insufficiently refined caching strategy; rather, it arises from a structural mismatch between the caching decision unit and the actual feature evolution pattern inside DiT-MoE. This mismatch directly implies three methodological require-ments. First, the caching granularity should descend from the token level to the expert-branch level, so that the reuse unit is aligned with the internal computation unit. Second, caching control should be aware of the differences across experts, rather than relying on a uniform reuse policy. Third, after branch-wise updates are intro-duced, the states of related subpaths must remain consistent, so as to avoid representational drift caused by partial updates. Based on these findings, the next section presents a fine-grained expert caching framework for DiT-MoE, which enables cross-timestep fea-ture reuse and adaptive updating at a granularity consistent with the internal data evolution of MoE. 
+
+## 4 Methodology 
+
+As analyzed in Section 3, the key limitation of existing caching methods in DiT-MoE is a structural mismatch between the caching decision unit and the actual evolution unit of noisy features under expert decomposition. To address this issue, we propose MoECa ,which shifts the caching and recomputation decision from the token level to the expert-branch level, so that the reuse granularity is aligned with both the internal computation decomposition of MoE and the branch-level cross-timestep evolution pattern. 
+
+## 4.1 Expert Cache Architecture 
+
+For the 𝑖 -th token at the current denoising step 𝑡 , let 𝑡 0 > 𝑡 denote the most recent step whose branch states are currently stored in the cache for this token. We then define the current top-𝑘 routing result and the cached reference state of token 𝑖 as: 
+
+B𝑡 𝑖 = {( 𝑒 𝑡 𝑖,𝑝 , 𝑤 𝑡 𝑖,𝑝 )} 𝑘 𝑝 =1, C𝑡 0 
+
+> 𝑖
+
+= {( 𝑒 𝑡 0
+
+> 𝑖,𝑞
+
+, 𝑤 𝑡 0
+
+> 𝑖,𝑞
+
+, ℎ 𝑡 0 
+
+> 𝑖,𝑞
+
+)} 𝑘 𝑞 =1, (7) For B𝑡 𝑖 , 𝑒 𝑡 𝑖,𝑝 denotes the index of the selected expert, 𝑤 𝑡 𝑖,𝑝 denotes the corresponding routing weight, and 𝑝 indexes the routed branches within the token. For C𝑡 0 
+
+> 𝑖
+
+, the superscript 𝑡 0 explicitly marks the cached reference step rather than the current one, and ℎ𝑡 0 
+
+> 𝑖,𝑞
+
+is the output feature of the 𝑞 -th cached expert branch. In addition to the MoE branch states, we also cache the token-wise attention output 
+
+𝑎 𝑡 0 
+
+> 𝑖
+
+following the standard caching paradigm in DiT acceleration. Similar to prior caching methods, MoECa alternates between full-computation steps and cache steps . At each full-computation step, the model executes the complete forward pass at step 𝑡 and overwrites the cache with the resulting (𝑒 𝑡 , 𝑤 𝑡 , ℎ 𝑡 , 𝑎 𝑡 ), so that 𝑡 0 ← 𝑡 . At each subsequent cache step, the router is still executed normally to obtain the current routing result B𝑡 𝑖 . MoECa then compares the current branches with the cached branches in C𝑡 0 
+
+> 𝑖
+
+and partitions them into a recomputation set R𝑡 𝑖 and a reuse set B𝑡 𝑖 \R 𝑡 𝑖 , as determined by the branch-matching and branch-scoring mechanism described in the next subsection. A further issue is state consistency between the MoE path and the attention path. As shown in Section 3.1, changes in token fea-tures are highly aligned with changes in expert-branch activation. If the expert features are partially updated while the attention feature remains stale, different sub-features of the same token would corre-spond to different timesteps, introducing additional representation drift. To avoid this inconsistency, MoECa coordinates the updates as follows: If no branch is selected for recomputation, both the MoE path and the attention path reuse their cached states. Otherwise, MoECa recomputes only the branches in R𝑡 𝑖 , reuses the remaining branches, and updates the attention feature at the same step. Accordingly, the MoE output of token 𝑖 at step 𝑡 is written as 
+
+𝑦 𝑡 𝑖 =∑︁ 𝑝 ∈ R 𝑡 𝑖 
+
+𝑤 𝑡 𝑖,𝑝 ℎ𝑡 𝑖,𝑝 +∑︁ 𝑝 ∈ B 𝑡 𝑖 \R 𝑡 𝑖 
+
+𝑤 𝑡 𝑖,𝑝 ℎ𝑡 0   
+
+> 𝑖,𝑞 (𝑝 )
+
+, (8) where 𝑞 (𝑝 ) denotes the cached branch matched to the current branch 𝑝 . In other words, recomputed branches use the newly com-puted outputs at the current step 𝑡 , while reusable branches directly read the matched historical features from the cached reference step. 
+
+## 4.2 Expert-Level ReUse Decision 
+
+At each cache step, the core problem is to determine which routed branches of the current token should be recomputed and which ones can safely reuse historical states. MoECa addresses this problem through an expert-branch matching stage followed by a branch-wise recomputation score. For each current branch 𝑝 , if its expert identity 𝑒 𝑡 𝑖,𝑝 can be found in the cached state C𝑡 0 
+
+> 𝑖
+
+, we regard it as matched and record the matched cached position as 𝑞 (𝑝 ). Otherwise, it is treated as un-matched . This design is consistent with the analysis that expert selection usually remains relatively stable across adjacent timesteps, with routing weights changing smoothly. MoECa: Aligning Feature Reuse with Expert Decomposition in Diffusion Transformers arXiv, 2026, Self -Attn 
+
+Router 
+
+Output 
+
+Other Layers 
+
+E1 E2 E3 E4
+
+Gate 
+
+Top -k
+
+E1 E2 E3 E4ES
+
+Output 
+
+> 𝑤 !,#
+> !$
+
+𝑿 ""
+
+timestep 𝑡 #
+
+Full Step 
+
+timestep t
+
+Cache Step 
+
+𝑿 𝒕         
+
+> ℎ!,%
+> &ℎ!,%
+> &ℎ!,%
+> !$
+> 0. 9>𝜏 $
+> !0. 3<𝜏 &
+> !
+> ℎ!,#
+> !$
+> Compute
+> ReUse
+> Match
+> UnMatch InAct. Expert
+> Active Expert
+
+𝑿 𝒕 𝑿 𝒕 &'
+
+𝑪 ""
+
+Self -Attn 
+
+Router 
+
+Output 
+
+E1 E2 E3 E4
+
+② ReUse Decision ③ Cache Update ④ Write Back 
+
+Other Layers    
+
+> 𝑒 ',)
+> !$|𝑤 ',)
+> !$
+
+, ℎ',)  
+
+> !$
+> 𝑤 !,'
+> !$
+> ℎ!,'
+> !$
+> Cached Token i
+> Branch Cache
+> 𝑎 '
+> !
+> Output Feat.
+> Input Feat.
+> Attention Cache
+
+𝑪 ""
+
+① Fresh Compute      
+
+> 𝑤 !,%
+> !$,ℎ!,%
+> !$
+> Expert Match ReUse Score
+> 𝑒 ',)
+> !𝑒 ',)
+> !$𝑤 !,%
+> &
+
+𝑅 ) 
+
+> ""
+
+= ∅?      
+
+> 𝑒 !,%
+> &|𝑤 !,%
+> &[, ℎ!,%
+> &]
+> Cache Token
+> Fresh Token
+> 𝐴𝑡𝑡𝑛 x!
+> &
+
+Figure 5: Overview of MoECa. 
+
+For unmatched branches, no semantically aligned historical out-put exists in the cache. Reusing an unrelated cached state would therefore be unreliable. We thus directly place all unmatched branches into the recomputation set. For matched branches, MoECa com-putes a recomputation priority score for each branch individually. Specifically, for the current branch 𝑝 , we consider three signals: 
+
+(1) Routing weight. The routing weight 𝑤 𝑡 𝑖,𝑝 reflects the instan-taneous importance of this branch in the current token represen-tation. A larger weight means that the branch contributes more to the current output and thus should be treated more cautiously when deciding reuse. (2) Temporal drift. We define the temporal drift term as Δ𝑡 𝑖,𝑝 , which measures how much the current routing weight deviates from the matched cached state. Even when the expert identity remains unchanged, a large drift indicates that its activation strength has changed significantly, increasing the risk of directly reusing the historical feature. (3) Historical contribution. 
+
+We further define the relative contribution of the matched cached branch as 𝑜 𝑡 0   
+
+> 𝑖,𝑞 (𝑝 )
+
+: This term measures how much the cached branch contributed to the previous MoE output. If a branch already car-ried a large fraction of the representation in the reference state, an incorrect reuse decision is more likely to induce amplified errors. Combining the above signals, we define the branch-level recom-putation score as 𝑠 𝑡 𝑖,𝑝 :
+
+Δ𝑡 𝑖,𝑝 = 𝑤 𝑡 𝑖,𝑝 − 𝑤 𝑡 0   
+
+> 𝑖,𝑞 (𝑝 )
+
+,𝑜 𝑡 0   
+
+> 𝑖,𝑞 (𝑝 )
+
+= ∥ℎ𝑡 0   
+
+> 𝑖,𝑞 (𝑝 )
+
+∥/ ∑︁ 𝑗 ∥ℎ𝑡 0 
+
+> 𝑖,𝑗
+
+∥,𝑠 𝑡 𝑖,𝑝 = 𝑤 𝑡 𝑖,𝑝 + 𝜆 1Δ𝑡 𝑖,𝑝 + 𝜆 2𝑜 𝑡 0   
+
+> 𝑖,𝑞 (𝑝 )
+
+,
+
+(9) where 𝜆 1 and 𝜆 2 control the relative importance of the temporal-drift term and the historical-contribution term. Then, for a matched branch, the recomputation decision is made by thresholding this score, 𝑝 ∈ R 𝑡 𝑖 ⇔ 𝑠 𝑡 𝑖,𝑝 > 𝜏 𝑡 𝑖,𝑝 . In the basic form, 
+
+𝜏 𝑡 𝑖,𝑝 can be a constant threshold. In the next subsection, we fur-ther extend it to an expert-aware adaptive threshold. Through this mechanism, MoECa aligns the caching decision with the actual com-putation decomposition of MoE, allowing different expert branches within the same token to be recomputed or reused independently. 
+
+## 4.3 Expert-Aware Adaptive Threshold 
+
+If a single constant threshold is used throughout inference, then the reuse criterion remains homogeneous even after the caching unit has been refined to the expert-branch level. This would ignore the expert heterogeneity revealed in Section 3.2 To convert this het-erogeneity into a computable decision criterion, we use the entropy of the spatial response distribution of each expert as a practical proxy for its variation sensitivity. Intuitively, an expert whose re-sponses are consistently concentrated in a few local regions tends to have a more localized and lower-entropy spatial distribution. Such an expert is more likely to be associated with detail-sensitive or local-structure modeling, and should therefore be reused more conservatively. To estimate this behavior online, we maintain a runtime spatial activation statistic for each expert. Let 𝐶 𝑡 𝑒,𝑖 denote the response statistic of expert 𝑒 on token position 𝑖 at step 𝑡 . We update it as 
+
+𝐶 𝑡 𝑒,𝑖 = 𝛽𝐶 𝑡 0 
+
+> 𝑒,𝑖
+
++ ( 1 − 𝛽 ) I𝑒 ∈ B 𝑡 𝑖 
+
+ , 𝛽 ∈ [ 0, 1), (10) where I[·] is the indicator function and 𝛽 controls the exponential moving average. Based on 𝐶 𝑡 𝑒,𝑖 , we construct the spatial response distribution of expert 𝑒 at step 𝑡 and compute its entropy as: 
+
+𝑃 𝑡 𝑒 (𝑖 ) = 𝐶 𝑡 𝑒,𝑖 /∑︁ 
+
+> 𝑗
+
+𝐶 𝑡 𝑒,𝑗 , 𝐻 𝑡 𝑒 = −∑︁ 
+
+> 𝑖
+
+𝑃 𝑡 𝑒 (𝑖 ) log 𝑃 𝑡 𝑒 (𝑖 ). (11) To make experts within the same layer comparable, we normalize the entropy and obtain ¯𝐻 𝑡 𝑒 ∈ [ 0, 1].The expert-aware threshold is then defined by mapping the normalized entropy to a per-expert threshold: 
+
+𝜏 𝑡 𝑒 = 𝜏 0
+
+ 1 + 𝛼 (2 ¯ 𝐻 𝑡 𝑒 − 1), 𝛼 ∈ [ 0, 1), (12) where 𝜏 0 is the global base threshold and 𝛼 controls the strength of expert adaptation. When ¯𝐻 𝑡 𝑒 is small, the threshold becomes lower and the corresponding branches are more likely to be recomputed. In contrast, the branches are more likely to be reused. Overall, this expert-aware mechanism allocates more computa-tion budget to experts that are empirically more detail-sensitive, while assigning more reuse budget to experts that are empirically more global and stable. arXiv, 2026, Maoliang Li 1,∗, Haojing Chen 2,∗, Jiayu Chen 1, Zihao Zheng 1, Xinhao Sun 1, Hailong Zou 1, Xiang Chen 1,†
+
+## 5 Experiments 5.1 Experimental Setup 
+
+Model Configuration. We conducted experiments on two com-monly used open-source DiT models based on the MoE architecture for the class-conditional image generation task, namely DSMoE and DiT-MoE, both of which were run on NVIDIA L40 48GB GPUs. Each model adopted its default sampling strategy: DSMoE used DDPM/Euler with 250 sampling steps, while DiT-MoE used DDPM with 250 sampling steps. To ensure a fair comparison with our baseline method ToCa, we set the same hyperparameter as in the baseline, namely the average forced activation cycles 𝑁 , where 
+
+𝑁 = 4. In addition, we performed a small-scale hyperparameter search over the weighting coefficients 𝜆 1 and 𝜆 2 in the branch-level recomputation score, and compared the generation quality under different parameter combinations. The best-performing con-figuration was selected as the default setting and kept fixed in all remaining experiments. More implementation details are provided in the appendix. 
+
+Evaluation Metrics. For the class-conditional image generation task, we uniformly sampled from all 1,000 categories of ImageNet and generated 50,000 images at a resolution of 256 × 256. Perfor-mance was evaluated using FID and IS (Inception Score). The eval-uation protocol strictly followed that provided in DSMoE to ensure the fairness and accuracy of the comparisons. 
+
+Compared Methods. We compare MoECa with three categories of methods: (1) the original DiT-MoE model without caching; (2) naive acceleration schemes that directly reduce the number of sampling steps (33 % steps and 37% steps); and (3) representative existing cache-based acceleration methods, including ToCa, DuCa, and TeaCache. For each method, we report latency, total FLOPs, relative speedup, FID, and IS. For the DSMoE series, we further include PSNR and SSIM as auxiliary metrics for reconstruction consistency. 
+
+## 5.2 Experiment Results 
+
+Overall Results. Table 1 presents the main results of MoECa under five model configurations. As shown, MoECa consistently achieves the best, or a more favorable, balance between inference ef-ficiency and generation quality across DSMoE-S-E16, DSMoE-S-E48, DSMoE-L-E16, DSMoE-L-E48, and DiT-MoE. Specifically, among all caching-based baselines, MoECa attains the lowest latency and lower FLOPs in all five settings, while consistently achieving the best FID. For example, on DSMoE-L-E48, MoECa reduces the la-tency to 165.01 ms and the FLOPs to 218.31 T, while delivering the highest inference speedup of 2.83 × without sacrificing genera-tion quality. On DiT-MoE, MoECa also achieves a latency of 50.17 ms and a 2.13 × speedup, while further reducing the FID to 30.76, outperforming all caching-based baselines. 
+
+Comparison with Reduced Sampling-Step Methods. Al-though 33% steps and 37% steps can achieve higher theoretical speedups, they both suffer from clear degradation in generation quality. For instance, on DSMoE-L-E48, although 33% steps reaches a 3.01 × speedup, its FID deteriorates to 15.91; in contrast, MoECa maintains the FID at 9.54 under a comparable 2.83 × speedup. Simi-lar phenomena are consistently observed across the other model settings. This suggests that merely reducing the number of sam-pling steps in a coarse-grained manner can significantly reduce computation, but it is difficult to preserve the diffusion model’s fine-grained modeling of intermediate denoising states. By contrast, through expert-branch-level selective reuse, MoECa is able to better preserve critical representations while achieving high speedup. 
+
+Comparison with Baseline Methods. Compared with ToCa, DuCa, and TeaCache, MoECa demonstrates stable advantages across all five model settings. In terms of latency, MoECa further re-duces inference time by approximately 4.5%–11.4% compared with the strongest caching baseline. In terms of computation, MoECa achieves the lowest FLOPs in all settings. In terms of generation quality, MoECa obtains the best FID and SSIM across the five con-figurations, while its IS and PSNR remain consistently very close to, or even better than, the strongest baselines. These results in-dicate that shifting the caching granularity from the token level down to the expert-branch level enables more accurate identifi-cation of truly reusable computation branches, thereby reducing unnecessary recomputation and alleviating the quality loss caused by coarse-grained reuse. 
+
+Trends Across Model Scales. Overall, the advantages of MoECa remain stable across different model scales. Moreover, under the same model scale, the E48 configuration generally exhibits more pronounced gains than E16. For example, on DSMoE-S, MoECa achieves a 2.81 × speedup under E48, slightly higher than the 2.78 ×
+
+achieved under E16; on DSMoE-L, this gap further widens to 2.83 ×
+
+versus 2.77 ×. This phenomenon suggests that when more experts are activated, the branch-level heterogeneity introduced by expert decomposition within MoE becomes more pronounced, thereby providing greater room for optimization through MoECa’s fine-grained reuse mechanism. In other words, because E48 activates more experts, it contains a richer set of separable and selectively reusable computation branches, making the advantages of MoECa more evident. 
+
+Qualitative Results. Figure 6 presents a visual comparison of different methods. It can be observed that in high-frequency regions—such as the rearview mirror scene, frog textures, screw details, and the edges of coffee pot—the results generated by MoECa are closer to those of the original model. In contrast, ToCa, DuCa, and TeaCache exhibit more noticeable structural blurring, edge stretching, or loss of local details in some examples. This further verifies that MoECa is able to preserve local details and overall structural consistency well even under high-acceleration settings. 
+
+## 5.3 Ablation Study 
+
+Ablation on the Adaptive Threshold. To verify the necessity of dynamic cache control based on the response distribution in the expert space, we compared the performance of a fixed threshold with that of an expert-adaptive threshold. The results show that introducing the adaptive threshold consistently improves model performance. Compared with the fixed-threshold setting, the adap-tive threshold achieves better results under different values of 𝛼 ,with the best performance obtained at 𝛼 = 0.6, corresponding to FID 40.58, IS 38.35, PSNR 29.447, and SSIM 0.7145. These results indicate that a unified reuse criterion is insufficient to fully accommodate the functional differences among experts. In contrast, dynamically MoECa: Aligning Feature Reuse with Expert Decomposition in Diffusion Transformers arXiv, 2026, 
+
+Table 1: Quantitative comparison on class-to-image generation on ImageNet with DSMoE. 
+
+Method Latency(ms) ↓ Latency Speedup ↑ FLOPs(T) ↓ FLOPs Speedup ↑ FID ↓ Inception Score ↑ PSNR ↑ SSIM ↑
+
+DSMoE-S-E16 64.32 1.00 × 53.62 1.00 × 39.82 38.57 – –
+
+33% steps 30.62 2.10 × 17.81 3.01 × 51.28 37.41 28.087 0.6776 
+
+37% steps 31.37 2.05 × 19.93 2.69 × 48.96 37.58 28.215 0.6831 
+
+ToCa 33.19 1.94 × 20.25 2.65 × 41.16 38.70 29.122 0.7082 
+
+DuCa 32.78 1.96 × 20.31 2.64 × 40.83 38.64 29.276 0.7137 
+
+TeaCache 33.85 1.90 × 24.04 2.23 × 40.59 38.62 29.330 0.7097 
+
+MoECa 29.61 2.17 × 19.27 2.78 × 40.39 38.67 29.418 0.7142 DSMoE-S-E48 182.77 1.00 × 43.25 1.00 × 40.21 38.31 – –
+
+33% steps 79.46 2.30 × 14.37 3.01 × 53.47 36.98 28.094 0.6784 
+
+37% steps 81.25 2.25 × 16.08 2.69 × 49.85 37.36 28.231 0.6847 
+
+ToCa 86.26 2.12 × 16.51 2.62 × 41.62 38.26 29.087 0.7071 
+
+DuCa 84.88 2.15 × 16.32 2.65 × 41.34 38.28 29.314 0.7136 
+
+TeaCache 89.15 2.05 × 18.97 2.28 × 40.89 38.28 29.286 0.7104 
+
+MoECa 79.17 2.31 × 15.38 2.81 × 40.58 38.35 29.447 0.7145 DSMoE-L-E16 141.36 1.00 × 729.38 1.00 × 9.81 115.26 – –
+
+33% steps 70.67 2.00 × 242.31 3.01 × 16.37 113.84 28.784 0.7227 
+
+37% steps 71.15 1.99 × 271.14 2.69 × 14.26 114.12 28.961 0.7273 
+
+ToCa 72.84 1.94 × 277.71 2.63 × 10.72 115.21 29.861 0.7544 
+
+DuCa 71.92 1.97 × 278.39 2.62 × 10.58 115.17 29.963 0.7656 
+
+TeaCache 72.49 1.95 × 327.08 2.23 × 10.47 115.14 30.174 0.7762 
+
+MoECa 68.71 2.06 × 263.39 2.77 × 10.21 115.19 30.227 0.7819 DSMoE-L-E48 352.32 1.00 × 617.83 1.00 × 9.20 118.42 – –
+
+33% steps 166.93 2.11 × 205.26 3.01 × 15.91 116.87 28.792 0.7231 
+
+37% steps 173.32 2.03 × 229.67 2.69 × 13.68 117.46 28.947 0.7265 
+
+ToCa 177.20 1.99 × 236.71 2.61 × 10.14 118.37 29.836 0.7518 
+
+DuCa 173.84 2.03 × 234.02 2.64 × 10.01 118.42 29.978 0.7642 
+
+TeaCache 184.46 1.91 × 272.17 2.27 × 9.76 118.47 30.238 0.7776 
+
+MoECa 165.01 2.14 × 218.31 2.83 × 9.54 118.53 30.229 0.7808 
+
+Table 2: Quantitative results with DiT-MoE. 
+
+Method Latency(ms) ↓ FLOPs(T) ↓ Speed ↑ FID ↓ IS ↑
+
+DiT-MoE 103.71 163.98 1.00 × 28.83 54.14 
+
+33% steps 46.38 54.47 3.01 × 39.82 50.38 
+
+37% steps 51.83 60.95 2.69 × 37.26 51.17 
+
+ToCa 55.45 84.52 1.94 × 31.42 53.48 
+
+DuCa 54.21 82.63 1.98 × 31.28 53.55 
+
+TeaCache 54.87 91.61 1.79 × 31.13 53.52 
+
+MoECa 50.17 76.98 2.13 × 30.76 53.72 
+
+Table 3: Ablation on threshold strategy. 
+
+Method FID ↓ IS ↑ PSNR ↑ SSIM ↑
+
+Fixed Threshold 40.87 38.19 29.112 0.7082 
+
+Adaptive Threshold (𝛼 =0.4) 40.72 38.27 29.376 0.7118 
+
+Adaptive Threshold (𝛼 =0.8) 40.65 38.30 29.285 0.7131 
+
+Adaptive Threshold (𝛼 =0.6) 40.58 38.35 29.447 0.7145 
+
+adjusting the threshold based on expert heterogeneity enables a more reasonable allocation of recomputation and reuse budgets, thereby leading to better generation quality. 
+
+Impact of the Initial Base Threshold 𝜏 0. The initial base thresh-old 𝜏 0 determines the overall tendency of the model toward reuse. We conducted an ablation study on 𝜏 0 over the range from 0.65 to 1.00. The results show that, as 𝜏 0 increases, the generation qual-ity first improves and then declines, with the best performance Original 
+
+> ×1.0
+> ToCa
+> ×2.61
+> DuCa
+> ×2.64
+> TeaCache
+> ×2.27
+> MoECa
+> ×2.83
+> Method
+> Class id
+> 783
+> screw
+> 475
+> car mirror
+> 31
+> tree frog
+> 505
+> coffee pot
+
+Figure 6: Visualization examples for different acceleration methods on DSMoE. 
+
+achieved at 𝜏 0 = 0.80 . This phenomenon indicates that an overly low threshold leads to overly aggressive reuse, thereby introducing additional errors, whereas an excessively high threshold causes branches that could otherwise be safely reused to be frequently recomputed, thus weakening the benefit of caching. Therefore, arXiv, 2026, Maoliang Li 1,∗, Haojing Chen 2,∗, Jiayu Chen 1, Zihao Zheng 1, Xinhao Sun 1, Hailong Zou 1, Xiang Chen 1,†1.00 0.95 0.90 0.85 0.80 0.75 0.70 0.65  0.80  0.85 0.70  0.75 0.65 0.60 0.55 0.50 0.45  
+
+> 40.6 0
+> 40.65
+> 40.70
+> 40.75
+> 40.75
+> 40.70
+> 40.85
+> 40.90
+> 40.80
+> 40.65
+> 40.60
+> 40.55
+> 38.36
+> 38.34
+> 38.32
+> 38.30
+> 38.28
+> 38.26
+> 38.24
+> 38.35
+> 38.30
+> 38.25
+> 38.20
+> FI D
+> FI D
+> IS
+> IS
+> Initial Threshold EMA decay factor
+
+Figure 7: Parameter Ablation Experiment.       
+
+> Reuse-over-match ratio 0. 5
+> 0. 6
+> 0. 7
+> 0. 8
+> 0. 9
+> 1.0
+> 050 100 150 200 250 Step
+> MoECa Expert Reuse over Match Ratio
+> Ratio
+> S-E16
+> S-E48
+> L-E16
+> L-E48
+> 0. 4
+
+Figure 8: Visualization of MoECa reuse-over-match ratio across denoising steps. 
+
+𝜏 0 = 0.80 achieves a better balance between reuse efficiency and feature fidelity. 
+
+Impact of EMA Decay Factor 𝛽 . When estimating the response distribution in the expert space, we adopt an online exponential moving average (EMA), where the EMA decay factor 𝛽 controls the effective window length of the historical response statistics. We evaluate 𝛽 in the range from 0.45 to 0.85. The results show that the model achieves the best FID and IS performance when 𝛽 = 0.65 .If 𝛽 is too small, the statistics rely excessively on the current step and thus become more sensitive to local noise perturbations. In contrast, if 𝛽 is too large, the effective statistical window becomes overly long, causing the threshold updates to lag behind the actual routing dynamics during sampling. Therefore, a moderate decay factor is better suited to capturing the dynamic characteristics of the expert-space response distribution, thereby providing a more stable and accurate basis for adaptive cache control. Figure 8 shows that the reuse-over-match ratio, defined as the fraction of matched expert branches that are finally reused, re-mains high for all DSMoE variants and quickly stabilizes after a brief fluctuation in the early denoising stage, indicating that most routed expert branches can be consistently aligned across adjacent timesteps. This observation supports the core assumption behind MoECa, namely that branch-level reuse is not only feasible but also broadly available in DiT MoE. Notably, the E48 variants exhibit larger early-stage fluctuations than E16, suggesting that activating more experts induces stronger routing diversity and branch-level heterogeneity; however, the ratio still stays high overall, which implies that the richer expert decomposition in E48 creates more room for fine-grained selective reuse and helps explain why MoECa yields larger speedup gains under higher-expert settings. 
+
+## 6 Related Works 6.1 Transformer and MoE in Diffusion Models 
+
+Diffusion Transformers [ 11 ] (DiTs) have emerged as a dominant paradigm in visual generation due to their remarkable ability to produce high-quality and diverse content. Recently, MoE [ 4] has emerged as an important new paradigm. By replacing part of the dense feed-forward layers with sparse expert modules and using a routing mechanism to dynamically activate only a small subset of experts for different tokens, it enables conditional computation. In this way, DiT can reduce the number of activated parameters and the inference cost while maintaining or even improving model capacity and generation quality, thereby improving generation ef-ficiency and model scalability. For example, DiT-MoE [ 5] builds upon the MoE architecture, scales the model up to 16B parameters, and reduces the computational cost during inference. EC-DiT [ 18 ]further designs an adaptive computation allocation mechanism based on expert-choice routing, scaling the model to 97B parame-ters and demonstrating strong scalability. DiffMoE [ 16 ] addresses the heterogeneity in the diffusion process by introducing a global token pool and a capacity predictor, making expert specialization and computation allocation more dynamic. However, although ex-isting DiT-MoE paradigms alleviate computational, there remains substantial room for improvement in overall generation efficiency. 
+
+## 6.2 Diffusion Model Acceleration 
+
+To improve the generation efficiency of DiT models, many accelera-tion methods have been proposed, including quantization [ 2], prun-ing [ 1 ], and distillation [ 20 ]. Among them, cache-based methods have recently attracted increasing attention due to their training-free nature and strong generality. Existing methods can be broadly categorized into four groups: (1) Block-Level Caching: for example, DeepCache [ 10 ] reduces computation by skipping and reusing the features of DiT blocks; (2) Layer-Level Caching: for example, Δ-DiT [ 3] and FORA [ 14 ] cache and reuse the features and residuals of different DiT layers; (3) Step Caching: for example, TeaCache [ 8 ]exploits the redundancy between adjacent diffusion timesteps and directly reuses historical results at timesteps with strong redun-dancy; and (4) Token-Level Caching: for example, ToCa [ 22 ] and DuCa [ 23 ] further leverage the variation differences among tokens during the diffusion process, and only recompute a small num-ber of critical tokens. However, the granularity of these methods still remains at the block, layer, step, or token level, without being specifically designed for MoE architecture. 
+
+## 7 Conclusion 
+
+We present MoECa, a fine-grained caching framework for DiT-MoE that performs feature reuse at the expert-branch level instead of the whole-token level. By aligning cache decisions with the internal expert decomposition of MoE layers, MoECa enables more effective cross-timestep reuse through branch-level caching, expert-aware adaptive control, and synchronized updates across MoE and attention paths. Experiments on DSMoE and DiT-MoE show that MoECa consistently achieves a better speed-quality trade-off than existing cache-based methods, with up to 2.83 × inference speedup while preserving generation quality. MoECa: Aligning Feature Reuse with Expert Decomposition in Diffusion Transformers arXiv, 2026, 
+
+## References 
+
+[1] Saeed Ranjbar Alvar, Gursimran Singh, Mohammad Akbari, and Yong Zhang. 2025. Divprune: Diversity-based visual token pruning for large multimodal models. In Proceedings of the Computer Vision and Pattern Recognition Conference .9392–9401. [2] Lei Chen, Yuan Meng, Chen Tang, Xinzhu Ma, Jingyan Jiang, Xin Wang, Zhi Wang, and Wenwu Zhu. 2025. Q-dit: Accurate post-training quantization for diffusion transformers. In Proceedings of the Computer Vision and Pattern Recognition Conference . 28306–28315. [3] Pengtao Chen, Mingzhu Shen, Peng Ye, Jianjian Cao, Chongjun Tu, Christos-Savvas Bouganis, Yiren Zhao, and Tao Chen. 2024. Δ-DiT: A Training-Free Ac-celeration Method Tailored for Diffusion Transformers. arXiv:2406.01125 [cs.CV] https://arxiv.org/abs/2406.01125 [4] Damai Dai, Chengqi Deng, Chenggang Zhao, RX Xu, Huazuo Gao, Deli Chen, Jiashi Li, Wangding Zeng, Xingkai Yu, Yu Wu, et al . 2024. Deepseekmoe: Towards ultimate expert specialization in mixture-of-experts language models. In Proceed-ings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) . 1280–1297. [5] Zhengcong Fei, Mingyuan Fan, Changqian Yu, Debang Li, and Junshi Huang. 2024. Scaling diffusion transformers to 16 billion parameters. arXiv preprint arXiv:2407.11633 (2024). [6] Martin Heusel, Hubert Ramsauer, Thomas Unterthiner, Bernhard Nessler, and Sepp Hochreiter. 2018. GANs Trained by a Two Time-Scale Update Rule Converge to a Local Nash Equilibrium. arXiv:1706.08500 [cs.LG] https://arxiv.org/abs/1706. 08500 [7] Quan Huynh-Thu and Mohammed Ghanbari. 2008. Scope of validity of PSNR in image/video quality assessment. Electronics Letters 44, 13 (2008), 800–801. [8] Feng Liu, Shiwei Zhang, Xiaofeng Wang, Yujie Wei, Haonan Qiu, Yuzhong Zhao, Yingya Zhang, Qixiang Ye, and Fang Wan. 2024. Timestep Embedding Tells: It’s Time to Cache for Video Diffusion Model. arXiv preprint arXiv:2411.19108 (2024). [9] Yahui Liu, Yang Yue, Jingyuan Zhang, Chenxi Sun, Yang Zhou, Wencong Zeng, Ruiming Tang, and Guorui Zhou. 2025. Efficient Training of Diffusion Mixture-of-Experts Models: A Practical Recipe. arXiv:2512.01252 [cs.LG] https://arxiv. org/abs/2512.01252 [10] Xinyin Ma, Gongfan Fang, and Xinchao Wang. 2023. DeepCache: Accelerating Diffusion Models for Free. arXiv:2312.00858 [cs.CV] https://arxiv.org/abs/2312. 00858 [11] William Peebles and Saining Xie. 2023. Scalable diffusion models with transform-ers. In Proceedings of the IEEE/CVF international conference on computer vision .4195–4205. [12] Olga Russakovsky, Jia Deng, Hao Su, Jonathan Krause, Sanjeev Satheesh, Sean Ma, Zhiheng Huang, Andrej Karpathy, Aditya Khosla, Michael Bernstein, Alexander C. Berg, and Li Fei-Fei. 2015. ImageNet Large Scale Visual Recognition Challenge. arXiv:1409.0575 [cs.CV] https://arxiv.org/abs/1409.0575 [13] Tim Salimans, Ian Goodfellow, Wojciech Zaremba, Vicki Cheung, Alec Radford, and Xi Chen. 2016. Improved Techniques for Training GANs. arXiv:1606.03498 [cs.LG] https://arxiv.org/abs/1606.03498 [14] Pratheba Selvaraju, Tianyu Ding, Tianyi Chen, Ilya Zharkov, and Luming Liang. 2024. Fora: Fast-forward caching in diffusion transformer acceleration. arXiv preprint arXiv:2407.01425 (2024). [15] Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. 2017. Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer. arXiv:1701.06538 [cs.LG] https: //arxiv.org/abs/1701.06538 [16] Minglei Shi, Ziyang Yuan, Haotian Yang, Xintao Wang, Mingwu Zheng, Xin Tao, Wenliang Zhao, Wenzhao Zheng, Jie Zhou, Jiwen Lu, Pengfei Wan, Di Zhang, and Kun Gai. 2025. DiffMoE: Dynamic Token Selection for Scalable Diffusion Transformers. arXiv:2503.14487 [cs.CV] https://arxiv.org/abs/2503.14487 [17] Jiaming Song, Chenlin Meng, and Stefano Ermon. 2020. Denoising diffusion implicit models. arXiv preprint arXiv:2010.02502 (2020). [18] Haotian Sun, Tao Lei, Bowen Zhang, Yanghao Li, Haoshuo Huang, Ruoming Pang, Bo Dai, and Nan Du. 2025. EC-DIT: Scaling Diffusion Transformers with Adaptive Expert-Choice Routing. arXiv:2410.02098 [cs.CV] https://arxiv.org/ abs/2410.02098 [19] Zhou Wang, Alan C. Bovik, Hamid R. Sheikh, and Eero P. Simoncelli. 2004. Image Quality Assessment: From Error Visibility to Structural Similarity. IEEE Transactions on Image Processing 13, 4 (2004), 600–612. [20] Tianwei Yin, Michaël Gharbi, Richard Zhang, Eli Shechtman, Fredo Durand, William T Freeman, and Taesung Park. 2024. One-step diffusion with distribution matching distillation. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition . 6613–6623. [21] Hui Zhang, Tingwei Gao, Jie Shao, and Zuxuan Wu. 2025. BlockDance: Reuse Structurally Similar Spatio-Temporal Features to Accelerate Diffusion Transform-ers. arXiv:2503.15927 [cs.CV] https://arxiv.org/abs/2503.15927 [22] Chang Zou, Xuyang Liu, Ting Liu, Siteng Huang, and Linfeng Zhang. 2024. Accelerating diffusion transformers with token-wise feature caching. arXiv preprint arXiv:2410.05317 (2024). [23] Chang Zou, Evelyn Zhang, Runlin Guo, Haohang Xu, Conghui He, Xuming Hu, and Linfeng Zhang. 2025. Rethinking Token-wise Feature Caching: Accelerating Diffusion Transformers with Dual Feature Caching. arXiv:2412.18911 [cs.LG] https://arxiv.org/abs/2412.18911 arXiv, 2026, Maoliang Li 1,∗, Haojing Chen 2,∗, Jiayu Chen 1, Zihao Zheng 1, Xinhao Sun 1, Hailong Zou 1, Xiang Chen 1,†
+
+## 8 Appendix 8.1 Overview 
+
+This appendix provides supplementary materials that further sup-port the main paper, including detailed experimental settings, im-plementation and hardware configurations, as well as additional ablation analyses and qualitative visualizations. These supplemen-tary contents further clarify the experimental protocol and provide additional evidence for the effectiveness of the proposed method. Together, they offer a more comprehensive understanding of the proposed MoECa method. Specifically, the appendix is organized as follows: 
+
+• Section 8.2 presents the experimental details of the model con-figuration and hardware setup. 
+
+• Section 8.3 supplements the ablation results for the branch-level scoring mechanism. 
+
+• Section 8.4 reports the ablation study on the key hyperparame-ters 𝜆 1 and 𝜆 2.
+
+• Section 8.5 provides additional qualitative visualization results. 
+
+## 8.2 Experiment Details 
+
+In this section, we provide the detailed settings for the experiments introduced in Section 5.1. All experiments are conducted on a server equipped with four NVIDIA L40 GPUs, each with 40 GB of mem-ory. We use PyTorch 2.6.0 and torchvision 0.21.0 in an Anaconda environment, with PyTorch CUDA runtime 12.4, GPU driver ver-sion 580.126.09, and local CUDA toolkit ( nvcc ) version 12.8. For the sampling evaluation of DSMoE[ 9] and DiT-MoE[ 5] mod-els, we uniformly sample from the 1,000 ImageNet[ 12 ] classes. The batch size on each GPU is set to 125, yielding a total of 50,000 generated images at a resolution of 256 × 256 with 250 denoising steps. We evaluate image generation performance using FID-50K[ 6 ], Inception Score[13], PSNR[7], and SSIM[19]. The MoE expert analysis visualization shown in Figure 2 of the main paper is generated using the analysis script provided in the DiT-MoE codebase. 
+
+ToCa. We implement ToCa[ 22 ] as a runtime patching mecha-nism for DiT MoE blocks. During sparse full-computation steps, the model performs attention and FFN/MoE computation as usual and refreshes the cache. During most of the remaining steps, the model reuses the cached attention outputs, recomputes only a subset of fresh tokens in the FFN/MoE branch, and writes the updated results back to the cache. We use the hyperparameters fresh_ratio =0.07, 
+
+ratio_scheduler =ddpm250 , and fresh_threshold =4. 
+
+DuCa. We implement DuCa[ 23 ] with the same runtime patching framework as ToCa, but introduce an additional, more aggressive reuse phase. Specifically, DuCa alternates among three modes: full steps, ToCa steps, and aggressive steps. In an aggressive step, the method skips the entire Transformer block stack and directly reuses the final hidden state cached from the previous valid step. We adopt the same primary hyperparameters as ToCa: fresh_ratio =0.07, 
+
+ratio_scheduler =ddpm250 , and fresh_threshold =4. 
+
+TeaCache. We implement TeaCache[ 8] as a model-level residual reuse strategy rather than a token-level local refresh mechanism. TeaCache estimates the change between adjacent steps using the timestep-modulated input of the first block. When the accumu-lated relative change falls below a predefined threshold, it skips the whole Transformer block stack and reuses the cached Trans-former residual, while still recomputing the final layer and the unpatchify operation. We set teacache_rel_l1_thresh to 0.40 and teacache_rel_l1_eps to 1e-6. 
+
+## 8.3 Ablation on Branch-Level Score 
+
+To further validate the effectiveness of the proposed branch-level scoring mechanism, we conducted supplementary ablation exper-iments on the DSMoE-S-E48 model to examine different compo-sitions of the branch-level recomputation score. Specifically, we examined three settings that utilize a single signal: routing weight (𝑤 ) only, temporal drift ( Δ) only, and historical contribution ( 𝑜 )only. We also compared three combinations of these signals: rout-ing weight + temporal drift ( 𝑤 +Δ), routing weight + historical contribution ( 𝑤 +𝑜 ), and temporal drift + historical contribution (Δ+𝑜 ). Finally, we compared these against the complete scoring mechanism, MoECa (All). Here, the complete scoring mechanism combines the routing weight 𝑤 of the current branch, the temporal drift term Δ across time steps, and the historical contribution term 
+
+𝑜 of cached branches to collectively determine whether the current expert branch requires recomputation. The quantitative results are summarized in Table 4. Table 4 shows that relying on a single signal is less effective, while combining multiple signals leads to better overall results. This confirms the advantage of the full scoring design. 
+
+## 8.4 Ablation on 𝜆 1 and 𝜆 2
+
+Table 5 shows that the best results are achieved when 𝜆 1 and 𝜆 2
+
+are set to balanced values. This suggests that a proper trade-off between the two terms is important for stable performance. 
+
+Table 4: Ablation on the branch-level scoring mechanism.                                            
+
+> Method FID ↓IS ↑PSNR ↑SSIM ↑
+> DSMoE-S-E48 40.21 38.31 ––
+> 𝑤 only 41.74 37.63 28.801 0.7032
+> Δonly 41.36 37.79 28.948 0.7058
+> 𝑜 only 41.58 37.66 28.873 0.7046
+> 𝑤 +Δ40.67 38.24 29.462 0.7136
+> 𝑤 +𝑜 41.01 37.96 29.158 0.7089
+> Δ+𝑜 40.84 38.11 29.287 0.7115
+> MoECa (All) 40.58 38.35 29.447 0.7145
+
+## 8.5 Supplementary Visualizations 
+
+Figure 9 presents layer-wise output drift heatmaps for S-E16, S-E48, L-E16, and L-E48. Across all four settings, the drift is consistently concentrated in higher MoE layers, while the lower layers remain comparatively stable throughout most denoising steps. We also observe a clear increase in drift near the late denoising stage, indi-cating that the final refinement process depends more strongly on updates from upper-layer experts. Compared with the E16 variants, the E48 variants exhibit a more localized and structured drift pat-tern, whereas L-E16 shows broader fluctuations across the middle and upper layers. In addition, the larger L-series models maintain MoECa: Aligning Feature Reuse with Expert Decomposition in Diffusion Transformers arXiv, 2026, 
+
+Table 5: Illustrative ablation on 𝜆 1 and 𝜆 2. Rows vary 𝜆 1 and columns vary 𝜆 2 with a step size of 0.1. 
+
+𝜆 1
+
+𝜆 2
+
+0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0 1.1 0.5 41.69 41.50 41.36 41.34 41.24 41.27 41.34 41.35 41.57 41.74 42.00 0.6 41.57 41.38 41.17 41.04 41.00 41.03 41.15 41.24 41.33 41.47 41.73 0.7 41.32 41.17 41.05 40.94 40.86 40.89 40.93 41.03 41.09 41.24 41.51 0.8 41.22 41.05 40.86 40.86 40.75 40.71 40.77 40.86 40.96 41.14 41.34 0.9 41.13 40.96 40.85 40.73 40.64 40.61 40.61 40.78 40.90 41.02 41.21 1.0 41.11 40.94 40.77 40.66 40.61 40.58 40.62 40.67 40.84 40.99 41.11 1.1 41.14 40.87 40.72 40.71 40.64 40.58 40.60 40.61 40.73 40.95 41.14 1.2 41.16 40.99 40.81 40.74 40.69 40.66 40.61 40.69 40.81 40.92 41.15 1.3 41.31 41.11 40.89 40.81 40.69 40.70 40.73 40.74 40.82 40.99 41.12 1.4 41.44 41.24 40.97 40.85 40.78 40.83 40.86 40.85 40.89 41.03 41.26 1.5 41.52 41.37 41.22 41.09 40.97 40.96 40.95 40.94 41.09 41.14 41.32 
+
+(a) FID ↓
+
+𝜆 1
+
+𝜆 2
+
+0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0 1.1 0.5 38.11 38.14 38.12 38.13 38.20 38.22 38.21 38.16 38.14 38.09 38.03 0.6 38.16 38.20 38.20 38.20 38.25 38.22 38.22 38.21 38.16 38.16 38.10 0.7 38.19 38.21 38.25 38.27 38.28 38.24 38.23 38.24 38.22 38.23 38.16 0.8 38.18 38.25 38.27 38.32 38.33 38.31 38.24 38.29 38.31 38.22 38.17 0.9 38.19 38.26 38.30 38.32 38.33 38.33 38.33 38.32 38.28 38.20 38.18 1.0 38.21 38.25 38.32 38.32 38.33 38.34 38.34 38.33 38.30 38.26 38.19 1.1 38.28 38.31 38.31 38.31 38.35 38.35 38.34 38.34 38.31 38.28 38.20 1.2 38.24 38.29 38.33 38.34 38.32 38.35 38.34 38.30 38.27 38.29 38.29 1.3 38.16 38.23 38.31 38.33 38.33 38.34 38.31 38.27 38.27 38.29 38.25 1.4 38.18 38.19 38.25 38.31 38.34 38.33 38.29 38.28 38.26 38.26 38.21 1.5 38.11 38.15 38.23 38.25 38.25 38.30 38.30 38.29 38.26 38.24 38.17 
+
+(b) IS ↑
+
+visibly stronger responses over a wider range of upper layers, sug-gesting that model capacity leads to richer layer-wise specialization during denoising. By contrast, the sparse bright regions in the E48 variants indicate that only a limited subset of layers becomes highly dynamic at specific stages, which is favorable for selective recomputation. The sharp brightening near the final steps further implies that late-stage sampling requires finer feature correction than earlier stages. These observations suggest that temporal varia-tion is highly non-uniform across both layers and time steps, which further supports selectively allocating recomputation to the most dynamic regions. Figure 10 provides an instance-level supplement to Figure 4 in the main paper using the DSMoE-S-E16 model. While Figure 4 summarizes expert activation statistics in an aggregated manner, the appendix visualization offers a more intuitive view of how expert routing behaves on representative samples. From the accu-mulated routing maps, we observe that different experts exhibit clearly non-uniform response affinities, suggesting content-aware specialization rather than a uniform spatial partition of the image. In examples such as the dog, peacock, mushroom, ray-like aquatic sample, and cobra, several experts are repeatedly activated around semantically salient object parts, including animal heads, feathers, B1              
+
+> B3
+> B5
+> B7
+> B9
+> B1
+> B3
+> B5
+> B7
+> B9
+> B11
+> B1
+> B19
+> B17
+> B15
+> B13
+> B11
+> B9
+> B7
+> B5
+> B3
+> B1
+> B19
+> B17
+> B15
+> B13
+> B11
+> B9
+> B7
+> B5
+> B3
+> B23
+> B21
+> 0. 0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 50 100150 200
+> 50 100150 200
+> 50 100150 200
+> 50 100150 200
+> S-E48 S-E16
+> L-E16 L-E48
+> Denoising step
+> MoE  Layer
+
+Figure 9: Layer-wise output drift heatmaps for S-E16, S-E48, L-E16, and L-E48 across denoising steps. arXiv, 2026, Maoliang Li 1,∗, Haojing Chen 2,∗, Jiayu Chen 1, Zihao Zheng 1, Xinhao Sun 1, Hailong Zou 1, Xiang Chen 1,†Expert 1  Expert 2  Expert 3  Expert 4                                                                      
+
+> Expert 5 Expert 6 Expert 7 Expert 8
+> Expert 9 Expert 10 Expert 11 Expert 12
+> Expert 13 Expert 14 Expert 15 Expert 16 Expert 1 Expert 2 Expert 3 Expert 4
+> Expert 5 Expert 6 Expert 7 Expert 8
+> Expert 9 Expert 10 Expert 11 Expert 12
+> Expert 13 Expert 14 Expert 15 Expert 16 Expert 1 Expert 2 Expert 3 Expert 4
+> Expert 5 Expert 6 Expert 7 Expert 8
+> Expert 9 Expert 10 Expert 11 Expert 12
+> Expert 13 Expert 14 Expert 15 Expert 16 Expert 1 Expert 2 Expert 3 Expert 4
+> Expert 5 Expert 6 Expert 7 Expert 8
+> Expert 9 Expert 10 Expert 11 Expert 12
+> Expert 13 Expert 14 Expert 15 Expert 16 Expert 1 Expert 2 Expert 3 Expert 4
+> Expert 5 Expert 6 Expert 7 Expert 8
+> Expert 9 Expert 10 Expert 11 Expert 12
+> Expert 13 Expert 14 Expert 15 Expert 16 Expert 1 Expert 2 Expert 3 Expert 4
+> Expert 5 Expert 6 Expert 7 Expert 8
+> Expert 9 Expert 10 Expert 11 Expert 12
+> Expert 13 Expert 14 Expert 15 Expert 16
+
+Figure 10: Supplementary visualizations of the token count routed to each expert, accumulated across all steps. 
+
+mushroom caps, body contours, and cobra hoods. This indicates that expert responses are often aligned with discriminative struc-tures and texture-rich regions instead of being diffusely distributed over the entire image. More specifically, some experts show highly localized and con-centrated activation patterns, mainly attending to regions with stronger semantic variation, complex boundaries, or fine-grained textures. In contrast, other experts exhibit broader and smoother activation distributions, covering larger homogeneous areas and tending to capture background content or low-frequency structural information. Importantly, this specialization is not only spatial but also temporal: the progression maps further suggest that different experts become prominent at different denoising stages, with some focusing more on early structural formation and others remaining active during later detail refinement. Such behavior indicates that the routing mechanism encourages experts to develop complemen-tary functional roles throughout generation. Overall, these visualizations provide additional empirical evi-dence that expert behaviors in DiT-MoE are heterogeneous across both space and denoising progress. This observation further sup-ports the motivation of MoECa: since different experts contribute differently to representation updating and vary in their sensitivity to reuse error, caching decisions should be aligned with expert-level decomposition rather than made uniformly at the whole-token level. These qualitative observations are consistent with the analysis in Section 3 and further justify the expert-aware branch-level reuse design adopted in MoECa.

@@ -1,0 +1,2729 @@
+Title: Toward Calibrated Mixture-of-Experts Under Distribution Shift
+
+URL Source: https://arxiv.org/pdf/2606.20544v1
+
+Published Time: Fri, 19 Jun 2026 01:19:48 GMT
+
+Number of Pages: 30
+
+Markdown Content:
+# Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+Gina Wong 1 Drew Prinster 1 Suchi Saria 1 Rama Chellappa 1 Anqi Liu 1
+
+Abstract 
+
+Calibration aligns a model’s predictive uncer-tainty with the frequencies of its empirical out-comes and is important for understanding and trusting reported probabilities. Recent work shows that enforcing calibration at the level of individual predictors can improve ensemble ac-curacy and calibration, with mixture-of-experts (MoE) models showing strong empirical improve-ments in particular; however, the conditions under which calibration helps MoE are not well under-stood. In this work, we study how MoE models behave under distribution shift, focusing on how routing mechanisms interact with expert-level cal-ibration. We show that expert calibration is suf-ficient to ensure calibration of the overall model under a broad class of distribution shifts in hard-routed models, but is insufficient for calibrating soft-routed models. To address this, we propose an adversarial reweighting that penalizes calibra-tion errors of the routed aggregate under distri-bution shift, and we demonstrate that it improves the accuracy-calibration tradeoff both on average and on difficult subsets of the data, across model classes, prediction tasks, and distribution shifts. 
+
+1. Introduction 
+
+Mixture-of-experts (MoE) is a widely used architecture that decomposes a difficult learning problem into simpler, spe-cialized subproblems. In an MoE, a routing model directs inputs to a single expert under hard routing, or to a weighted combination of experts under soft routing. This design natu-rally supports conditional computation , where only a subset of parameters is activated for each input, allowing model capacity to grow without a proportionate increase in com-pute (Fedus et al., 2022; Du et al., 2022; Ludziejewski et al., 2025). Because different experts are trained on different    
+
+> 1Johns Hopkins University, Baltimore, MD, USA. Correspon-dence to: Gina Wong <gwong15@jh.edu>.
+> Proceedings of the 43 rd International Conference on Machine Learning , Seoul, South Korea. PMLR 306, 2026. Copyright 2026 by the author(s).
+
+subsets of inputs, MoEs also encourage experts to specialize on different parts of heterogeneous data (Jacobs et al., 1991; Dai et al., 2024; Guo et al., 2026). Together, efficient scal-ing and expert specialization have made MoEs a standard component in many modern large-scale learning systems (Dai et al., 2024; Lepikhin et al., 2021; Jiang et al., 2024). Because MoEs decompose prediction across experts that share the input space, there is a common intuition that they would be robust to shifts in how that space is populated. For example, if an MoE contains a reliable math expert and a reliable history expert, it would be natural to expect the overall predictor to remain reliable even if the training data emphasizes history questions while the test data emphasizes math questions. In this work, we show that this intuition is misleading : even when each expert is individually reliable, the aggregate predictor of a soft-routed MoE can become systematically unreliable under distribution shift. More precisely, we show that when routing patterns differ between training and test, a soft-routed MoE can become miscalibrated, even if every expert remains perfectly cali-brated on its own routing-induced view of the data. The reason is that soft routing collapses a full configuration of routing weights and expert predictions into a single aggre-gate confidence value, and many distinct configurations can report the same value. Calibration on the training distribu-tion requires only that configurations sharing a confidence p
+
+appear in proportions whose outcome frequencies average to p—and does not require that each configuration be indi-vidually correct at rate p. Thus, the distribution shifts that break calibration can be deceptively mild. They need not introduce new inputs, change the conditional label proba-bilities, or alter any expert’s prediction on any input; they only need to change how often different configurations ap-pear. Under such a shift, the same calibrated experts would combine into an aggregate predictor whose confidence no longer matches its accuracy. The training samples for a calibrated soft-routed MoE con-tribute unequally to this delicate balance. Each sample induces a configuration of routing weights and expert pre-dictions, so reweighting samples changes how often the corresponding configurations appear. For samples that lead to configurations where one expert dominates, the aggre-gate confidence is essentially governed by a single expert-1
+
+> arXiv:2606.20544v1 [cs.AI] 18 Jun 2026 Toward Calibrated Mixture-of-Experts Under Distribution Shift
+
+confidence pair rather than by a soft mixture. For samples that lead to configurations where the experts agree, the rout-ing weights have little role in setting the confidence as the experts are making similar predictions. It is the samples that lead to configurations where multiple experts receive substantial weight but make different predictions—where the aggregate confidence rests on a delicate balance of rout-ing weights rather than on robust agreement—that have the most leverage over aggregate calibration. In these cases, different compromise configurations can report the same confidence while having different outcome frequencies, so changing how often such configurations appear within a confidence level can change the calibration residual of the aggregate predictor. Since the per-example proper loss is large where the aggre-gate prediction is poorly aligned with the label, it is an ob-servable signal for the fragile configurations we cannot iden-tify directly. We therefore train the MoE against reweight-ings of the training distribution that stress its highest-loss examples, while changing that distribution as little as pos-sible. We develop two objectives on this principle: Robust MoE, a full version that applies the reweighting across the minibatch, and Robust Filtered, a more targeted variant that concentrates it on routing-relevant examples. Across image and text benchmarks, under artificial and natural distribution shifts, these objectives improve the accuracy–calibration tradeoff on average and on difficult subsets, often with little or no accuracy cost. To summarize our main contributions: • We characterize the routing-induced distribution shifts under which aggregate calibration is preserved in hard-and soft-routed MoEs. • We show that expert-level calibration is sufficient for a broad class of hard-routing region reweightings, but not for soft-routing configuration reweightings. • We introduce Robust MoE and Robust Filtered as entropy-balanced adversarial training objectives that reg-ularize the aggregate predictor through a proper scoring loss, and we relate this principle to entropic DRO, CVaR-style tail risk, and robust multiaccuracy. • We show that these objectives improve calibration under artificial and natural distribution shifts across image and text benchmarks, often with little or no accuracy cost. 
+
+2. Background 
+
+Calibration and proper scoring rules Calibration for-malizes the idea that a model’s predictive probabilities should match empirical frequencies (Dawid, 1982). For a probabilistic binary classifier f : X → [0 , 1] , marginal calibration requires 
+
+P(Y = 1 | f (X) = p) = p for all p ∈ [0 , 1] ,
+
+that is, among examples where the model assigns probability 
+
+p, the positive-label frequency should be p.A standard way to train probabilistic predictors is to opti-mize a strictly proper scoring rule. A scoring rule ℓ(f (x), y )
+
+is strictly proper if its expected value is uniquely mini-mized when f (x) equals the true conditional probability 
+
+P(Y = 1 | X = x) (Gneiting and Raftery, 2007); com-mon examples include cross-entropy (log loss) and the Brier score. Throughout, we use Lθ (X, Y ) = ℓ(fθ (X), Y ) to denote the proper loss of a model fθ .
+
+Mixture-of-experts A mixture-of-experts (MoE) model decomposes prediction into a set of experts combined with a routing mechanism (Jacobs et al., 1991). Let {fk}Kk=1 
+
+be experts with outputs fk(x) ∈ [0 , 1] , and let r(x) = (r1(x), . . . , r K (x)) ∈ ∆K−1 be routing weights on the 
+
+(K − 1) -dimensional probability simplex. The aggregate prediction is then 
+
+f (x) = 
+
+> K
+
+X
+
+> k=1
+
+rk(x)fk(x).
+
+Under hard routing, r(x) is one-hot, so each input is as-signed to a single expert and the input space is partitioned into routing regions. Under soft routing, multiple experts may receive positive weight on the same input, so experts are trained and evaluated on overlapping, routing-weighted views of the data. We assume throughout that each expert is calibrated on the view of the data induced by the router so that its prediction can be read as the conditional label frequency on that view. Proper losses such as cross-entropy and the Brier score encourage this kind of expert-level calibration on the train-ing distribution, and related mixture-of-calibrated-experts methods explicitly calibrate experts before combining them (Oksuz et al., 2024; Roschewitz et al., 2025). This is a deliberately favorable assumption for MoEs: by granting calibrated experts, we rule out the simplest explanation for a miscalibrated MoE (unreliable experts) as well as the sim-plest remedy (calibrating the experts). Our analysis there-fore asks what routing and aggregation in particular can or cannot guarantee for the final MoE predictor. Our analysis is stated for binary prediction. In our multi-class experiments, we evaluate confidence calibration , the standard scalar notion of multiclass calibration. With ex-pert predictions pk(x) ∈ ∆C−1 and aggregate prediction 
+
+p(x) = P 
+
+> k
+
+rk(x)pk(x), let ˆy(x) = arg max y py (x) be the predicted class and c(x) = max y py (x) its confidence. Confidence calibration requires 
+
+P(Y = ˆ y(X) | c(X) = q) = q
+
+2Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+for every confidence value q attained by the predictor. The same routing issue arises at the level of confidence, where different routing/expert configurations can produce the same confidence while having different correctness frequencies. A shift that reweights those configurations can therefore change the accuracy at that confidence and break calibration. 
+
+Routing and distribution shift Distribution shift occurs when the distribution used to train a model differs from the distribution where the model is deployed. Distribution shift can affect calibration when probabilities that are reliable on the training distribution no longer match accuracy on the test distribution. For MoEs, routing is a natural source of distribution shift; a test distribution may change how often inputs fall into different routing regions, or different routing-weighted combinations of experts, even when the label behavior within those cases is unchanged. 
+
+3. The simple robustness of hard routing 
+
+We begin with MoEs under hard routing . This setting pro-vides a useful baseline because the router assigns each input to a single expert, partitioning the input space. As a re-sult, calibration of the aggregate predictor is governed by a simple statistic: the pair consisting of the identity of the selected expert and the confidence reported by that expert. 
+
+3.1. The expert-confidence statistic 
+
+Under hard routing, the routing vector r(x) is one-hot, so the aggregate prediction f (x) = P 
+
+> k
+
+rk(x)fk(x) re-duces to the output of a single selected expert. Writing 
+
+h(x) = arg max k rk(x) for the index of that expert, we have f (x) = fh(x)(x). The map h partitions the input space into routing regions Rk := {x ∈ X : h(x) = k}
+
+for k = 1 , . . . , K , and on each region Rk the aggregate predictor f coincides with fk.For calibration, we do not need the full input X; we only need the selected expert and its reported confidence. Define 
+
+Shard (X) :=  h(X), f h(X)(X) . (1) Under hard routing, the aggregate prediction is fully de-termined by this statistic. Expert-level calibration can be written as 
+
+Ptrain (Y = 1 | X ∈ Rk, f k(X) = p) = p
+
+for all k and p ∈ [0 , 1] , or equivalently, 
+
+Ptrain (Y = 1 | Shard (X) = ( k, p )) = p
+
+for all k and p ∈ [0 , 1] . Thus, under hard routing, calibration depends only on the expert-confidence pair (k, p ); once we condition on Shard (X), any other features of X are irrelevant to calibration. In this sense, Shard (X) is an information bottleneck for calibration. 
+
+3.2. Calibration-preserving shifts under hard routing 
+
+The bottleneck view gives a direct characterization of the class of shifts that preserve calibration. Suppose the hard-routed MoE is calibrated under the training distribution. Then it remains calibrated under any test distribution satis-fying 
+
+Ptest (Y | Shard (X)) = Ptrain (Y | Shard (X)) . (2) Indeed, if Shard (X) = ( k, p ), then (2) implies 
+
+Ptest (Y = 1 | Shard (X) = ( k, p )) = Ptrain (Y = 1 | Shard (X) = ( k, p )) = p. 
+
+Since f (X) = p whenever Shard (X) = ( k, p ), the aggre-gate hard-routed predictor remains calibrated under the test distribution. A simple and important special case is reweighting of rout-ing regions. If the test distribution is a mixture of the region-conditional training distributions, 
+
+Ptest (·) = 
+
+> K
+
+X
+
+> k=1
+
+αk Ptrain (· | X ∈ Rk),
+
+where α ∈ ∆K−1 gives the new prevalence of the routing regions, then the conditional distribution within each expert-confidence slice is unchanged. Consequently, changing how often different experts are selected does not by itself affect calibration. More generally, hard routing is robust to any shift that pre-serves the label distribution within each expert-confidence slice. Such shifts may change the marginal frequency of experts, the marginal frequency of confidence levels, or the covariate distribution inside a routing region, as long as they do not change P (Y | Shard (X)) . This is the specific robust-ness provided by hard routing: calibration is insensitive to changes outside the expert-confidence bottleneck. 
+
+4. The fragility of soft routing 
+
+Soft routing assigns each input a distribution over experts rather than selecting a single expert. This is more expressive, but it also removes the discrete expert-confidence bottleneck that makes hard routing simpler. Experts now receive over-lapping, routing-weighted views of the same examples, and it is no longer given that calibrating each expert on its own view calibrates the aggregate. 
+
+4.1. Expert calibration gives only a marginal constraint 
+
+Under soft routing, each expert may receive nonzero weight on the same input. Expert k therefore does not see a disjoint region Rk; it sees the training distribution reweighted by its 3Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+routing weight rk(X). This motivates a weighted notion of expert calibration. We say that expert k is calibrated on its routing-weighted view if 
+
+EPtrain [rk(X) ( Y − fk(X)) | fk(X) = p] = 0 
+
+for all p ∈ [0 , 1] . Intuitively, this condition says that expert k
+
+is reliable on the examples it receives, counted in proportion to the weight assigned by the router; equivalently, expert 
+
+k is calibrated under the routing-weighted distribution Qk
+
+with dQ k ∝ rk(X) dP train . The important limitation of this condition is that it is indexed by each expert’s own confidence, not by the final mixture confidence, so it says nothing yet about how the experts’ residuals align after the router averages them. Integrating this condition over p and summing over k gives 
+
+> K
+
+X
+
+> k=1
+
+EPtrain [rk(X)( Y − fk(X))] = EPtrain [Y − f (X)] = 0 .
+
+Thus expert calibration enforces only a marginal mean bal-ance on the aggregate predictor; it does not enforce the level-set condition E[Y − f (X) | f (X) = p] = 0 that aggregate calibration requires. 
+
+4.2. Aggregation collapses distinct routing configurations 
+
+The aggregate prediction is determined by the full joint configuration of routing weights and expert outputs, 
+
+Ssoft (X) :=  {rk(X)}Kk=1 , {fk(X)}Kk=1 
+
+ , (3) but the scalar prediction f (X) = P 
+
+> k
+
+rk(X)fk(X) is a many-to-one function of this configuration—that is, two inputs can share the same aggregate prediction while arising from very different configurations. This distinction is what matters for calibration. Let 
+
+m(s) := EPtrain [Y | Ssoft (X) = s]
+
+be the outcome frequency of a configuration. Aggregate calibration at level p requires 
+
+EPtrain [Y | f (X) = p] = p. 
+
+But since the event {f (X) = p} may contain many different configurations s, this condition averages over all configura-tions that yield the same scalar prediction: 
+
+EPtrain [Y | f (X) = p]= EPtrain [m(Ssoft (X)) | f (X) = p].
+
+Aggregate calibration can therefore hold because configuration-level deviations cancel within a level set, not because each configuration is itself calibrated at that prediction level. For example, suppose two configurations s and s′ both yield the same aggregate prediction p, but have different condi-tional outcome frequencies: 
+
+m(s) = p + δ, m(s′) = p − δ. 
+
+If they appear in balancing proportions under the training distribution, the aggregate predictor is calibrated at level p.But a test-time shift that changes the relative prevalence of 
+
+s and s′ changes the label frequency among examples pre-dicting p, and breaks calibration—even though each expert remains calibrated on its own routing-weighted view. Expert calibration is therefore not enough. It constrains each expert on its own weighted stream, but does not force all configurations that collapse to the same aggregate prediction to have the same outcome frequency. The following proposi-tion makes this precise for shifts that change the prevalence of configurations while preserving the label distribution given a configuration. Write S = Ssoft (X), and recall that 
+
+f (X) = P 
+
+> k
+
+rk(X)fk(X) is a deterministic function of S
+
+and that m(s) = EPtrain [Y | S = s].
+
+Proposition 4.1 (Aggregate calibration under configuration reweighting) . Consider a test distribution that reweights routing configurations by a density a(S) ≥ 0 with 
+
+EPtrain [a(S)] = 1 , while preserving the conditional Y | S.Then, for almost every prediction level p taken by f (X) on the training distribution with EPtrain [a(S) | f (X) = p] > 0,
+
+EPtest [Y − f (X) | f (X) = p]= EPtrain [a(S) ( m(S) − p) | f (X) = p]
+
+EPtrain [a(S) | f (X) = p] . (4) 
+
+Aggregate calibration is preserved under every such reweighting if and only if m(S) = f (X) almost surely; equivalently, for almost every prediction level p, m(S) = p
+
+almost surely under the regular conditional law of S given 
+
+f (X) = p.
+
+Ordinary training-distribution calibration is the a ≡ 1 case of (4) , requiring only that the deviations m(S) − p cancel on average within each level set. The proposition shows that calibration survives arbitrary configuration reweight-ing exactly when these deviations vanish configuration by configuration. Aggregate calibration is most fragile in routing-overlap regions where experts receive non-negligible weight and disagree, so that the aggregate prediction depends sensi-tively on the routing weights. We call shifts that alter the prevalence of such configurations routing-induced reweight-ing : they are the soft-routing analogue of hard-routing re-gion reweighting, but with the critical difference that they 4Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+can break aggregate calibration without changing the reli-ability of any expert. The condition that rules them out, 
+
+m(S) = f (X), is far stronger than its hard-routing coun-terpart (2) , as it conditions on the entire vector of routing weights and expert predictions, not merely on an expert identity and a confidence value. Thus, the class of shifts cer-tifiably preserving calibration is correspondingly narrower and less interpretable. 
+
+5. Robust training against routing-induced reweighting 
+
+Section 4 showed that aggregate calibration can break un-der reweightings of routing configurations, with the failure concentrated on configurations where m(S)̸ = f (X). We would like to train a model whose calibration survives such a reweighting. We cannot act on the failing configurations directly: the test-time density a(Ssoft (X)) is unobserved, and Ssoft (X) is a high-dimensional, model-induced statistic rather than a labeled group variable. What we can observe is the per-example proper loss, which is large precisely where the aggregate prediction is poorly aligned with the label, and so tends to be large on the configurations we cannot otherwise identify. We use it as a proxy and train against reweightings of the training data that emphasize high-loss examples. Let Lθ (X, Y ) := ℓ(fθ (X), Y ), where ℓ is a strictly proper scoring loss and θ contains the router and expert parameters. Any shift absolutely continuous with respect to Ptrain can be written as a density ratio w(X, Y ) ≥ 0 with EPtrain [w] = 1 ,under which the loss becomes EPtrain [w L θ ]. Since the test-time reweighting is unknown, we train against the worst one in a family W:
+
+min  
+
+> θ
+
+sup 
+
+> w∈W
+
+EPtrain [w(X, Y )Lθ (X, Y )] , (5) where W is the family of reweightings available to the ad-versary. The shifts we care about do not single out one fixed group; routing-induced reweighting instead redistributes mass across broad, overlapping configurations. We therefore want an adversary that emphasizes high-loss examples—our proxy for the fragile configurations—while staying as close to the training distribution as possible, rather than collapsing onto a small hard subset. Entropy balancing gives exactly this least-distorted adversary. On a minibatch with losses 
+
+Li = Lθ (xi, y i) and uniform weights ui = 1 /n , it solves 
+
+min  
+
+> q∈∆n−1
+
+KL( q∥u) subject to X
+
+> i
+
+qiLi = c, 
+
+for an adversarial loss level c above the empirical mean. The solution, derived in Appendix B.1, is the exponential tilt 
+
+qηi = exp( ηL i)
+
+Pnj=1 exp( ηL j ) ,
+
+where η ≥ 0 controls the strength of the reweighting. Thus high-loss examples receive more weight, but every example keeps positive mass. We propose two objectives based on this adversary. Robust MoE applies entropy-balanced reweighting to the full mini-batch, yielding a smooth robust analogue of ERM. Robust Filtered applies the same reweighting only to a routing-relevant subset, while retaining an ERM term on the full minibatch so that all examples continue to update the model. 
+
+Robust MoE Robust MoE trains on the expected loss under this entropy-balanced adversary: 
+
+LR-MoE (θ) = 
+
+> n
+
+X
+
+> i=1
+
+qηi Li. (6) A useful identity is 
+
+LR-MoE (θ) = ρη (L) + 1
+
+η KL( qη ∥u) , (7) where ρη (L) = 1 
+
+> η
+
+log   1
+
+> n
+
+P 
+
+> i
+
+eηL i
+
+. The first term is the standard entropic risk; the second is an induced concentra-tion penalty that grows when the current losses concentrate the adversary on a small set—exactly the regime in which a few routing-overlap configurations could dominate the robust objective. This decomposition also shows that Robust MoE is a con-servative surrogate for distributionally robust optimization over a KL ball. For the uncertainty set {q : KL( q∥u) ≤ ε}
+
+on the minibatch, the standard dual bound gives, for any 
+
+η > 0,
+
+sup  
+
+> q: KL( q∥u)≤ε
+
+X
+
+> i
+
+qiLi ≤ ρη (L) + εη ≤ L R-MoE (θ) + εη .
+
+Minimizing the training objective therefore minimizes an upper bound on the worst-case reweighted loss within the ball, up to the additive slack ε/η . Here η is the tilt used in training, whereas ε is the radius of the comparison ball in the bound rather than a quantity we set. In the limit η ↓ 0,
+
+qη becomes uniform and the training objective reduces to ERM, while larger η moves the objective toward higher-loss examples. The same bound holds at the population level, where it controls the actual test risk under any absolutely continuous shift. Let Lpop 
+
+> R-MoE
+
+(θ) := Eqη [Lθ ] denote the population tilted mean, with dq η ∝ eηL θ dP train . Then, for any shifted distribution dP w = w dP train ,
+
+EPw [Lθ ] ≤ 1 
+
+> η
+
+log EPtrain 
+
+eηL θ
+
+ + 1 
+
+> η
+
+KL( Pw∥Ptrain )
+
+≤ L pop 
+
+> R-MoE
+
+(θ) + 1 
+
+> η
+
+KL( Pw∥Ptrain ). (8) 5Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+This is a population guarantee on the value of the robust risk—the quantity behind the multiaccuracy bound of Ap-pendix C—rather than a statement about any single gradi-ent step. Because the routing-induced reweightings of §4 are absolutely continuous with respect to Ptrain , minimiz-ing Lpop  
+
+> R-MoE
+
+bounds the loss under precisely the shifts we identified as the source of miscalibration, with the penalty  
+
+> 1
+> η
+
+KL( Pw∥Ptrain ) growing with the size of the shift. 
+
+Robust Filtered Not every high-loss example reflects routing fragility; some examples are intrinsically ambigu-ous, mislabeled, or difficult for all experts. Robust Filtered therefore applies entropy-balanced reweighting only to a routing-relevant subset A, while keeping an ERM term over the full minibatch. In the experiments, A is the union of examples where the mixture incurs higher loss than the best expert and examples where the experts disagree substan-tially around the mixture prediction (exact criteria are given in Appendix D.3). The objective is 
+
+LRF-MoE (θ) = 1
+
+n
+
+> n
+
+X
+
+> i=1
+
+Li + X
+
+> i∈A
+
+qηi,A Li,
+
+where 
+
+qηi,A = exp( ηL i)
+
+P 
+
+> j∈A
+
+exp( ηL j ) .
+
+The ERM term keeps all examples active, while the robust term puts additional pressure on the routing-sensitive exam-ples most directly tied to the failure mode in §4. Appendix B derives the entropy-balanced weights and com-pares them with entropic DRO and CVaR-style tail risk. Appendix C gives the corresponding multiaccuracy view: the worst-case squared residual over the reweighting fam-ily upper-bounds residual alignment with routing-weighted auditors of the form rk(x)ϕ(f (x)) .
+
+6. Experiments 
+
+6.1. Datasets and models 
+
+All MoE methods share the same architecture: a shared backbone (ResNet-18 or DistilBERT) feeds an MoE head of K=4 expert linear classifiers and a 2-layer MLP router with softmax outputs, trained end-to-end. We evaluate on three dataset-backbone pairs spanning im-age classification, domain generalization, and text toxicity detection; convolutional and transformer backbones; and both artificial and natural distribution shifts. • CIFAR-10H (Peterson et al., 2019) extends CIFAR-10 with human agreement annotations. We pair it with a ResNet-18 trained from scratch. We define a “hard” subset to be the set of images with low human agree-ment. Evaluating on this subset induces an artificial shift toward ambiguous examples that we expect to stress routing-overlap regions. • PACS (Li et al., 2017) contains four visually distinct domains (Photo, Art Painting, Cartoon, Sketch). We use ResNet-18 pretrained on ImageNet and follow leave-one-domain-out evaluation, training on three domains and testing on the held-out target. Each held-out domain constitutes a natural domain/style shift. • CivilComments (Koh et al., 2021) is a text toxicity clas-sification benchmark from WILDS. We pair this with a DistilBERT backbone pretrained on English text. Com-ments mentioning demographic identity groups form a natural subpopulation shift, as toxicity classifiers tend to have high false positive rates on benign mentions of demographic groups. Full dataset descriptions and model architecture details are given in Appendix D.2. 
+
+6.2. Baselines 
+
+We compare Robust MoE and Robust Filtered against the following baselines: • Single Expert : a standard classifier (same backbone, no routing) trained with cross-entropy. • Vanilla MoE : a soft-routed MoE trained with ERM on cross-entropy. • MoCaE (Oksuz et al., 2024; Roschewitz et al., 2025): an MoE where experts are individually calibrated after training, before their predictions are combined. This directly tests whether calibrating experts individually is sufficient to fix mixture-level miscalibration. • Frequency-aware Gradient Rectification (FGR) 
+
+(Zhang et al., 2025): FGR is a training procedure de-signed to improve calibration under covariate shift. It was designed for single models under image corruptions, not for MoE routing fragility, but it provides a strong calibration-aware baseline. We also report FGR + Robust as a composition of FGR with our robust objective. FGR operates on a different axis than Robust MoE. Robust MoE modifies the training objective , while FGR modifies the gradient update rule ;these are independent design choices that can be freely com-bined. We create FGR + Robust by using the Robust MoE loss as FGR’s main objective: the classification gradient is computed from the full entropy-balanced objective on the frequency-perturbed batch, while the calibration gradient (soft ECE on the original batch) and the rectification logic are unchanged. We additionally report results with post-training temperature scaling (TS) to separate improvements in calibration due to training from those achievable by post-training calibration 6Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+Table 1. CIFAR-10H: accuracy and ECE on all images and on the hard subset of images with low human agreement 
+
+Method Accuracy Hard Accuracy ECE ECE+TS Hard ECE Hard ECE+TS Single Expert 0.922 ± 0.001 0.648 ± 0.014 0.054 ± 0.001 0.048 ± 0.001 0.276 ± 0.018 0.256 ± 0.017 
+
+Vanilla MoE 0.920 ± 0.001 0.637 ± 0.019 0.055 ± 0.001 0.049 ± 0.001 0.281 ± 0.019 0.262 ± 0.020 
+
+MoCaE 0.920 ± 0.001 0.637 ± 0.019 0.049 ± 0.001 0.042 ± 0.002 0.262 ± 0.020 0.241 ± 0.019 
+
+FGR 0.919 ± 0.002 0.643 ± 0.010 0.051 ± 0.001 0.045 ± 0.001 0.262 ± 0.015 0.243 ± 0.016 
+
+Robust MoE 0.904 ± 0.001 0.612 ± 0.012 0.090 ± 0.019 0.036 ± 0.010 0.074 ± 0.018 0.115 ± 0.017 
+
+Robust Filtered 0.910 ± 0.003 0.624 ± 0.015 0.013 ± 0.004 0.007 ± 0.001 0.122 ± 0.017 0.139 ± 0.017 
+
+FGR + Robust 0.903 ± 0.003 0.600 ± 0.015 0.083 ± 0.010 0.028 ± 0.003 0.065 ± 0.012 0.108 ± 0.013 
+
+Table 2. PACS: accuracy and ECE on each leave-one-out target domain                                                                                                    
+
+> Photo Art Cartoon Sketch Method Acc ECE ECE+TS Acc ECE ECE+TS Acc ECE ECE+TS Acc ECE ECE+TS Single Expert .943 ±.004 .031 ±.003 .024 ±.003 .780 ±.006 .128 ±.005 .106 ±.006 .730 ±.013 .166 ±.012 .140 ±.012 .637 ±.025 .217 ±.030 .230 ±.030 Vanilla MoE .941 ±.002 .033 ±.002 .026 ±.001 .767 ±.007 .141 ±.006 .118 ±.007 .732 ±.013 .171 ±.011 .146 ±.010 .667 ±.009 .183 ±.017 .189 ±.011 MoCaE .941 ±.002 .027 ±.002 .018 ±.001 .767 ±.007 .119 ±.007 .094 ±.007 .732 ±.013 .147 ±.010 .119 ±.009 .667 ±.009 .190 ±.012 .195 ±.009 FGR .940 ±.002 .035 ±.002 .027 ±.003 .768 ±.008 .143 ±.007 .122 ±.007 .728 ±.010 .175 ±.013 .150 ±.013 .667 ±.012 .176 ±.020 .187 ±.018 Robust MoE .931 ±.006 .018 ±.005 .019 ±.005 .692 ±.023 .088 ±.025 .071 ±.023 .723 ±.010 .108 ±.018 .088 ±.021 .666 ±.033 .033 ±.017 .072 ±.025 Robust Filtered .930 ±.006 .016 ±.005 .013 ±.004 .732 ±.018 .075 ±.013 .057 ±.015 .718 ±.018 .135 ±.022 .113 ±.023 .670 ±.020 .065 ±.030 .093 ±.028 FGR + Robust .928 ±.005 .016 ±.005 .017 ±.006 .732 ±.017 .061 ±.027 .045 ±.023 .698 ±.024 .134 ±.030 .113 ±.032 .660 ±.023 .072 ±.025 .105 ±.026
+
+Table 3. CivilComments: accuracy and ECE on all comments and on the hard subset of comments with demographic identities 
+
+Method Accuracy Hard Accuracy ECE ECE+TS Hard ECE Hard ECE+TS Single Expert 0.913 ± 0.002 0.867 ± 0.002 0.069 ± 0.001 0.064 ± 0.001 0.105 ± 0.001 0.097 ± 0.001 
+
+Vanilla MoE 0.912 ± 0.001 0.866 ± 0.002 0.071 ± 0.001 0.065 ± 0.001 0.108 ± 0.002 0.100 ± 0.002 
+
+MoCaE 0.912 ± 0.001 0.866 ± 0.002 0.066 ± 0.002 0.059 ± 0.002 0.101 ± 0.002 0.091 ± 0.002 
+
+FGR 0.906 ± 0.003 0.857 ± 0.005 0.044 ± 0.004 0.035 ± 0.004 0.065 ± 0.006 0.053 ± 0.006 
+
+Robust MoE 0.914 ± 0.000 0.868 ± 0.000 0.025 ± 0.001 0.018 ± 0.001 0.037 ± 0.002 0.029 ± 0.002 
+
+Robust Filtered 0.915 ± 0.002 0.869 ± 0.004 0.027 ± 0.004 0.021 ± 0.003 0.040 ± 0.005 0.031 ± 0.004 
+
+FGR + Robust 0.903 ± 0.004 0.853 ± 0.006 0.054 ± 0.008 0.047 ± 0.003 0.065 ± 0.010 0.057 ± 0.005 0 0.5 1
+
+Confidence 
+
+> 0
+> 0.5
+> 1
+> Accuracy
+
+Single Expert 
+
+ECE=0.054   
+
+> 00.5 1
+
+Confidence 
+
+Vanilla MoE 
+
+ECE=0.055   
+
+> 00.5 1
+
+Confidence 
+
+MoCaE 
+
+ECE=0.049   
+
+> 00.5 1
+
+Confidence 
+
+FGR 
+
+ECE=0.051   
+
+> 00.5 1
+
+Confidence 
+
+Robust MoE 
+
+ECE=0.090   
+
+> 00.5 1
+
+Confidence 
+
+Robust Filt. 
+
+ECE=0.012   
+
+> 00.5 1
+
+Confidence 
+
+FGR + Robust 
+
+ECE=0.083 
+
+Figure 1. Reliability diagrams for all methods on CIFAR-10H. Each panel compares predicted confidence with empirical accuracy; perfect confidence calibration lies on the diagonal. Non-robust baselines concentrate much of their mass in high-confidence bins, while the robust objectives spread predictions over a wider confidence range and better align confidence with accuracy. Additional reliability diagrams for the remaining datasets and hard subsets appear in Appendix E. 
+
+alone. More details on how we implement all the baselines are given in Appendix D.1. 
+
+6.3. Results 
+
+Our experiments test three empirical claims suggested by the analysis: (i) adversarial reweighting of the aggregate proper loss improves calibration under routing-induced shifts; (ii) soft-routed MoEs can remain miscalibrated even when each expert is individually calibrated; and (iii) focusing the robust term on routing-relevant examples improves the accuracy-calibration tradeoff. We check that these gains survive post-hoc temperature scaling and hold across subpopulations. Results on CIFAR-10H are reported in Table 1, where accu-racy, ECE, and ECE+TS (ECE after aggregate temperature scaling) are reported on all images and on the hard subset of low-agreement images. Results on CivilComments in Ta-ble 3 follow the same convention, except that the hard subset consists of comments mentioning demographic identities. Table 2 reports PACS results for each leave-one-domain-out target domain. Additional dataset details and hard-subset definitions are given in §6.1 and Appendix D.2. All standard errors are computed over five random seeds. Figure 1 shows reliability diagrams for CIFAR-10H. Addi-tional reliability diagrams for the remaining datasets and hard subsets appear in Appendix E. 
+
+Takeaway 1: robust training improves calibration where routing is stressed. The clearest gains appear on the shifted or ambiguous subsets that most directly stress the 7Toward Calibrated Mixture-of-Experts Under Distribution Shift 0.6 
+
+> 0.7
+> 0.8
+> 0.9
+> Accuracy
+> Single Expert
+> Vanilla MoE
+> MoCaE
+> FGR
+> Robust MoE
+> Robust Filtered
+> FGR + Robust
+> Male
+> (14,295)
+> Female
+> (16,449)
+> LGBTQ
+> (4,426)
+> Christian
+> (13,361)
+> Muslim
+> (6,982)
+> Other Rel.
+> (3,500)
+> Black
+> (4,872)
+> White
+> (7,969)
+> Identity Group
+> 0.00
+> 0.05
+> 0.10
+> 0.15
+> ECE
+
+Figure 2. Accuracy and ECE on the comments mentioning demographic identity groups in CivilComments, which are prone to higher false positive rates in toxicity classification. The top panel reports accuracy and the bottom panel reports ECE, with subgroup sample sizes shown below each label. Robust methods reduce ECE while maintaining competitive accuracy, mirroring the aggregate gains in Table 3. <0.5 0.5-0.6 0.6-0.7 0.7-0.8 0.8-0.9 >0.9 
+
+> Human Agreement Level
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Mean Confidence
+> Hard region
+> CIFAR-10H: Confidence vs Human Agreement
+> Accuracy (Vanilla)
+> Single Expert
+> Vanilla MoE
+> MoCaE
+> FGR
+> Robust MoE
+> Robust Filtered
+> FGR + Robust
+
+Figure 3. Accuracy and mean confidence on the CIFAR-10H hard subset by human agreement level. Lower agreement indicates more ambiguous images; the dashed line shows Vanilla MoE accuracy. Robust methods lower confidence as ambiguity increases. 
+
+soft router. On CIFAR-10H, the Vanilla MoE and MoCaE have hard-subset ECEs of 0.281 and 0.262 , comparable to the Single Expert value of 0.276 . Robust MoE reduces this to 0.074 , and FGR+Robust further reduces it to 0.065 . On CivilComments, Robust MoE and Robust Filtered reduce hard-subset ECE from 0.108 for Vanilla MoE and 0.101 
+
+for MoCaE to 0.037 and 0.040 , while slightly improving hard-subset accuracy. On PACS, a robust method or robust composition obtains the lowest ECE in every held-out target domain: Robust Filtered is strongest on Photo, FGR+Robust is strongest on Art, and Robust MoE is strongest on Cartoon and Sketch. 
+
+Takeaway 2: calibrating experts individually is not enough. MoCaE is an important diagnostic baseline be-cause it post-hoc calibrates each expert with its own temper-ature before they are mixed. Because MoCaE only rescales each expert’s probabilities and does not change the under-lying mixture model, its accuracy is identical to Vanilla MoE in every cell of every table. Per-expert calibration does deliver a modest ECE improvement over Vanilla on the full distribution (e.g., CIFAR-10H ECE goes from 0.055 
+
+to 0.049 , CivilComments ECE from 0.071 to 0.066 ), and a similarly modest improvement on hard subsets (CIFAR-10H Hard ECE goes from 0.281 to 0.262 , CivilComments Hard ECE from 0.108 to 0.101 ). These improvements are small relative to the improvement from the robust methods— on CIFAR-10H and CivilComments, Robust MoE achieves Hard ECEs of 0.074 and 0.037 . Per-expert temperature scaling helps reduce per-expert overconfidence but does not close the mixture-level miscalibration that arises from routing-induced reweighting. 
+
+Takeaway 3: Robust Filtered gives a better accuracy-calibration tradeoff than full reweighting in several settings. The full Robust MoE objective puts additional weight on all high-loss examples, which can improve calibra-tion sharply but may overemphasize examples that are hard for reasons unrelated to routing. This is visible on CIFAR-10H and PACS-Art, where Robust MoE lowers hard-subset calibration error but loses accuracy relative to the strongest non-robust classifier. Robust Filtered mitigates this tradeoff by applying the robust term only to routing-relevant exam-ples while retaining an ERM term on the full minibatch. It achieves the best overall CIFAR-10H ECE ( 0.013 ), the best CivilComments accuracy ( 0.915 ), and the best PACS-Sketch accuracy ( 0.670 ), while maintaining much lower ECE than the non-robust MoE baselines. 
+
+Temperature scaling helps, but does not explain the gains. Temperature scaling reduces global ECE for sev-8Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+eral methods, but the robust objectives remain strongest after temperature scaling on the hard or shifted evaluations. On CIFAR-10H hard examples, the best non-robust ECE+TS is 
+
+0.241 from MoCaE, whereas Robust MoE and FGR+Robust achieve 0.115 and 0.108 . On CivilComments hard exam-ples, Robust MoE and Robust Filtered achieve ECE+TS values of 0.029 and 0.031 , compared with 0.100 for Vanilla MoE, 0.091 for MoCaE, and 0.053 for FGR. Thus the im-provement is not merely a post-hoc rescaling of confidence; the training objective changes which examples receive prob-ability mass and how the model behaves on shifted subpop-ulations. The reliability diagrams in Figure 1 show the same quali-tative pattern. The non-robust baselines are highly concen-trated in high-confidence bins, and the sparsely populated low-confidence bins have larger error bars. In contrast, the robust methods and robust composition spread predictions over a wider confidence range and align more closely with the diagonal, indicating that uncertainty is being expressed in the regions where the model is less reliable. 
+
+Subgroup behavior is consistent with the routing-fragility mechanism. We bin CIFAR-10H images by hu-man agreement level in Figure 3. The non-robust baselines maintain mean confidence near 0.9 even as human agree-ment decreases, including for the lowest-agreement images where Vanilla MoE accuracy is roughly 0.6. In contrast, Robust MoE, Robust Filtered, and FGR+Robust reduce con-fidence as human agreement decreases. On CivilComments, we evaluate calibration and accuracy across the eight demographic identity groups present in the comments: Male, Female, LGBTQ, Christian, Muslim, Other Religions, Black, and White (Figure 2). Comments can belong to multiple groups. Across these groups, the robust methods consistently reduce ECE relative to the non-robust MoE baselines while maintaining comparable accu-racy. This indicates that the aggregate improvements in Table 3 are not driven by a single identity group, but by a broader correction across shifted subpopulations. 
+
+7. Related work 
+
+MoEs, calibration, and distribution shift. Most work on MoEs under distribution shift uses expert specialization to mitigate shift, as diverse or domain-specific experts support target domain adaptation, long-tailed recognition, and open-set domain adaptation (Zhong et al., 2022; Wang et al., 2023; Du et al., 2025). A separate line of work calibrates each expert before combining them, so that the mixture is built from individually reliable components (Oksuz et al., 2024; Roschewitz et al., 2025). Both lines of work focus on making the experts reliable so that the overall mixture is reliable; however, we find that reliable experts do not guarantee a reliable mixture, and this motivates our study of the aggregate predictor’s calibration under routing-induced shift. 
+
+Calibration, multicalibration, and multiaccuracy. Cali-bration is an important property for probabilistic prediction (Dawid, 1982; Gneiting and Raftery, 2007), and modern neural predictors are often evaluated or post-hoc calibrated using ECE and temperature scaling (Guo et al., 2017). Mul-ticalibration and multiaccuracy strengthen calibration by asking for calibrated or unbiased predictions across many subgroups or auditing functions (Kleinberg et al., 2016; Hébert-Johnson et al., 2018; Kim et al., 2019). In an MoE, these subgroups are induced by the router rather than fixed in advance, and under soft routing they overlap, since each input contributes to several experts. (Appendix C for-malizes this connection through routing-weighted auditors 
+
+rk(x)ϕ(f (x)) .) 
+
+Adversarial reweighting. Our objective is an instance of adversarial loss reweighting. Distributionally robust opti-mization learns predictors that perform well under reweight-ings of the training distribution (Scarf et al., 1957; Delage and Ye, 2010; Subbaswamy et al., 2022). CVaR and re-lated bounded-density objectives emphasize worst-tail ex-amples (Rockafellar et al., 2000; Levy et al., 2020), while en-tropic or tilted risks emphasize high-loss examples smoothly through exponential tilting (Li et al., 2023). Our reweight-ing comes from entropy balancing, which finds the weights closest to a base distribution in KL divergence, subject to moment constraints (Hainmueller, 2012). In its standard use these moments are fixed, externally specified targets such as covariate means; in our method, the constraint is the model’s own proper loss, so the same least-distortion principle yields a reweighting that stresses the model’s highest-loss exam-ples (§5, Appendix B). Focal loss and variants (Lin et al., 2017; Li et al., 2020; Zhang et al., 2021; Cui et al., 2019) also reweight difficult examples, though without an explicit tilting or distributional-robustness interpretation, and have been connected to proper-scoring calibration (Mukhoti et al., 2020; Komisarenko and Kull, 2024; Lin et al., 2025). 
+
+8. Discussion and conclusion 
+
+Whether a mixture of calibrated experts is reliable as a whole depends on how the router combines the experts. Un-der hard routing, the mixture largely inherits the reliability of its experts: each input goes to a single expert, so calibra-tion depends only on the chosen expert and its confidence, and changing how often each region is visited cannot im-pact the model’s calibration. Under soft routing, however, this breaks down: the aggregate folds many routing con-figurations into one confidence value, so a model can look calibrated on the training distribution because configuration-level errors cancel, but a shift that reweights those config-9Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+urations disrupts this balance. Our experiments show that for soft-routed MoEs, calibrating each expert does not pre-vent miscalibration of the mixture. In contrast, our Robust MoE and Robust Filtered objectives substantially reduce calibration error on the shifted and ambiguous subsets of CIFAR-10H, PACS, and CivilComments by concentrating training on the routing-overlap configurations that drive the miscalibration. A practical implication is that MoE calibration should be evaluated at the aggregate level and under meaningful sub-population or routing shifts. Both average accuracy and per-expert calibration can look acceptable on standard eval-uations, while the final probabilities fail on subsets where the router changes the configuration mix. Post-hoc tempera-ture scaling cannot correct routing-induced miscalibration on its own, since a single scalar cannot repair a mismatch between training- and test-time configurations. The adversarial reweighting we propose is deliberately con-servative. High proper loss is only a surrogate for routing-induced calibration error, and some high-loss examples are hard for reasons unrelated to routing. This is the gap Robust Filtered addresses: it concentrates pressure where routing looks consequential, and this is what allows it to balance accuracy and calibration better than the full reweighting. Several limitations remain. Our experiments use compact MoEs with four experts. We chose this setting deliber-ately, to isolate aggregation as the source of miscalibration and rule out confounds from scale or architecture. The mechanism we identify is a property of soft aggregation itself rather than of any particular model size—larger sparse MoEs have more experts and correspondingly richer rout-ing overlap, which means more configurations for a shift to reweight, not fewer. We therefore expect the failure to persist, and plausibly intensify, at scale, and confirming this on large sparse and generative MoEs is a natural next step. Separately, two choices in how we measure calibration are worth noting. We summarize calibration with ECE, which averages over confidence bins and can miss a small sub-group whose errors are offset by the rest of its bin; and we identify fragile examples through high-loss proxy subsets, since the failing configurations cannot be observed directly. A more direct approach could use the routing weights and expert disagreement at each input, though this would require an additional step to estimate the outcome frequency the prediction is checked against. 
+
+Acknowledgments 
+
+G.W. was partially funded by a discretionary fund at Johns Hopkins University. D.P., S.S., and A.L. were partially funded by the Gordon and Betty Moore Foundation grant #12128. The authors would like to thank anonymous re-viewers for helpful feedback. 
+
+Impact statement 
+
+Better-calibrated probabilities support more reliable down-stream decisions. Mixture-of-experts is a popular frame-work, so calibration of MoE is relevant for the safety and reliability of many systems. Beyond this, the societal conse-quences of our work are those typical of advancing machine learning, and we do not feel any further specific concern needs to be highlighted here. 
+
+Code 
+
+Code to reproduce experiments and figures are provided at 
+
+github.com/ginawong/calibrated_moe .
+
+References 
+
+William Fedus, Barret Zoph, and Noam Shazeer. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learn-ing Research , 23(120):1–39, 2022. Nan Du, Yanping Huang, Andrew M Dai, Simon Tong, Dmitry Lepikhin, Yuanzhong Xu, Maxim Krikun, Yanqi Zhou, Adams Wei Yu, Orhan Firat, et al. Glam: Effi-cient scaling of language models with mixture-of-experts. In International conference on machine learning , pages 5547–5569. PMLR, 2022. Jan Ludziejewski, Maciej Pióro, Jakub Krajewski, Maciej Stefaniak, Michał Krutul, Jan Mała´ snicki, Marek Cygan, Piotr Sankowski, Kamil Adamczewski, Piotr Miło´ s, and Sebastian Jaszczur. Joint moe scaling laws: Mixture of experts can be memory efficient. In Forty-second International Conference on Machine Learning , 2025. URL https://openreview.net/forum?id= 70DGIxEHiB .Robert A Jacobs, Michael I Jordan, Steven J Nowlan, and Geoffrey E Hinton. Adaptive mixtures of local experts. 
+
+Neural computation , 3(1):79–87, 1991. Damai Dai, Chengqi Deng, Chenggang Zhao, RX Xu, Huazuo Gao, Deli Chen, Jiashi Li, Wangding Zeng, Xingkai Yu, Yu Wu, et al. Deepseekmoe: Towards ulti-mate expert specialization in mixture-of-experts language models. arXiv preprint arXiv:2401.06066 , 2024. Hongcan Guo, Haolang Lu, Guoshun Nan, Bolun Chu, Jialin Zhuang, Yuan Yang, Wenhao Che, Xinye Cao, Sicong Leng, Qimei Cui, and Xudong Jiang. Advancing expert specialization for better moe. In The Thirty-ninth Annual Conference on Neural Information Processing 
+
+10 Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+Systems , 2026. URL https://openreview.net /forum?id=iydmH9boLb .Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu, De-hao Chen, Orhan Firat, Yanping Huang, Maxim Krikun, Noam Shazeer, and Zhifeng Chen. {GS}hard: Scaling giant models with conditional computation and automatic sharding. In International Conference on Learning Rep-resentations , 2021. URL https://openreview.n et/forum?id=qrwe7XHTmYb .Albert Q Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch, Blanche Savary, Chris Bamford, Deven-dra Singh Chaplot, Diego de las Casas, Emma Bou Hanna, Florian Bressand, et al. Mixtral of experts. arXiv preprint arXiv:2401.04088 , 2024. A Philip Dawid. The well-calibrated bayesian. Journal of the American statistical Association , 77(379):605–610, 1982. Tilmann Gneiting and Adrian E Raftery. Strictly proper scor-ing rules, prediction, and estimation. Journal of the Amer-ican statistical Association , 102(477):359–378, 2007. Kemal Oksuz, Selim Kuzucu, Tom Joy, and Puneet K. Dokania. Mocae: Mixture of calibrated experts signifi-cantly improves object detection. Transactions on Ma-chine Learning Research , 2024. ISSN 2835-8856. URL 
+
+https://openreview.net/forum?id=fJEs as1z8J .Mélanie Roschewitz, Raghav Mehta, Fabio De Sousa Ribeiro, and Ben Glocker. Where are we with calibration under dataset shift in image classification? Transactions on Machine Learning Research , 2025. ISSN 2835-8856. URL https://openreview.net/forum?id= 1NYKXlRU2H .Joshua C Peterson, Ruairidh M Battleday, Thomas L Griffiths, and Olga Russakovsky. Human uncertainty makes classification more robust. In Proceedings of the IEEE/CVF international conference on computer vision ,pages 9617–9626, 2019. Da Li, Yongxin Yang, Yi-Zhe Song, and Timothy M Hospedales. Deeper, broader and artier domain gen-eralization. In Proceedings of the IEEE international conference on computer vision , pages 5542–5550, 2017. Pang Wei Koh, Shiori Sagawa, Henrik Marklund, Sang Michael Xie, Marvin Zhang, Akshay Balsubramani, Weihua Hu, Michihiro Yasunaga, Richard Lanas Phillips, Irena Gao, et al. Wilds: A benchmark of in-the-wild dis-tribution shifts. In International conference on machine learning , pages 5637–5664. PMLR, 2021. Yilin Zhang, Cai Xu, You Wu, Ziyu Guan, and Wei Zhao. Gradient rectification for robust calibration under distri-bution shift. arXiv preprint arXiv:2508.19830 , 2025. Tao Zhong, Zhixiang Chi, Li Gu, Yang Wang, Yuanhao Yu, and Jin Tang. Meta-dmoe: Adapting to domain shift by meta-distillation from mixture-of-experts. Advances in Neural Information Processing Systems , 35:22243– 22257, 2022. Mengzhu Wang, Jianlong Yuan, and Zhibin Wang. Mixture-of-experts learner for single long-tailed domain general-ization. In Proceedings of the 31st ACM International Conference on Multimedia , pages 290–299, 2023. Zhenbang Du, Jiayu An, Yunlu Tu, Jiahao Hong, and Don-grui Wu. Mixture-of-experts for open set domain adap-tation: A dual-space detection approach. IEEE Transac-tions on Artificial Intelligence , 2025. Chuan Guo, Geoff Pleiss, Yu Sun, and Kilian Q Weinberger. On calibration of modern neural networks. In Interna-tional conference on machine learning , pages 1321–1330. PMLR, 2017. Jon Kleinberg, Sendhil Mullainathan, and Manish Raghavan. Inherent trade-offs in the fair determination of risk scores. 
+
+arXiv preprint arXiv:1609.05807 , 2016. Ursula Hébert-Johnson, Michael Kim, Omer Reingold, and Guy Rothblum. Multicalibration: Calibration for the (computationally-identifiable) masses. In International Conference on Machine Learning , pages 1939–1948. PMLR, 2018. Michael P Kim, Amirata Ghorbani, and James Zou. Mul-tiaccuracy: Black-box post-processing for fairness in classification. In Proceedings of the 2019 AAAI/ACM Conference on AI, Ethics, and Society , pages 247–254, 2019. Herbert E Scarf, KJ Arrow, and S Karlin. A min-max solution of an inventory problem. Technical report, Rand Corporation Santa Monica, 1957. Erick Delage and Yinyu Ye. Distributionally robust opti-mization under moment uncertainty with application to data-driven problems. Operations research , 58(3):595– 612, 2010. Adarsh Subbaswamy, Bryant Chen, and Suchi Saria. Aunifying causal framework for analyzing dataset shift-stable learning algorithms. Journal of Causal Inference ,10(1):64–89, 2022. R Tyrrell Rockafellar, Stanislav Uryasev, et al. Optimization of conditional value-at-risk. Journal of risk , 2:21–42, 2000. 11 Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+Daniel Levy, Yair Carmon, John C Duchi, and Aaron Sid-ford. Large-scale methods for distributionally robust optimization. Advances in neural information processing systems , 33:8847–8860, 2020. Tian Li, Ahmad Beirami, Maziar Sanjabi, and Virginia Smith. On tilted losses in machine learning: Theory and applications. Journal of Machine Learning Research ,24(142):1–79, 2023. Jens Hainmueller. Entropy balancing for causal effects: A multivariate reweighting method to produce balanced samples in observational studies. Political analysis , 20 (1):25–46, 2012. Tsung-Yi Lin, Priya Goyal, Ross Girshick, Kaiming He, and Piotr Dollár. Focal loss for dense object detection. In Proceedings of the IEEE international conference on computer vision , pages 2980–2988, 2017. Xiang Li, Wenhai Wang, Lijun Wu, Shuo Chen, Xiaolin Hu, Jun Li, Jinhui Tang, and Jian Yang. Generalized focal loss: Learning qualified and distributed bounding boxes for dense object detection. Advances in neural information processing systems , 33:21002–21012, 2020. Haoyang Zhang, Ying Wang, Feras Dayoub, and Niko Sun-derhauf. Varifocalnet: An iou-aware dense object detector. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition , pages 8514–8523, 2021. Yin Cui, Menglin Jia, Tsung-Yi Lin, Yang Song, and Serge Belongie. Class-balanced loss based on effective number of samples. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition , pages 9268– 9277, 2019. Jishnu Mukhoti, Viveka Kulharia, Amartya Sanyal, Stuart Golodetz, Philip Torr, and Puneet Dokania. Calibrating deep neural networks using focal loss. Advances in neural information processing systems , 33:15288–15299, 2020. Viacheslav Komisarenko and Meelis Kull. Improving cal-ibration by relating focal loss, temperature scaling, and properness. arXiv preprint arXiv:2408.11598 , 2024. Jinxu Lin, Linwei Tao, Minjing Dong, and Chang Xu. Un-certainty weighted gradients for model calibration. In 
+
+Proceedings of the Computer Vision and Pattern Recog-nition Conference , pages 15497–15507, 2025. Archit Karandikar, Nicholas Cain, Dustin Tran, Balaji Lak-shminarayanan, Jonathon Shlens, Michael C Mozer, and Becca Roelofs. Soft calibration objectives for neural networks. Advances in Neural Information Processing Systems , 34:29768–29779, 2021. Victor Sanh, Lysandre Debut, Julien Chaumond, and Thomas Wolf. Distilbert, a distilled version of bert: smaller, faster, cheaper and lighter. arXiv preprint arXiv:1910.01108 , 2019. 12 Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+A. Proof of Proposition 4.1 
+
+Recall S = Ssoft (X), that f (X) is a deterministic function of S, and that m(s) = EPtrain [Y | S = s]. Write P = Ptrain ,let Z = f (X), and let Pa = Ptest denote the test distribution obtained by the density a(S). Thus Z is σ(S)-measurable. Conditional expectations given a prediction level Z = p are understood through regular conditional distributions, so statements about p hold for almost every p under the law of Z. We have a(S) ≥ 0, EP [a(S)] = 1 , and for any integrable H,
+
+EPa [H(S, Y )] = EP [a(S)H(S, Y )] .
+
+Because the reweighting depends only on S, it leaves the conditional law of Y given S unchanged, and hence 
+
+EPa [Y | S] = EP [Y | S] = m(S).
+
+We first record the conditional change-of-measure identity used below. Since Z = f (X) is σ(S)-measurable, the Pa-law of 
+
+Z is absolutely continuous with respect to the P -law of Z, with Radon–Nikodym derivative EP [a(S) | Z]. Moreover, for any integrable σ(S)-measurable random variable Φ,
+
+EPa [Φ | Z] = EP [a(S)Φ | Z]
+
+EP [a(S) | Z] (9) on the set where the denominator is positive. To verify this identity, test both sides against an arbitrary bounded measurable function ψ(Z). On one hand, 
+
+EPa [ψ(Z)Φ] = EP [a(S)ψ(Z)Φ] = EP [ψ(Z)EP [a(S)Φ | Z]] .
+
+On the other hand, using the definition of Pa and conditioning on Z,
+
+EPa
+
+
+
+ψ(Z) EP [a(S)Φ | Z]
+
+EP [a(S) | Z]
+
+
+
+= EP
+
+
+
+a(S)ψ(Z) EP [a(S)Φ | Z]
+
+EP [a(S) | Z]
+
+
+
+= EP [ψ(Z)EP [a(S)Φ | Z]] ,
+
+which proves (9). Applying (9) with Φ = m(S) − Z gives, for Pa-almost every prediction level p, equivalently for P -almost every prediction level p with EP [a(S) | Z = p] > 0,
+
+EPa [Y − f (X) | f (X) = p] = EPa [m(S) − Z | Z = p]= EP [a(S)( m(S) − p) | Z = p]
+
+EP [a(S) | Z = p]= EPtrain [a(S)( m(S) − p) | f (X) = p]
+
+EPtrain [a(S) | f (X) = p] .
+
+The first equality uses the tower property and EPa [Y | S] = m(S); the second is the conditional change of measure for the regular conditional law of S given the prediction level. This proves (4). It remains to prove the equivalence. Let h = m(S) − Z. Since m(S) and Z are both σ(S)-measurable, so is h. If h = 0 
+
+P -almost surely, then h = 0 Pa-almost surely for every admissible reweighting a, since Pa is absolutely continuous with respect to P . Therefore 
+
+EPa [Y − f (X) | f (X)] = EPa [h | f (X)] = 0 
+
+for every admissible a, so aggregate calibration is preserved. Conversely, suppose h̸ = 0 with positive P -probability. Then either B+ = {h > 0} or B− = {h < 0} has positive P -probability. Assume P (B+) > 0; the negative case is symmetric. Since h is σ(S)-measurable, B+ is a routing-configuration event, so 
+
+a(S) = 1B+
+
+P (B+)
+
+13 Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+is an admissible configuration reweighting. Under the corresponding test distribution Pa, we have h > 0 almost surely. Hence EPa [h | f (X)] ≥ 0 almost surely, and this conditional expectation cannot vanish on any set of prediction levels with positive Pa-measure: if it did, the integral of the nonnegative random variable h over the preimage of that set would be zero, contradicting h > 0 almost surely there. Therefore 
+
+EPa [Y − f (X) | f (X)] = EPa [h | f (X)] > 0
+
+on a set of prediction levels with positive Pa-measure, so aggregate calibration fails under this admissible reweighting. If instead P (B−) > 0, the same argument with a(S) = 1B− /P (B−) gives a strictly negative conditional residual on a set of positive measure. Thus aggregate calibration is preserved under all admissible configuration reweightings if and only if 
+
+m(S) = f (X) Ptrain -almost surely. The final equivalent formulation follows by conditioning this almost-sure identity on the prediction level f (X) = p.14 Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+B. Variants of adversarial reweighting 
+
+B.1. Entropy-balanced adversarial reweighting 
+
+On a minibatch with losses Li = Lθ (xi, y i), our adversary chooses a distribution q ∈ ∆n−1 over examples. The goal is to stress the examples on which the aggregate predictor currently incurs large proper loss, while changing the empirical distribution as little as possible. Entropy balancing captures this preference by selecting, among reweightings that raise the expected loss to an adversarial level, the one closest to the empirical weights in relative entropy. Routing posterior shift acts on diffuse overlap regions rather than a few discrete groups, so we want this smooth, least-distorted adversary rather than a sparse one. Formally, for any attainable target loss level c above the empirical mean, 
+
+q⋆c ∈ arg min  
+
+> q∈∆n−1
+
+KL( q ∥ u) subject to 
+
+> n
+
+X
+
+> i=1
+
+qiLi = c, ui = 1 
+
+> n
+
+. (10) Classical entropy balancing matches externally specified covariate moments (Hainmueller, 2012); here the moment is the model’s own current proper loss, so the adversary builds the least-distorted reweighting that exposes the predictor’s high-loss examples. The Lagrangian for (10) assigns a multiplier η ≥ 0 to the loss constraint, and its solution is the exponential tilt 
+
+qηi = exp( ηL i)
+
+Pnj=1 exp( ηL j ) . (11) We treat η as a hyperparameter controlling the adversary’s strength, with η = 0 recovering the uniform distribution and larger η placing more mass on higher-loss examples. We train on the expected proper loss under this entropy-balanced adversary, 
+
+LR-MoE (θ) = 
+
+> n
+
+X
+
+> i=1
+
+qηi Li, Li := Lθ (xi, y i). (12) Our implementation optimizes this objective, recomputing the weights qηi from the current losses at each step so that gradients flow through both L and qη .
+
+KL decomposition. Substituting qηi = eηL i /Z , with Z = P 
+
+> j
+
+eηL j , into the KL divergence to the uniform ui = 1 /n , 
+
+> 1
+> η
+
+KL( qη ∥u) = 1
+
+> η
+
+X
+
+> i
+
+qηi
+
+log( n q ηi ) = 1
+
+> η
+
+X
+
+> i
+
+qηi
+
+ηL i − log Z + log n
+
+= X
+
+> i
+
+qηi Li − 1 
+
+> η
+
+log Zn = LR-MoE (θ) − ρη (L),
+
+where ρη (L) is the standard entropic risk, 
+
+ρη (L) := 1
+
+η log 1
+
+n
+
+> n
+
+X
+
+> i=1
+
+eηL i
+
+!
+
+. (13) We drop the argument and write ρη when the loss vector is understood from context. Rearranging gives the identity used in the body, 
+
+LR-MoE (θ) = ρη + 1 
+
+> η
+
+KL  qη ∥ u. (14) Since KL ≥ 0, LR-MoE ≥ ρη pointwise, with equality only when qη = u, i.e. when all minibatch losses are equal. 
+
+Upper-bound surrogate for KL-ball DRO. For the KL-ball uncertainty set {q : KL( q∥u) ≤ ε}, the standard dual bound gives, for any η > 0,
+
+sup  
+
+> q: KL( q∥u)≤ε
+
+X
+
+> i
+
+qiLi ≤ ρη + εη ≤ L R-MoE + εη . (15) Thus LR-MoE is a conservative upper-bound surrogate for the KL-ball DRO objective, looser than the entropic risk by exactly the KL term in (14) . That extra looseness is not uniform—it grows whenever the current losses concentrate qη on a small set, the regime §4 identifies as vulnerable. 15 Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+Gradient: the covariance identity. Because the weights qη depend on θ, the gradient of LR-MoE is not simply the tilt-weighted average of the per-example gradients. Differentiating (12) through both L and qη ,
+
+∇θ LR-MoE = X
+
+> i
+
+qηi ∇θ Li + X
+
+> i
+
+Li ∇θ qηi .
+
+The first sum is the entropic-risk gradient; differentiating the log-sum-exp directly gives ∇θ ρη = P 
+
+> i
+
+qηi ∇θ Li. Using 
+
+∇θ qηi = η q ηi
+
+ ∇θ Li − P 
+
+> j
+
+qηj ∇θ Lj
+
+, the second sum collapses to 
+
+X
+
+> i
+
+Li ∇θ qηi = η Cov qη
+
+ L, ∇θ L.
+
+This is precisely ∇θ
+
+ 1 
+
+> η
+
+KL( qη ∥u), as (14) requires, so 
+
+∇θ LR-MoE = ∇θ ρη
+
+| {z } 
+
+> entropic-risk gradient
+
++ η Cov qη
+
+ L, ∇θ L| {z }
+
+> ∇θ
+
+ 1  
+
+> ηKL( qη∥u)
+
+
+
+. (16) The implementation backpropagates through qη and so computes exactly (16) ; training on LR-MoE is therefore not the same as training on ρη , even though both are built from the same exponential-tilt weights. 
+
+Relation to tilted ERM. The classical tilted/entropic risk ρη has gradient weights qηi (Li et al., 2023); for a fixed loss vector L one also has LR-MoE = ∂η [η ρ η (L)] . These identities explain the close kinship between our weights and tilted ERM, but, by (16) , they do not identify LR-MoE and ρη as objectives in θ, since the covariance term is present in one and absent in the other. 
+
+Why entropy balancing for routing posterior shift. Routing posterior shift is rarely observed through explicit group labels. It appears through changes in the prevalence of latent contexts and through shifts in the regions where the router is uncertain or experts disagree. A hard subset adversary can locate rare high-loss pockets, but it may also overfit to discontinuous minibatch artifacts. The entropy-balanced adversary is more conservative, using the current loss to find the direction of stress while otherwise staying as close as possible to the empirical distribution. This keeps the robust objective sensitive to the brittle routing-overlap regions of §4 while preserving smooth gradients for the router and experts. 
+
+B.2. Alternative reweighting geometries 
+
+We compare the entropy-balanced reweighting with two related objectives, entropic DRO and CVaR. The three differ in the 
+
+geometry of the reweightings available to the adversary, i.e. the shape of that constraint set, and in the training objective each induces. 
+
+KL-penalized adversary (entropic DRO). The same exponential weights arise from the KL-penalized adversary 
+
+max 
+
+> q∈∆n−1
+
+( nX
+
+> i=1
+
+qiLi − 1 
+
+> η
+
+KL( q ∥ u)
+
+)
+
+, (17) the usual route to KL-ball DRO bounds. This adversary and entropy balancing are Lagrangian duals—one fixes the penalty 
+
+1/η , the other fixes the loss level c—and both return the weights in (11) . They differ in the training objective they induce, not in the adversary: minimizing against the penalized adversary gives the entropic risk ρη , whereas we train on the expected loss under those same weights, LR-MoE = ρη + 1 
+
+> η
+
+KL( qη ∥u), which adds the induced concentration term. The penalized form has the cleaner guarantee— ρη + ε/η bounds the KL-ball worst case—and is the natural starting point when the design knob is the radius itself. We lead with the constrained form because its constraint is on the loss moment, the quantity the multiaccuracy bound in Appendix C ties to residual calibration moments. 
+
+CVaR (bounded density ratio). A genuinely different geometry replaces the entropy penalty with a hard density-ratio bound. Define 
+
+WΓ := {w : X × Y → [0 , Γ] | EPtrain [w(X, Y )] = 1 } ,
+
+16 Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+giving the robust score 
+
+min  
+
+> θ
+
+sup 
+
+> w∈W Γ
+
+EPtrain [w(X, Y )Lθ (X, Y )] . (18) The adversary can place weight Γ on at most a 1/Γ fraction of the population, so the inner supremum is the worst-tail (CVaR) risk of the loss distribution (Rockafellar et al., 2000); in finite samples it corresponds to averaging roughly the largest m ≈ n/ Γ losses in the batch, up to a fractional weight at the boundary. Unlike the entropic geometries above, this changes the weights themselves, not just the objective. CVaR gives the sharpest distributional guarantee of the three. Under a bounded density-ratio shift, (18) directly upper-bounds the test loss. Its drawback for our setting is the hard top-m cutoff, which concentrates the gradient signal on a few examples per batch—mismatched to the diffuse routing-overlap regions of §4—and makes the objective non-smooth. We therefore use CVaR as a theoretical reference rather than a training objective. A useful bridge nonetheless connects it to the geometry we use. Since any w ∈ W Γ satisfies KL( Pw∥Ptrain ) ≤ log Γ , a standard variational bound implies that for any η > 0,
+
+sup 
+
+> w∈W Γ
+
+EPtrain [wL θ ] ≤ 1 
+
+> η
+
+log Γ + 1 
+
+> η
+
+log EPtrain [exp( ηL θ )] . (19) The entropic risk is thus a smooth upper-bound surrogate, up to an additive constant, for the box-constrained CVaR risk; by (14), LR-MoE + (1 /η ) log Γ is likewise an upper-bound surrogate. 17 Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+C. Multiaccuracy interpretation of the robust objective 
+
+The residual-moment connection is easiest to state using the squared residual. Let W be any family of nonnegative normalized weights, and define 
+
+JW (f ) := sup 
+
+> w∈W
+
+EPtrain 
+
+w(X, Y )( Y − f (X)) 2 .
+
+Fix any bounded class Φ of functions ϕ : [0 , 1] → [0 , 1] . For each expert k and ϕ ∈ Φ, define the routing-induced auditor 
+
+gk,ϕ (x) := rk(x) ϕ(f (x)) ∈ [0 , 1] .
+
+Then, for all k and all ϕ ∈ Φ,
+
+sup 
+
+> w∈W
+
+|EPtrain [w(X, Y ) gk,ϕ (X) ( Y − f (X))] | ≤ pJW (f ).
+
+This follows from Cauchy-Schwarz: since 0 ≤ gk,ϕ (x) ≤ 1 and EPtrain [w] = 1 , we have EPtrain [w g k,ϕ (X)2] ≤ 1.Consequently, if the worst-case squared residual is small over a reweighting family, then the residual cannot systematically align with any auditor formed from the routing weights, connecting the objective to multiaccuracy (Kim et al., 2019). For binary labels and p ∈ (0 , 1) ,
+
+(y − p)2 ≤ − y log p − (1 − y) log(1 − p) = ℓCE (p, y ).
+
+Thus, a robust cross-entropy bound over the same reweighting family also upper-bounds JW (f ).For the proposed objectives, the relevant choices of W are the reweightings used during training. For Robust MoE, this is the full-minibatch entropic weighting qη ; for Robust Filtered, the bound applies separately to the uniform ERM term over the full minibatch and to the entropic weighting qηA over the routing-relevant set A. Thus, each training term controls the corresponding weighted residual moments in the multiaccuracy bound. The value-level guarantee (8) makes this concrete for Robust MoE over a KL ball. Let 
+
+Wε := {w ≥ 0 : EPtrain [w] = 1 , KL( Pw∥Ptrain ) ≤ ε} .
+
+For cross-entropy, or any loss that pointwise dominates the squared residual (with equality for the Brier score), the inequality 
+
+(Y − f (X)) 2 ≤ Lθ (X, Y ) holds, and combining it with the guarantee (8) gives, for every w ∈ W ε,
+
+EPw
+
+(Y − f (X)) 2 ≤ EPw [Lθ ] ≤ L pop 
+
+> R-MoE
+
+(θ) + εη .
+
+Taking the supremum over w ∈ W ε yields JWε (f ) ≤ L pop 
+
+> R-MoE
+
+(θ) + ε/η , so by the Cauchy-Schwarz bound above, every routing-weighted auditor gk,ϕ (x) = rk(x)ϕ(f (x)) satisfies 
+
+sup 
+
+> w∈W ε
+
+|EPtrain [w g k,ϕ (X) ( Y − f (X))] | ≤ 
+
+q
+
+Lpop 
+
+> R-MoE
+
+(θ) + εη .
+
+Controlling the robust loss therefore controls residual alignment with routing-weighted auditors over a KL-controlled reweighting family. The bound concerns robust-risk values rather than individual gradient steps, since the implementation differentiates through the tilt weights qη (Appendix B). For Robust Filtered the same reasoning applies to the filtered robust term after restricting to the routing-relevant set A, while the ERM anchor controls the unfiltered residual moment under the empirical training distribution. 
+
+From multiaccuracy to multicalibration. This bound applies to unnormalized moments, i.e., multiaccuracy, rather than the conditional expectations required for multicalibration (Hébert-Johnson et al., 2018). The auditors gk,ϕ (X) = 
+
+rk(X)ϕ(f (X)) take values in [0 , 1] , so the natural normalized quantity is the auditor-weighted average residual 
+
+EPtrain [w(X, Y ) gk,ϕ (X) ( Y − f (X))] 
+
+EPtrain [w(X, Y ) gk,ϕ (X)] ,
+
+which recovers a conditional calibration residual when gk,ϕ is an indicator. Bounding this normalized residual by the unnormalized bound above requires a lower bound on the shifted auditor mass EPtrain [w(X, Y ) gk,ϕ (X)] for the slice of interest, which controls how far multiaccuracy can be sharpened toward multicalibration. 18 Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+D. Additional experimental details 
+
+D.1. Baselines Frequency-aware Gradient Rectification (FGR) (Zhang et al., 2025) FGR is a training procedure designed to improve calibration under covariate shift for single models. Each training step computes two gradients: one from the main classification loss on a frequency-perturbed version of the batch, and one from a differentiable calibration loss (soft ECE (Karandikar et al., 2021)) on the original batch. If these two gradients conflict—i.e., their dot product is negative, meaning improving classification would worsen calibration—then the main gradient is projected onto the hyperplane orthogonal to the calibration gradient, removing the conflicting component. When the gradients agree, the main gradient is used as-is. The frequency perturbation works by applying JPEG-style 8 × 8 block Discrete Cosine Transform (DCT) filtering to a small random fraction (ν = 0 .05) of training images. Images are converted to YCbCr color space, each 8 × 8 block is transformed, quantized using scaled standard JPEG quantization matrices, and reconstructed via inverse DCT. The quantization strength is randomly sampled from λ ∈ { 15 , 18 , 25 } per image, simulating mild frequency-domain corruptions. This is meant to make the model robust to the kind of high-frequency perturbations that arise in real-world covariate shift scenarios. Matching the paper, we use cross-entropy as the main loss and soft ECE as the calibration loss, and we use vanilla warmup for 20 epochs before switching to gradient rectification. Each batch requires two forward passes and two backward passes (one per objective), plus CPU-based DCT filtering, making training roughly 2.5x slower per epoch than vanilla. FGR is a training procedure, so combining it with our robust method requires deciding which method provides the main loss for the rectification framework. We combine FGR with Robust MoE by substituting our entropy-balanced robust loss for cross-entropy as the main loss: the main gradient is computed from the full entropy-balanced objective on the frequency-perturbed batch, while the calibration gradient (soft ECE on the original batch) and the rectification logic are unchanged. We note that the motivation for this combination is weaker, as FGR was designed for covariate shift on single models, not MoE routing fragility, and its DCT-based frequency filtering targets the kind of high-frequency perturbations that arise from image corruptions, which have essentially no connection to the subpopulation structure that drives the routing-induced shift. 
+
+MoCaE (Oksuz et al., 2024; Roschewitz et al., 2025) This paper is not a traditional baseline in the sense that they propose a method to compare against; instead, the authors argue that for single models under distribution shift, post-hoc calibration with a small amount of semantic out-of-distribution (OOD) data is often more effective than more complex methods that use OOD data during calibration. For ensembles, the authors suggest that OOD data is unnecessary for maintaining calibration under shift, and that the best approach is to calibrate before ensembling, rather than calibrating the final averaged predictor afterward. For our setting, the most relevant part of this paper is the result on calibrating ensembles. Ensembles are not the same thing as MoE, but if we were to draw an analogy between the set of ensemble members and the set of MoE experts, then the suggested method for MoE would be to calibrate the experts before they are combined. This is essentially our MoCaE baseline, which we already include in our comparisons. We additionally report results with post-hoc temperature scaling, where the temperature selected on a held-out validation set (we use 5,000 images for validation, and the remaining 45,000 images for training). (This allows us to separate improvements in calibration due to training from those achievable with post-hoc calibration alone.) 
+
+D.2. Datasets and models CIFAR-10H CIFAR-10H is the CIFAR-10 dataset augmented with human soft labels collected from ≈ 50 annotators per test image (Peterson et al., 2019). We define images with low human agreement (max annotation probability < 0.7) as hard .These ambiguous images make up ≈ 3.3% of the test set (327 of 10,000 images). All methods are trained on the standard CIFAR-10 training set (50,000 images), with 10% (5,000 images) withheld for validation and temperature scaling. The model uses a ResNet-18 backbone adapted for 32 × 32 CIFAR images ( 3 × 3 initial convolution, no max pooling, three residual blocks producing a 256-dimensional representation). The 256-dimensional output is fed into the MoE classification head, which consists of 4 expert linear classifiers and a 2-layer MLP router. The entire model is trained end-to-end using AdamW (lr=1e-3, weight decay=1e-4) with cosine annealing over 50 epochs. For the robust methods, a 20-epoch warmup period trains with standard cross-entropy before the robust objective is applied. 19 Toward Calibrated Mixture-of-Experts Under Distribution Shift Photo       
+
+> (n=1670)
+> Dog Elephant Giraffe Guitar Horse House Person
+> Art Painting
+> (n=2048)
+> Cartoon
+> (n=2344)
+> Sketch
+> (n=3929)
+> PACS Dataset (4 domains, 7 classes)
+
+Figure D.1. Example images from the PACS dataset across four domains. 
+
+PACS PACS is a widely used benchmark for evaluating image models under domain shift (Li et al., 2017). It contains object categories from four domains: Photo, Art Painting, Cartoon, and Sketch (Figure D.1). Because these domains have visually distinct styles, evaluation on PACS is useful for studying whether model behavior remains stable when the image style changes. PACS contains approximately 10,000 images of 7 object categories (dog, elephant, giraffe, guitar, horse, house, person) across four visually distinct domains. Following the standard leave-one-domain-out protocol, the model trains on three source domains and is evaluated on the held-out target domain. For our evaluation, Photo, Art Painting, Cartoon, and Sketch all take turns as the target domain. 10% of the training data is withheld for validation and temperature scaling. The model uses a ResNet-18 backbone pretrained on ImageNet as the shared feature extractor. The 512-dimensional output is fed into the MoE classification head, which consists of 4 expert classifiers and a 2-layer MLP router. The entire model, backbone and MoE head, is fine-tuned end-to-end using AdamW with a learning rate of 1e-4 and cosine annealing over 50 epochs. 
+
+CivilComments CivilComments is a text classification benchmark from WILDS (Koh et al., 2021), where the goal is to predict whether an online comment is toxic under a natural subpopulation shift setting. This experiment extends our approach to a transformer-based architecture operating on text, demonstrating that the robust training framework is not limited to convolutional backbones or vision tasks. The WILDS CivilComments dataset contains approximately 270,000 training comments and 134,000 test comments. For tractable end-to-end fine-tuning of the DistilBERT backbone, we randomly subsample the training comments to 50000 (fixed seed); from this subsample, we withhold the last 10% ( 5000 comments) as a validation split used solely for temperature scaling, leaving 45000 comments for training. The full WILDS test split is used for evaluation. Of the test set, roughly 41% (55,000 comments) mention at least one identity group. These comments are considered hard, as toxicity classifiers generally have high false positive rates on even benign mentions of minority groups. This is a much larger hard subpopulation than CIFAR-10H, where only 3.3% of the test set is hard. The identity group annotations are used solely at evaluation time to define the hard subset. 20 Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+The model uses a DistilBERT (Sanh et al., 2019) backbone (66M parameters, pretrained on English text) as the feature extractor. Each comment is tokenized and passed through the full transformer encoder; the output (768-dimensional [CLS] representation) is then fed into our MoE classification head, where the router and expert networks operate on these learned text representations to produce the final toxicity prediction. The entire model, including the backbone and MoE head, is fine-tuned end-to-end. 
+
+D.3. Implementation of the proposed methods 
+
+The body of the paper writes the proposed objectives in terms of a generic strictly proper loss Lθ (X, Y ). In all experiments we instantiate this loss as multiclass cross-entropy applied to the aggregate mixture probabilities, 
+
+Lθ (x, y ) = − log fθ (x)y = − log 
+
+> K
+
+X
+
+> k=1
+
+rk(x) fk(x)y ,
+
+where fk(x) ∈ ∆C−1 is each expert’s softmax distribution over the C classes and r(x) ∈ ∆K−1 is the routing distribution. Cross-entropy is strictly proper, so the multiaccuracy bound in Appendix C applies via the pointwise inequality (y − p)2 ≤
+
+ℓCE (p, y ).
+
+Entropy-balanced tilted-softmax objective. Both proposed methods evaluate the maximum-entropy adversarial weights from (11) on each minibatch. Concretely, given per-example losses L1, . . . , L n on a minibatch of size n, we form 
+
+qηi = exp( ηL i)
+
+Pnj=1 exp( ηL j ) , L(θ) = 
+
+> n
+
+X
+
+> i=1
+
+qηi Li,
+
+and backpropagate through the scalar objective as written, so gradients flow through both the losses Li and the weights qηi .Thus the update is the full gradient of the entropy-balanced objective, including the covariance term that implements the induced-concentration penalty derived in Appendix B.1. Appendix B.2 relates this diffuse exponential-tilt geometry to the sparse top-tail geometry of CVaR, and the next subsection (§D.6) reports the empirical correspondence between η and the effective density-ratio bound Γeff .
+
+Warmup phase. At the start of training, before the model has learned useful features, the largest losses are dominated by random initialization rather than by routing fragility. Thus, adversarial reweighting at initialization is uninformative, so we train every robust method with a warmup phase that uses standard ERM on the aggregate cross-entropy loss 
+
+Lwarm (θ) = 1
+
+> n
+
+P 
+
+> i
+
+Li for the first Twarm epochs of training. After the warmup, the optimizer switches to the robust objective for the remaining epochs. The cosine learning-rate schedule runs over the full training horizon and is unaffected by the warmup-to-robust transition. Default values are Twarm = 20 for the 50-epoch image experiments and Twarm = 2 for the 5-epoch CivilComments fine-tuning run; both values correspond to 40% of the training horizon, so warmup occupies a comparable fraction of training across datasets. 
+
+Robust MoE. Robust MoE applies the tilted-softmax weights to the full minibatch: 
+
+LR-MoE (θ) = 
+
+> n
+
+X
+
+> i=1
+
+qηi Li with Li = − log fθ (xi)yi .
+
+Every minibatch sample enters the forward objective with positive tilted weight qηi , monotone in its current loss. We use 
+
+η = 2 .0 for all reported Robust MoE results. 
+
+Robust Filtered. Robust Filtered restricts the entropic reweighting to a routing-relevant subset A ⊆ { 1, . . . , n } and adds an ERM anchor over the full minibatch: 
+
+LRF-MoE (θ) = 1
+
+n
+
+> n
+
+X
+
+> i=1
+
+Li + X
+
+> i∈A
+
+qηi,A Li, qηi,A = exp( ηL i)
+
+P 
+
+> j∈A
+
+exp( ηL j ) .
+
+A sample is placed in A if either of two routing-relevance conditions holds: 21 Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+1. Mixture regret. Let Lmix  
+
+> i
+
+= − log fθ (xi)yi and Lbest  
+
+> i
+
+= min k − log fk(xi)yi . The regret Ri = ( Lmix  
+
+> i
+
+− Lbest  
+
+> i
+
+)+ is positive whenever the mixture prediction is strictly worse than the best individual expert. We mark i as routing-relevant if Ri > τ regret , with τregret = 10 −6 in all experiments. 2. Routing-weighted disagreement. We compute di = PKk=1 rk(xi) ∥fk(xi) − fθ (xi)∥22, the routing-weighted variance of expert probability vectors around the mixture prediction. We mark i as routing-relevant if di > τ disagree , with 
+
+τdisagree = 0 .01 .A sample joins A as soon as either condition holds. The first uses the actual labeled regret of the mixture against the best expert and is informative only when training labels are available; the second uses only model outputs and holds whenever the experts disagree enough that the routing weights materially affect the prediction. Neither condition alone is sufficient—some routing-sensitive examples are confidently miscalibrated even when a single expert is best, and some high-regret examples have only one disagreeing expert—so we take the union. As with Robust MoE, we use η = 2 .0 for all reported Robust Filtered results. 
+
+Why an ERM anchor is needed. The robustness parameter η alone cannot decouple emphasis on routing-relevant tail samples from emphasis on intrinsically hard samples. Lowering η recovers gradient signal on routing-easy samples but also reduces emphasis on routing-relevant tail samples; raising η does the reverse. The ERM anchor in LRF-MoE keeps a uniform training signal over the full minibatch, while the robust term can operate at higher η on routing-relevant samples. This decouples broad accuracy improvement from targeted robustness pressure, without relying on η alone to balance the two. 
+
+D.4. Training hyperparameters 
+
+All models share the same MoE architecture: a shared backbone produces a feature representation that is consumed by K=4 
+
+linear expert heads and a 2-layer MLP router (hidden width 128, softmax output). The entire model—backbone, experts, and router—is trained end-to-end with the AdamW optimizer and a cosine annealing learning-rate schedule that runs over the full training horizon. Weight decay is fixed at 10 −4 across all datasets and methods. Dataset-specific hyperparameters are summarized in Table 4.         
+
+> Table 4. Dataset-specific training hyperparameters. All datasets use AdamW with weight decay 10 −4,K=4 experts, a 2-layer MLP router with hidden width 128, and cosine annealing of the learning rate over the full training horizon. warmup is the number of ERM epochs before the robust objective is applied; init. is the backbone initialization (ImageNet-pretrained or trained from scratch).
+
+Dataset Backbone Init. Resolution Batch Epochs Warmup Learning rate Augmentation CIFAR-10H ResNet-18 scratch 32 ×32 128 50 20 10 −3 crop, flip PACS ResNet-18 ImageNet 224 ×224 128 50 20 10 −4 crop, flip CivilComments DistilBERT pretrained 128 tokens 32 5 2 2×10 −5 —
+
+Backbone variants. The CIFAR-10H ResNet-18 is the standard CIFAR variant: the first convolution is replaced by a 
+
+3×3, stride-1 layer with no max-pool, and we use the first three residual stages, yielding a 256-dim feature. The PACS ResNet-18 uses the standard ImageNet stem ( 7×7, stride 2, max-pool) and all four residual stages, yielding a 512-dim feature. The CivilComments backbone is the public distilbert-base-uncased model (66M parameters) and we take the 768-dim [CLS] embedding as the feature. 
+
+Data augmentation. For both image datasets we apply random horizontal flip and random crop with zero padding ( 4 pixels for 32 ×32 inputs, 28 pixels for 224 ×224 inputs), followed by per-channel mean/standard deviation normalization (CIFAR statistics for CIFAR-10H, ImageNet statistics for PACS). The test transform applies only the normalization. CivilComments inputs are tokenized once at preprocessing time using the DistilBERT tokenizer with maximum length 128 and padded to that length; no additional augmentation is applied. 
+
+Train/validation/test splits. For CIFAR-10H, 10% of the 50,000 CIFAR-10 training images (5,000 images) are held out as a validation split that is used only for temperature scaling. For PACS, the leave-one-domain-out target domain is held out as test, and 10% of the source-domain training data is held out as a validation split for temperature scaling. For CivilComments, we subsample the WILDS training split to 50000 comments (fixed-seed random subsample) and withhold 22 Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+the last 10% ( 5000 ) as a validation split for temperature scaling; the full WILDS test split is used for evaluation, and the WILDS validation split is not used. 
+
+Seeds and reporting. All reported numbers are mean ± standard error of the mean across five random seeds, 
+
+{42 , 43 , 44 , 45 , 46 }, applied to model initialization, data shuffling, and (for the robust methods) the warmup-to-robust transition. The same seed set is used across methods to allow seed-paired comparisons. 
+
+D.5. Evaluation protocol Top-class ECE. We report the standard top-class Expected Calibration Error (Guo et al., 2017): predictions are partitioned into B = 15 equal-width bins on the predicted-class confidence max c fθ (x)c, and 
+
+ECE = 
+
+> B
+
+X
+
+> b=1
+
+|B b|
+
+N |acc( Bb) − conf( Bb)| ,
+
+where Bb is the b-th confidence bin, conf( Bb) is the mean top-class probability in the bin, and acc( Bb) is the empirical top-1 accuracy in the bin. We use 15 bins for all datasets; the same binning is applied to overall ECE and to ECE on hard subsets, restricting the sum to test points in the subset before binning. 
+
+Hard subsets. For each dataset, the body reports a Hard ECE summary on the test points most directly stressed by routing-induced reweighting. The exact hard-subset definitions are: • CIFAR-10H. Test images with maximum CIFAR-10H human-annotation probability below 0.7. This corresponds to images on which annotators systematically disagree and is taken as a proxy for routing-overlap regions where multiple experts may have a plausible interpretation. The hard subset contains 327 of the 10000 test images ( ≈ 3.3% ). • PACS. The full held-out target domain is the hard subset; each row of the leave-one-domain-out table reports overall accuracy and ECE on the entire target domain, since the natural shift is the domain itself. • CivilComments. Test comments whose WILDS metadata flags a mention of any of eight identity subgroups (Male, Female, LGBTQ, Christian, Muslim, Other Religions, Black, White). This subset contains ≈ 41% of the test set and isolates the well-documented false-positive failure mode of toxicity classifiers on benign demographic mentions. The hard-subset notion in CIFAR-10H is the only one of the three that is not directly observable at training time, since human-agreement annotations exist only for the test split. 
+
+Aggregate temperature scaling. The ECE+TS columns in all tables apply post-hoc temperature scaling to the aggregate mixture probabilities. We collect the aggregate logits z(x) = log fθ (x) on the validation split, fit a single scalar temperature 
+
+T > 0 by minimizing the validation cross-entropy with LBFGS (50 iterations, learning rate 0.01 ), and rescale the test predictions as f Tθ (x) = softmax( z(x)/T ) before computing ECE. The temperature is selected once per (method, seed) pair on the validation split and held fixed for all test evaluations of that pair, including the hard-subset evaluation. For PACS we use the held-out source-domain validation split (§D.4); the target domain is never used for temperature selection. 
+
+Accuracy. Top-1 accuracy is reported on the same test populations as ECE; Hard Accuracy on CIFAR-10H and CivilCom-ments uses the hard subsets defined above. 
+
+D.6. Sensitivity to the robustness parameter η
+
+The body objectives are stated in terms of the robustness parameter η, while Appendix B.2 formulates the robust score in terms of a density-ratio bound Γ. The two parameters are not equal in general: η is the temperature of a softmax over batch losses, and Γ is a bound on the worst-case adversarial reweighting. To make the body objective interpretable in the language of the CVaR formulation, we report the empirical correspondence between η and an effective density-ratio bound Γeff .For each batch, the tilted-softmax weights qη ∈ ∆n−1 have an effective sample size given by their perplexity ppl( qη ) = exp( − P 
+
+> i
+
+qηi log qηi ), the exponentiated entropy of the weight distribution. Letting Γeff = n/ ppl( qη ) gives the effective density-ratio bound: it is the ratio of the maximum-entropy weight to the uniform weight averaged over the batch. Equivalently, the entropic adversary at temperature η has the same effective support size as a hard CVaR adversary that 23 Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+selects the top ⌈n/ Γeff ⌉ losses in each batch, although the two assign weights differently. Table 5 reports this mapping, evaluated on CIFAR-10H training batches of size n=128 using the trained Robust MoE checkpoint at each η value. 
+
+Table 5. Empirical mapping between the robustness parameter η and the effective density-ratio bound Γeff on CIFAR-10H, batch size 
+
+n=128 . The effective fraction is the perplexity divided by the batch size; the equivalent hard-CVaR adversary averages the top ⌈n/ Γeff ⌉
+
+losses. 
+
+η Perplexity Effective fraction Γeff Hard top-⌈n/ Γeff ⌉ equivalent 0.5 122.4 95.6% 1.0 top 128 of 128 1.0 115.6 90.3% 1.1 top 117 of 128 1.5 106.6 83.3% 1.2 top 107 of 128 2.0 93.2 72.8% 1.4 top 92 of 128 2.5 83.4 65.1% 1.5 top 86 of 128 3.0 80.1 62.6% 1.6 top 80 of 128 4.0 67.4 52.6% 1.9 top 68 of 128 5.0 65.6 51.3% 2.0 top 64 of 128 
+
+Three observations follow from this mapping. First, the default η = 2 .0 used throughout the experiments corresponds to 
+
+Γeff ≈ 1.4, i.e., a moderate tail emphasis equivalent to averaging over the top ∼ 73% of losses in each batch—far from the extreme concentration regime Γ ≫ 10 where smooth and hard tail risks diverge. Second, the mapping is monotone and smooth in η: doubling η from 2.0 to 4.0 moves Γeff only from 1.4 to 1.9. Third, the perplexity-derived Γeff closely matches the hard top-k batch fraction at the same nominal Γ, supporting the use of the tilted-softmax objective as a smooth surrogate for the hard CVaR objective in our operating regime. 24 Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+E. Additional figures/experiments 
+
+This appendix collects supporting figures for the experiments in §6. For each dataset we provide reliability diagrams for all methods, evaluated both on the full test set and on the dataset’s hard subset (§D.5). We close with sensitivity ablations for the robustness parameter η and the warmup horizon. 
+
+CIFAR-10H The hard subset consists of CIFAR-10H test images with low human agreement, where the human soft labels themselves indicate genuine ambiguity. Figure E.2 shows representative examples where Vanilla MoE and MoCaE place near-unit confidence on a single class even though the human label distribution is spread over several classes; the robust methods correctly disperse mass over the plausible classes. Figure E.3 aggregates this pattern across the full test set: on easy images all methods produce sharp, high-confidence predictions; on hard images, only the robust methods produce a confidence distribution centered near the empirical accuracy, while the non-robust baselines remain peaked at high confidence. True: dog 
+
+> Agree: 0.67
+> deer
+> cat
+> dog
+> bird
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Confidence
+> Vanilla
+> MoCaE
+> Robust
+> True: bird
+> Agree: 0.57
+> dog
+> bird
+> cat
+> frog
+> True: cat
+> Agree: 0.49
+> frog
+> cat
+> bird
+> deer
+> True: deer
+> Agree: 0.51
+> horse
+> bird
+> deer
+> frog
+> True: cat
+> Agree: 0.49
+> dog
+> horse
+> cat
+> bird
+> True: cat
+> Agree: 0.49
+> frog
+> deer
+> cat
+> bird
+> True: frog
+> Agree: 0.57
+> cat
+> frog
+> bird
+> dog
+> True: truck
+> Agree: 0.67
+> automo
+> truck
+> ship
+> airpla
+> Hard Images Where Vanilla MoE is Overconfident
+
+Figure E.2. Representative hard CIFAR-10H images on which the non-robust MoE baselines are confidently wrong. Each column shows one ambiguous image with the predicted confidence distribution over the top classes for each method. The robust methods reduce confidence on these images and place mass on multiple plausible classes, while the non-robust baselines remain peaked on a single class. 
+
+We report reliability diagrams for all methods in Figure E.4, evaluated separately on (a) the full test set and (b) the hard subset of low-agreement images. Panel (a) is an expanded view of Figure 1 that includes per-bin error bars, while panel (b) restricts the same diagnostic to the routing-stressed subset and is the most direct visual evidence for Takeaway 1 in §6: the non-robust baselines concentrate predictions in the highest-confidence bins despite low accuracy on those bins, while the robust methods spread mass over a wider confidence range that more closely tracks the diagonal. 
+
+PACS Across all four target domains, the robust methods (Robust MoE and Robust Filtered) substantially improve calibration compared to the baselines, generally at a small cost to accuracy (Table 2). The reliability diagrams reinforce these findings and reveal a qualitative pattern beyond what ECE captures alone. On the harder domains (Art, Cartoon, Sketch), the baselines are all overconfident: most predictions fall in high-confidence bins (0.7-1.0), and since the low-confidence bins are nearly empty, they have large error bars that span much of the y-axis. In contrast, the robust methods distribute predictions more broadly across confidence bins, with tighter error bars and closer alignment to the diagonal. Reliability diagrams for all methods across the four leave-one-domain-out target domains are shown in Figure E.5. 
+
+CivilComments The CivilComments hard subset is the ∼ 41% of test comments that mention at least one of eight identity subgroups (§D.5). Figure E.6 shows reliability diagrams on the full test set and on this hard subset. Both panels reproduce the qualitative pattern observed on CIFAR-10H: the non-robust MoE baselines concentrate predictions in the highest-confidence bin, where accuracy is below the bin-mean confidence, whereas the robust methods spread predictions across the confidence range and align more closely with the diagonal. The effect is most pronounced in panel (b), where Vanilla MoE and MoCaE remain confidently miscalibrated on identity-mentioning comments while Robust MoE and Robust Filtered are visibly closer to perfect calibration. This visual pattern matches the per-group accuracy and ECE breakdown in Figure 2 of §6. 25 Toward Calibrated Mixture-of-Experts Under Distribution Shift 0.2 0.4 0.6 0.8 1.0 
+
+Confidence 
+
+> 0
+> 2000
+> 4000
+> 6000
+> 8000
+> Vanilla MoE
+> Count
+
+Gap: +0.06 
+
+Overall (n=10000)     
+
+> Mean: 0.98
+> Acc: 0.92
+> 0.2 0.4 0.6 0.8 1.0
+
+Confidence  
+
+> 0
+> 2000
+> 4000
+> 6000
+> 8000
+
+Gap: +0.04 
+
+Easy (n=8721)     
+
+> Mean: 0.98
+> Acc: 0.95
+> 0.2 0.4 0.6 0.8 1.0
+
+Confidence  
+
+> 0
+> 50
+> 100
+> 150
+> 200
+
+Gap: +0.27 
+
+Hard (n=327)     
+
+> Mean: 0.91
+> Acc: 0.64
+> 0.2 0.4 0.6 0.8 1.0
+
+Confidence 
+
+> 0
+> 2000
+> 4000
+> 6000
+> 8000
+> MoCaE
+> Count
+
+Gap: +0.05 Mean: 0.97     
+
+> Acc: 0.92
+> 0.2 0.4 0.6 0.8 1.0
+
+Confidence 
+
+> 0
+> 2000
+> 4000
+> 6000
+> 8000
+
+Gap: +0.03 Mean: 0.98     
+
+> Acc: 0.95
+> 0.2 0.4 0.6 0.8 1.0
+
+Confidence  
+
+> 0
+> 50
+> 100
+> 150
+
+Gap: +0.25 Mean: 0.89     
+
+> Acc: 0.64
+> 0.2 0.4 0.6 0.8 1.0
+
+Confidence 
+
+> 0
+> 250
+> 500
+> 750
+> 1000
+> 1250
+> Robust MoE
+> Count
+
+Gap: -0.11 Mean: 0.80     
+
+> Acc: 0.90
+> 0.2 0.4 0.6 0.8 1.0
+
+Confidence  
+
+> 0
+> 250
+> 500
+> 750
+> 1000
+> 1250
+
+Gap: -0.11 Mean: 0.82     
+
+> Acc: 0.93
+> 0.2 0.4 0.6 0.8 1.0
+
+Confidence  
+
+> 0
+> 5
+> 10
+> 15
+> 20
+> 25
+
+Gap: +0.01 Mean: 0.63 
+
+> Acc: 0.61
+
+Confidence Distributions by Method and Difficulty 
+
+Figure E.3. Top-class confidence distributions for each method across CIFAR-10H difficulty levels. Each row corresponds to one method; columns split the test set into Overall, Easy (human agreement > 0.9), and Hard (human agreement < 0.7) subsets. Each panel reports the mean confidence (dashed) and accuracy (dotted) on the corresponding subset, and the gap between them (mean confidence minus accuracy). All methods are well calibrated on easy images. On the hard subset, the non-robust baselines remain concentrated at near-unit confidence despite accuracy near 0.6, while the robust methods produce a wider confidence distribution whose mean tracks the empirical accuracy. 
+
+26 Toward Calibrated Mixture-of-Experts Under Distribution Shift 0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Single Expert 
+
+ECE=0.054±0.001 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Vanilla MoE 
+
+ECE=0.055±0.001 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+MoCaE 
+
+ECE=0.049±0.001 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+FGR 
+
+ECE=0.051±0.001 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Robust MoE 
+
+ECE=0.090±0.019 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Robust Filtered 
+
+ECE=0.012±0.004 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+FGR + Robust 
+
+ECE=0.083±0.010 
+
+(a) CIFAR-10H, all images (n=10000). 0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Single Expert 
+
+ECE=0.274±0.017 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Vanilla MoE 
+
+ECE=0.282±0.019 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+MoCaE 
+
+ECE=0.262±0.020 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+FGR 
+
+ECE=0.259±0.014 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Robust MoE 
+
+ECE=0.056±0.016 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Robust Filtered 
+
+ECE=0.118±0.020 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+FGR + Robust 
+
+ECE=0.055±0.008 
+
+(b) CIFAR-10H, hard images (agreement < 0.7, n=327). 
+
+Figure E.4. Reliability diagrams for all methods on CIFAR-10H. (a) All test images, an expanded view of Figure 1 with per-bin error bars. (b) Hard subset (low-agreement images) only. 
+
+27 Toward Calibrated Mixture-of-Experts Under Distribution Shift 0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Single Expert 
+
+ECE=0.031±0.003 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Vanilla MoE 
+
+ECE=0.033±0.002 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+MoCaE 
+
+ECE=0.026±0.002 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+FGR 
+
+ECE=0.035±0.002 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Robust MoE 
+
+ECE=0.013±0.003 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Robust Filtered 
+
+ECE=0.016±0.005 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+FGR + Robust 
+
+ECE=0.017±0.006 
+
+(a) PACS, Photo (n=1670) 0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Single Expert 
+
+ECE=0.128±0.004 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Vanilla MoE 
+
+ECE=0.141±0.006 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+MoCaE 
+
+ECE=0.119±0.007 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+FGR 
+
+ECE=0.143±0.007 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Robust MoE 
+
+ECE=0.088±0.025 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Robust Filtered 
+
+ECE=0.075±0.013 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+FGR + Robust 
+
+ECE=0.060±0.027 
+
+(b) PACS, Art (n=2048) 0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Single Expert 
+
+ECE=0.166±0.011 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Vanilla MoE 
+
+ECE=0.171±0.010 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+MoCaE 
+
+ECE=0.147±0.010 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+FGR 
+
+ECE=0.175±0.013 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Robust MoE 
+
+ECE=0.108±0.019 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Robust Filtered 
+
+ECE=0.134±0.022 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+FGR + Robust 
+
+ECE=0.133±0.030 
+
+(c) PACS, Cartoon (n=2344) 0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Single Expert 
+
+ECE=0.216±0.030 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Vanilla MoE 
+
+ECE=0.183±0.017 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+MoCaE 
+
+ECE=0.189±0.012 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+FGR 
+
+ECE=0.176±0.020 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Robust MoE 
+
+ECE=0.032±0.018 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Robust Filtered 
+
+ECE=0.065±0.030 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+FGR + Robust 
+
+ECE=0.072±0.025 
+
+(d) PACS, Sketch (n=3929) 
+
+Figure E.5. Reliability diagrams for all methods on the four PACS target domains. 
+
+28 Toward Calibrated Mixture-of-Experts Under Distribution Shift 0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Single Expert 
+
+ECE=0.069±0.001 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Vanilla MoE 
+
+ECE=0.071±0.001 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+MoCaE 
+
+ECE=0.066±0.002 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+FGR 
+
+ECE=0.044±0.004 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Robust MoE 
+
+ECE=0.024±0.001 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Robust Filtered 
+
+ECE=0.027±0.004 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+FGR + Robust 
+
+ECE=0.052±0.007 
+
+(a) CivilComments, all comments (n=133782). 0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Single Expert 
+
+ECE=0.105±0.001 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Vanilla MoE 
+
+ECE=0.108±0.002 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+MoCaE 
+
+ECE=0.101±0.002 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+FGR 
+
+ECE=0.065±0.006 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Robust MoE 
+
+ECE=0.037±0.002 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+Robust Filtered 
+
+ECE=0.040±0.005 
+
+0.0 0.5 1.0 
+
+Confidence 
+
+0.0 
+
+0.2 
+
+0.4 
+
+0.6 
+
+0.8 
+
+1.0 
+
+> Accuracy
+
+FGR + Robust 
+
+ECE=0.063±0.009 
+
+(b) CivilComments, hard comments (comments with demographic identity, n=55346). 
+
+Figure E.6. Reliability diagrams for all methods on CivilComments. (a) Full test set. (b) Hard subset of comments mentioning at least one identity subgroup. 
+
+29 Toward Calibrated Mixture-of-Experts Under Distribution Shift 
+
+Sensitivity to η and warmup. The two hyperparameters specific to the proposed methods are the robustness parameter η,which controls the strength of the adversarial reweighting, and the warmup horizon Twarm , which controls how long ERM precedes the robust objective. Figures E.7 and E.8 sweep each hyperparameter on CIFAR-10H, with all other settings fixed to the defaults reported in §D.4. The default η = 2 .0 used throughout the experiments sits near the Hard-ECE optimum and gives a small accuracy concession relative to ERM; both Hard ECE and accuracy degrade smoothly outside this neighborhood, with no sharp transitions. The warmup sweep shows that Twarm ∈ [15 , 25] (out of 50 training epochs) gives the best joint calibration-accuracy tradeoff. Too little warmup applies the adversarial reweighting before features have stabilized and amplifies initialization noise; too much warmup leaves few epochs for the robust objective to take effect. 1 2 3 4 5
+
+> 0.00
+> 0.05
+> 0.10
+> 0.15
+> 0.20
+> 0.25
+> 0.30
+> Hard ECE (  better)
+
+Calibration vs     
+
+> 12345
+> 0.750
+> 0.775
+> 0.800
+> 0.825
+> 0.850
+> 0.875
+> 0.900
+> 0.925
+> 0.950
+> Accuracy (  better)
+
+Accuracy vs       
+
+> w=0 w=5 w=10 w=15 w=20 w=25 Vanilla
+
+Figure E.7. Effect of the robustness parameter η on calibration and accuracy on CIFAR-10H. Higher η increases focus on high-loss samples during training, improving Hard ECE at the cost of overall accuracy. 0 5 10 15 20 25 30 40 
+
+> Warmup Epochs
+> 0.00
+> 0.05
+> 0.10
+> 0.15
+> 0.20
+> 0.25
+> 0.30
+> Hard ECE (  better)
+
+Calibration vs Warmup        
+
+> 0510 15 20 25 30 40
+> Warmup Epochs
+> 0.750
+> 0.775
+> 0.800
+> 0.825
+> 0.850
+> 0.875
+> 0.900
+> 0.925
+> 0.950
+> Accuracy (  better)
+
+Accuracy vs Warmup      
+
+> =1.0 =1.5 =2.0 =2.5 =3.0 Vanilla
+
+Figure E.8. Effect of warmup horizon Twarm on calibration and accuracy on CIFAR-10H. Warmup lets the model establish features before adversarial reweighting begins; Twarm ∈ [15 , 25] epochs (out of 50) gives the best joint calibration-accuracy tradeoff. 
+
+30

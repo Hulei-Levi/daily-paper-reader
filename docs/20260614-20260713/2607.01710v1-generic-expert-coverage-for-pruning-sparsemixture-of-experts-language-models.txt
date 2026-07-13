@@ -1,0 +1,328 @@
+Title: Generic Expert Coverage for Pruning SparseMixture-of-Experts Language Models
+
+URL Source: https://arxiv.org/pdf/2607.01710v1
+
+Published Time: Fri, 03 Jul 2026 00:32:29 GMT
+
+Number of Pages: 6
+
+Markdown Content:
+# Generic Expert Coverage for Pruning Sparse Mixture-of-Experts Language Models 
+
+## Yongqin Zeng, Sicheng Pan, Jiale Wang, Hai-tao Zheng, Hong-Gee Kim, Chunxia Ma, XiuTeng Zhou 
+
+Abstract 
+
+Sparsely activated Mixture-of-Experts (MoE) language mod-els contain substantial structured redundancy among routed experts, but pruning them without downstream calibration data remains challenging. Existing expert-pruning methods typically rely on a single aggregated importance score, which can bias the retained set toward experts favored by dominant calibration patterns. We propose Generic TB-Coverage , a coverage-aware expert pruning method that uses only generic text corpora (WikiText2 and C4) for calibration. Instead of collapsing expert utility into one score, our method profiles per-expert utility separately on each corpus and enforces a fixed-budget coverage rule that preserves high-utility ex-perts from each corpus before constructing the final pruning mask. Across Qwen1.5-MoE-A2.7B and DeepSeek-MoE-16B-Base at 25%, 50%, and 75% retention budgets, our method improves average accuracy on six common zero-shot benchmarks over random pruning, REAP, and ExpertSpar-sity, while also reducing perplexity degradation on WikiText2 and C4. The gains are largest under aggressive pruning (25% and 50% retain), suggesting that preserving cross-corpus ex-pert coverage is an effective generic-data prior for MoE prun-ing. Our improvements hold with fixed pruning budgets and no downstream calibration data. 
+
+## 1 Introduction 
+
+Sparse Mixture-of-Experts (MoE) language models improve parameter efficiency by activating only a small subset of ex-perts per token, achieving strong performance while keep-ing per-token computation manageable (Shazeer et al. 2017; Fedus, Zoph, and Shazeer 2022; Jiang et al. 2024). This sparse activation also creates structured redundancy: many experts can be removed with limited quality loss if the re-tained subset preserves the model’s core behaviors (Dai et al. 2024). The challenge is selecting that subset without access to downstream validation data. Existing expert-pruning methods usually rank experts us-ing a single scalar criterion, such as routing frequency, re-construction utility, or REAP-style importance (Lu et al. 2024). However, when calibration data are heterogeneous, scalar aggregation can over-favor experts that dominate the average signal and under-retain experts that support less fre-quent but still important generic language behaviors. For ex-ample, consider two generic calibration corpora: WikiText2 (encyclopedic, narrative text) and C4 (broad web text). An expert that contributes strongly on encyclopedic patterns but not on web discourse will receive a moderate average score, even though it may be the top-ranked expert on WikiText2. A scalar ranking would likely discard it in favor of experts that score moderately on both corpora but are not critical for either. This suggests that expert retention should preserve cross-corpus coverage rather than only optimize a single ag-gregated importance score. This problem is especially acute when the goal is general-purpose pruning without downstream calibration data. A principled pruning method should not rely on downstream evaluation tasks during calibration, since good downstream numbers could then partly reflect task leakage rather than genuine generalization. We study expert pruning in this practically important setting: can we prune MoE experts us-ing only generic language corpora while preserving broad downstream behavior? 
+
+Our key observation is that even purely generic corpora do not exercise the same experts in the same way. A prun-ing rule that preserves only globally dominant experts can therefore reduce expert coverage across generic behaviors before downstream transfer is ever evaluated. We address this by profiling expert utility separately on multiple generic corpora and enforcing balanced protection across corpus-specific rankings. We propose Generic TB-Coverage (Task-Balanced Cov-erage), a coverage-aware expert pruning method. The method profiles per-expert importance separately for each generic calibration corpus, builds corpus-specific expert rankings, and selects protected experts through a round-robin coverage rule. Protected experts are then merged into a reconstruction-stable candidate mask, and the exact reten-tion budget is restored by removing the lowest-ranked un-protected experts. The entire procedure uses only WikiText2 and C4 for calibration and requires no fine-tuning. We evaluate on two MoE language models—Qwen1.5-MoE-A2.7B (Bai et al. 2024) and DeepSeek-MoE-16B-Base (Dai et al. 2024)—at three expert-retention budgets (25%, 50%, 75%). The primary metric is the average accuracy over six common zero-shot benchmarks (ARC-Challenge, ARC-Easy, HellaSwag, PIQA, WinoGrande, BoolQ); we additionally report MMLU, GSM8K, and Math500 as auxiliary stress tests. Our contributions are: 
+
+> arXiv:2607.01710v1 [cs.AI] 2 Jul 2026
+
+1. We identify a failure mode of scalar expert ranking for downstream-free MoE pruning: dominant calibration patterns can over-concentrate the retained expert set. 2. We propose a simple coverage-aware pruning rule that preserves high-utility experts across multiple generic corpora before fixed-budget mask construction. 3. We show that this rule improves pruning quality on two open MoE LMs across three retention budgets and six zero-shot benchmarks. 4. We analyze random-pruning variance and show that single-seed random baselines can be misleading in sparse MoE pruning. 
+
+## 2 Related Work 
+
+MoE model compression. Sparse MoE architec-tures (Shazeer et al. 2017; Lepikhin et al. 2021; Fedus, Zoph, and Shazeer 2022) route each token to a small subset of experts, creating natural opportunities for expert-level pruning. ST-MoE (Zoph et al. 2022) studies training stabil-ity in sparse models, while DeepSeek-MoE (Dai et al. 2024) introduces fine-grained expert segmentation that increases expert count and hence pruning potential. MoEfication (Fu et al. 2023) converts dense feed-forward layers into MoE structures. 
+
+Expert importance criteria. Several criteria have been proposed for ranking expert importance. Routing frequency counts how often each expert is selected by the router. REAP-style methods compute importance scores that com-bine routing probability with expert output magnitude. Ex-pertSparsity (Lu et al. 2024) uses reconstruction-based lay-erwise pruning, selecting experts to minimize the recon-struction error between the pruned and original MoE layer outputs. These methods share the limitation that they op-timize a single scalar objective, which can cause over-concentration of retained experts. 
+
+LLM pruning. Beyond expert pruning, structured prun-ing for large language models includes layer removal (Men et al. 2024), width pruning (Ma, Fang, and Wang 2023), and unstructured sparsity (Frantar and Alistarh 2023; Sun et al. 2024). SliceGPT (Ashkboos et al. 2024) removes compo-nents via singular value decomposition. These methods op-erate at the weight or layer level rather than the expert level and are complementary to our approach. 
+
+Coverage and diversity in pruning. The idea of preserv-ing diversity in pruned models has been explored in net-work pruning for convolutional networks, where filter diver-sity criteria help maintain representational capacity. To our knowledge, Generic TB-Coverage is the first to explicitly in-troduce a coverage rule for expert-level MoE pruning based on per-corpus profiling. 
+
+## 3 Method 
+
+Problem Formulation 
+
+Consider a sparse MoE language model with L MoE lay-ers. At each MoE layer l, the model has N routed experts 
+
+{e1, . . . , e N }. For each input token with hidden state hx,the router selects the top-k experts and computes a weighted sum of their outputs: MoE (hx) = X
+
+> e∈TopK (hx)
+
+ge(x) · fe(hx), (1) where ge(x) is the router’s softmax probability assigned to expert e for token x (set to zero for non-selected experts), and fe(hx) is the expert’s feed-forward output on the hidden state hx.Given a retain ratio ρ ∈ (0 , 1] , the pruning budget re-tains K = ⌊ρN ⌋ routed experts per MoE layer. The goal is to construct a binary expert mask ml ∈ { 0, 1}N with ex-actly K ones per layer such that the pruned model preserves broad language performance. After pruning, the router se-lects among the retained experts only. 
+
+Generic Expert Profiling 
+
+The method uses two generic calibration corpora: Wiki-Text2 (Merity et al. 2017) and C4 (Raffel et al. 2020). For each corpus t ∈ T = {WikiText2 , C4 }, we run the model on calibration text and collect per-expert statistics indepen-dently for each MoE layer. For each layer l, expert e, and calibration corpus t, we compute a REAP-style utility score that combines the router weight with the expert output norm, averaged over all cali-bration tokens where expert e is selected by the router: 
+
+s(l) 
+
+> t
+
+(e) = Ex∼D t
+
+h
+
+ge(x) · ∥ fe(h(l) 
+
+> x
+
+)∥2 e ∈ TopK (x)
+
+i
+
+,
+
+(2) where h(l) 
+
+> x
+
+is the hidden state at layer l, ge(x) is the router weight for expert e on token x, and fe(h(l) 
+
+> x
+
+) is the expert out-put. The expectation is approximated by averaging over all tokens in the calibration set from corpus t for which expert e
+
+is among the top-k selected experts. This score captures both how strongly the router activates expert e (through ge) and how much it contributes to the hidden state (through ∥fe∥2). We profile each calibration corpus independently, producing a separate score vector s(l) 
+
+> t
+
+= [ s(l) 
+
+> t
+
+(e1), . . . , s (l) 
+
+> t
+
+(eN )] per MoE layer. 
+
+Coverage-Aware Expert Protection 
+
+Instead of ranking experts by their average score ¯s(l)(e) = 
+
+> 1
+> |T |
+
+P 
+
+> t
+
+s(l) 
+
+> t
+
+(e), Generic TB-Coverage builds per-corpus rankings and selects protected experts by round-robin across corpora. For each MoE layer l, we define a per-layer protection budget B (a hyperparameter controlling how many experts receive coverage protection), chosen such that B ≤ K for every layer and retention budget, guaranteeing feasibility. The round-robin procedure works as follows: 1. Sort all N experts by s(l)
+
+> WikiText2
+
+(e) in descending order, producing ranking πWiki .2. Sort all N experts by s(l) 
+
+> C4
+
+(e) in descending order, pro-ducing ranking πC4 .Algorithm 1 Generic TB-Coverage Expert Pruning 
+
+Input : MoE model M; corpora T = {WikiText2 , C4 }; re-tain ratio ρ; protection budget B
+
+Output : Mask m with K = ⌊ρN ⌋ retained experts per layer  
+
+> 1:
+
+for each MoE layer l do  
+
+> 2:
+
+for each corpus t ∈ T do  
+
+> 3:
+
+Profile M on t; compute scores st(e) 
+
+> 4:
+
+end for  
+
+> 5:
+
+Build per-corpus rankings by st(e) 
+
+> 6:
+
+Select Pl by round-robin over rankings ( |Pl| = B) 
+
+> 7:
+
+Init mask from reconstruction candidate ˆml 
+
+> 8:
+
+Merge: set ml(e) = 1 for all e ∈ Pl 
+
+> 9:
+
+if P 
+
+> e
+
+ml(e) > K then  
+
+> 10:
+
+Remove lowest-ranked unprotected by ¯s(l) until K
+
+met  
+
+> 11:
+
+end if  
+
+> 12:
+
+end for  
+
+> 13:
+
+return mask m
+
+3. Starting with an empty protected set Pl, alternate be-tween the two rankings: at each step, take the highest-ranked expert from the current corpus’s ranking that is not yet in Pl, and add it. 4. Stop when |Pl| = B.This ensures that both corpora contribute to the protected set regardless of the absolute score magnitudes. An expert that is top-ranked on WikiText2 but mid-ranked on C4 will still be protected, even though its average score might not place it in the top-K by a single-criterion ranking. If both rankings agree on the top experts (high overlap), the round-robin degenerates to standard top-B selection, so the rule introduces no harm in that case. 
+
+Budget-Preserving Mask Construction 
+
+The final mask keeps exactly K experts per MoE layer. We initialize from a reconstruction-stable candidate mask 
+
+ˆml (obtained via layerwise reconstruction minimization on C4) that already retains K experts per layer. We merge the protected set Pl into this candidate: set ml(e) = 1 for all e ∈ Pl (protected experts are always retained), then if the union exceeds K, remove the lowest-ranked unpro-tected experts in order of ascending average score ¯s(l)(e)
+
+until exactly K experts remain. Protected experts are never removed; the budget is restored entirely by dropping unpro-tected reconstruction-selected experts. This procedure is budget-preserving: the final mask al-ways retains exactly K experts per MoE layer. Algorithm 1 summarizes the full method. 
+
+Complexity Analysis 
+
+With |T | calibration corpora, the additional profiling cost is 
+
+|T | forward-only passes over the calibration set (no gradi-ent computation). With two corpora and approximately 512 sequences of length 1024 tokens, this is modest relative to model training. Mask construction involves per-layer sorting of N experts ( O(N log N ) per layer) and round-robin selec-tion ( O(B) per layer), which is negligible relative to the pro-filing cost. The method stores only per-expert scalar scores per layer and does not require post-pruning fine-tuning. 
+
+## 4 Experiments 
+
+Setup 
+
+Models. We evaluate on two sparse MoE language models: • Qwen1.5-MoE-A2.7B (Bai et al. 2024): 60 routed ex-perts per MoE layer, with top-4 routing. • DeepSeek-MoE-16B-Base (Dai et al. 2024): 64 routed experts per MoE layer, with top-6 routing. 
+
+Retain budgets. We report three expert-retention ratios: 25%, 50%, and 75%. For Qwen, this corresponds to retain-ing 15, 30, or 45 out of 60 routed experts per layer. For DeepSeek, this corresponds to retaining 16, 32, or 48 out of 64 routed experts per layer. 
+
+Calibration. Our method uses WikiText2 (Merity et al. 2017) and C4 (Raffel et al. 2020) only. We draw 512 se-quences of length 1024 tokens from each corpus. No down-stream benchmark data is used during calibration. 
+
+Baselines. We compare against three baselines: • Random pruning : Uniform random expert removal per layer, reported as mean and standard deviation over six seeds (0, 1, 2, 3, 4, 42). • Original REAP : Direct top-k expert selection using REAP-style importance scores. For a fair comparison with a method that does use task-specific calibration, we run REAP with Evol-CodeAlpaca calibration (128 texts, sequence length 2048). • ExpertSparsity (Lu et al. 2024): Reconstruction-based layerwise expert pruning using C4, adapted to our model wrappers. We follow the original paper’s layerwise re-construction protocol. We note that REAP uses domain-specific calibration data while our method uses only generic corpora, making the comparison favorable to REAP in terms of calibration in-formativeness. 
+
+Evaluation. We evaluate on two language modeling met-rics (WikiText2 PPL, C4 PPL, computed on the stan-dard validation splits using sliding-window evaluation) and six primary downstream tasks: ARC-Challenge and ARC-Easy (Clark et al. 2018), HellaSwag (Zellers et al. 2019), PIQA (Bisk et al. 2020), WinoGrande (Sakaguchi et al. 2021), and BoolQ (Clark et al. 2019). We report Com-mon Avg as the unweighted average over these six tasks. We additionally report MMLU (Hendrycks et al. 2021), GSM8K (Cobbe et al. 2021), and Math500 (Lightman et al. 2023) as auxiliary stress tests for knowledge and reasoning. All evaluations use full validation/test sets with zero-shot prompting (no few-shot examples). 
+
+Main Results 
+
+Table 1 presents the main results. Generic TB-Coverage achieves the highest Common Avg across both models and all three retain budgets. Table 1: Main results on Qwen1.5-MoE-A2.7B and DeepSeek-MoE-16B-Base. Random pruning reports mean ± std over six seeds. Other methods are deterministic. Bold : best Common Avg per group. 
+
+Model Ret. Method Avg MMLU GSM M500 W.PPL C.PPL Qwen 25% Random 0.417 ±0.021 0.240 ±0.011 — — 920.67 ±744.23 3109.75 ±2197.97 Original REAP 0.438 0.247 0.000 0.000 193.65 551.91 Paper ExpertSparsity 0.407 0.233 0.000 0.000 160.93 358.90 
+
+Generic TB-Coverage 0.448 0.234 0.000 0.000 146.22 259.12 
+
+Qwen 50% Random 0.535 ±0.060 0.315 ±0.074 0.000 ±0.000 0.002 ±0.002 77.95 ±93.70 165.33 ±178.95 Original REAP 0.552 0.406 0.000 0.002 23.77 61.47 Paper ExpertSparsity 0.519 0.325 0.000 0.000 36.18 88.31 
+
+Generic TB-Coverage 0.598 0.369 0.000 0.004 16.76 47.01 
+
+Qwen 75% Random 0.645 ±0.041 0.516 ±0.035 0.000 ±0.000 0.003 ±0.004 13.25 ±1.49 33.80 ±5.17 Original REAP 0.629 0.519 0.000 0.002 13.78 32.81 Paper ExpertSparsity 0.655 0.548 0.000 0.002 11.92 29.41 
+
+Generic TB-Coverage 0.662 0.528 0.002 0.002 10.57 28.22 
+
+DeepSeek 25% Random 0.403 ±0.025 0.243 ±0.010 — — 728.88 ±818.42 2640.77 ±2971.07 Original REAP 0.395 0.238 0.000 0.006 544.15 1734.92 Paper ExpertSparsity 0.404 0.240 0.000 0.000 176.63 615.18 
+
+Generic TB-Coverage 0.448 0.232 0.000 0.000 137.03 423.72 
+
+DeepSeek 50% Random 0.488 ±0.082 0.244 ±0.010 0.000 ±0.000 0.005 ±0.006 54.19 ±51.78 249.73 ±311.32 Original REAP 0.542 0.287 0.000 0.008 27.33 61.60 Paper ExpertSparsity 0.571 0.264 0.000 0.010 20.88 53.47 
+
+Generic TB-Coverage 0.606 0.242 0.000 0.006 16.43 45.14 
+
+DeepSeek 75% Random 0.568 ±0.116 0.260 ±0.019 0.000 ±0.000 0.006 ±0.009 19.19 ±9.55 80.94 ±81.39 Original REAP 0.649 0.340 0.000 0.000 14.08 29.94 Paper ExpertSparsity 0.678 0.314 0.000 0.004 12.17 27.70 
+
+Generic TB-Coverage 0.683 0.309 0.000 0.006 10.12 25.96 25% 50% 75%      
+
+> Retain Ratio (%)
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> Common Avg
+> 0.417
+> 0.535
+> 0.645
+> 0.438
+> 0.552
+> 0.629
+> 0.407
+> 0.519
+> 0.655
+> 0.448
+> 0.598
+> 0.662
+> Qwen
+> 25% 50% 75%
+> Retain Ratio (%)
+> 0.403
+> 0.488
+> 0.568
+> 0.395
+> 0.542
+> 0.649
+> 0.404
+> 0.571
+> 0.678
+> 0.448
+> 0.606
+> 0.683
+> DeepSeek
+> Random Original REAP Paper ExpertSparsity Generic TB-Coverage
+
+Figure 1: Common Avg accuracy across methods and retain ratios on both models. Generic TB-Coverage (green) consis-tently achieves the highest average accuracy across all set-tings. On Qwen1.5-MoE-A2.7B, Generic TB-Coverage im-proves Common Avg over Paper ExpertSparsity by +0.041, +0.080, and +0.007 at 25%, 50%, and 75% retain, respec-tively. On DeepSeek-MoE-16B-Base, the improvements are +0.044, +0.035, and +0.006. The gains are largest under ag-gressive pruning (25% and 50% retain), where retaining the right experts matters most. At 75% retain, all methods per-form closer together since only a quarter of experts are re-moved. Figure 1 visualizes the Common Avg comparison, and Figure 2 shows the PPL results. The perplexity improve-ments are substantial. For DeepSeek at 25% retain, C4 PPL drops from 1734.92 (Original REAP) and 615.18 (Paper Ex-25% 50% 75%              
+
+> 10 1
+> 10 2
+> 10 3
+> PPL (log)
+> Qwen WikiText2 PPL
+> 25% 50% 75%
+> 10 2
+> 10 3
+> Qwen C4 PPL
+> 25% 50% 75%
+> Retain Ratio (%)
+> 10 1
+> 10 2
+> PPL (log)
+> DeepSeek WikiText2 PPL
+> 25% 50% 75%
+> Retain Ratio (%)
+> 10 2
+> 10 3
+> DeepSeek C4 PPL
+> Random Original REAP Paper ExpertSparsity Generic TB-Coverage
+
+Figure 2: WikiText2 and C4 perplexity (log scale, lower is better) across methods and retain ratios. Generic TB-Coverage achieves substantially lower PPL than all base-lines, with the largest gains under aggressive pruning. pertSparsity) to 423.72 under Generic TB-Coverage. Sim-ilarly, WikiText2 PPL drops from 544.15 and 176.63 to 137.03. These reductions indicate that coverage-aware ex-pert selection not only preserves downstream task accuracy but also stabilizes the language modeling distribution. Table 2: Random pruning (mean ± std over 6 seeds) vs. Generic TB-Coverage. Single-seed random results can ap-pear competitive but are not reliable.                                         
+
+> Model Retain Metric Random Ours Qwen 25% Common Avg 0.417 ±0.021 0.448 Wiki PPL 920.67 ±744.23 146.22 C4 PPL 3109.75 ±2197.97 259.12 Qwen 50% Common Avg 0.535 ±0.060 0.598 Wiki PPL 77.95 ±93.70 16.76 C4 PPL 165.33 ±178.95 47.01 Qwen 75% Common Avg 0.645 ±0.041 0.662 Wiki PPL 13.25 ±1.49 10.57 C4 PPL 33.80 ±5.17 28.22 DeepSeek 25% Common Avg 0.403 ±0.025 0.448 Wiki PPL 728.88 ±818.42 137.03 C4 PPL 2640.77 ±2971.07 423.72 DeepSeek 50% Common Avg 0.488 ±0.082 0.606 Wiki PPL 54.19 ±51.78 16.43 C4 PPL 249.73 ±311.32 45.14 DeepSeek 75% Common Avg 0.568 ±0.116 0.683 Wiki PPL 19.19 ±9.55 10.12 C4 PPL 80.94 ±81.39 25.96
+
+Random Multi-Seed Analysis 
+
+Random pruning is commonly used as a baseline, but single-seed results can be misleading. Table 2 shows that random pruning exhibits high variance across seeds. At 75% retain on Qwen, a single random seed (seed 42) achieves Common Avg of 0.669, which appears competitive with our method’s 0.662. However, the multi-seed mean is 0.645 ±0.041, and the worst seed drops to 0.604. Similarly, on DeepSeek at 75%, random PPL ranges from 10.7 to 31.6 across seeds. This high variance demonstrates that single-seed random pruning is not a reliable baseline and that prin-cipled coverage-aware selection is necessary. 
+
+Discussion 
+
+Gains under aggressive pruning. The improvement from Generic TB-Coverage is largest at 25% and 50% retain, where retaining the right experts is critical. At 75% re-tain, most experts are preserved and the gap between meth-ods narrows. This pattern is consistent across both models and suggests that coverage-aware selection is most valuable when the pruning budget is tight. Our method addresses se-lection bias in expert retention, but does not optimize routing adaptation after pruning. 
+
+PPL stability. Generic TB-Coverage achieves the lowest perplexity in every setting. The PPL improvements are es-pecially large at 25% retain, where the method reduces Wiki PPL by 9%–24% and C4 PPL by 28%–39% over the next-best baseline (ExpertSparsity). The absolute PPL values at 25% retain are high (e.g., C4 PPL of 423.72 for DeepSeek), which reflects the severity of aggressive pruning rather than an evaluation artifact. Under aggressive pruning, the lan-guage model distribution degrades substantially for all meth-ods, and our method degrades least. 
+
+Reasoning benchmarks. GSM8K scores are near zero across all methods and retain budgets, and Math500 scores are similarly low. We include these results as stress tests but do not claim that Generic TB-Coverage preserves mathe-matical reasoning ability. The low scores likely reflect the limited reasoning capacity of the base models rather than a shortcoming of the pruning method. 
+
+Per-corpus protection budget. The current experiments use fixed protection budgets (20 experts for Qwen, 24 for DeepSeek) across all retain ratios. These values were se-lected to provide sufficient coverage without dominating the mask at high retain ratios. Sensitivity analysis of the pro-tection budget is an important direction for future work. We note that the coverage rule’s benefit could be further isolated by comparing against simple multi-corpus aggregation base-lines (e.g., mean or max of per-corpus scores); we leave this systematic ablation to future work. 
+
+## 5 Conclusion 
+
+We have presented Generic TB-Coverage, a coverage-aware expert pruning method for sparse MoE language models. By profiling expert utility separately on WikiText2 and C4 and protecting experts through a round-robin coverage rule, the method preserves generic language behaviors that single-criterion methods may discard. Across two MoE models and three retain budgets, Generic TB-Coverage improves down-stream average accuracy and language modeling perplex-ity over random pruning, direct REAP, and reconstruction-based ExpertSparsity, with the largest gains under aggres-sive pruning. 
+
+Limitations. Our method is intentionally simple and static: it does not adapt experts after pruning, learn corpus weights, or optimize a formal diversity objective. The cur-rent study uses only two generic corpora and two open-base MoE models of moderate scale (2.7B and 16B parameters); whether the same coverage rule scales to instruction-tuned models, larger expert counts, or pruning-plus-quantization settings remains open. GSM8K and Math500 scores are near zero across all methods, so we cannot assess the method’s effect on reasoning ability. The protection budget B is fixed across retain ratios and requires manual selection. Finally, we do not measure end-to-end inference latency or memory footprint after pruning. 
+
+## References 
+
+Ashkboos, S.; Croci, M.; Nascimento, M. G. d.; Hensman, J.; James, D.; and Hoeche, S. 2024. SliceGPT: Compress Large Language Models by Deleting and Optimizing Lay-ers. In Proceedings of the 41st International Conference on Machine Learning .Bai, J.; Bai, S.; Chu, Y.; Cui, Z.; Dang, K.; Deng, X.; Fan, Y.; Ge, W.; Han, Y.; Huang, F.; et al. 2024. Qwen1.5-MoE: Matching 7B Model Performance with 1/3 Activated Param-eters. Bisk, Y.; Zellers, R.; Gao, J.; and Choi, Y. 2020. PIQA: Rea-soning about Physical Commonsense in Natural Language. In Proceedings of the AAAI Conference on Artificial Intelli-gence , volume 34, 7432–7439. Clark, C.; Lee, K.; Chang, M.-W.; Kwiatkowski, T.; Collins, M.; and Toutanova, K. 2019. BoolQ: Exploring the Surpris-ing Difficulty of Natural Yes/No Questions. In Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics .Clark, P.; Cowhey, I.; Etzioni, O.; Khot, T.; Sabharwal, A.; Schoenick, C.; and Tafjord, O. 2018. Think You Have Solved Question Answering? Try ARC, the AI2 Reasoning Challenge. Cobbe, K.; Kosaraju, V.; Bavarian, M.; Chen, M.; Jun, H.; Kaiser, L.; Plappert, M.; Tworek, J.; Hilton, J.; Nakano, R.; Hesse, C.; and Schulman, J. 2021. Training Verifiers to Solve Math Word Problems. Dai, D.; Deng, C.; Zhao, C.; Xu, R. X.; Gao, H.; Chen, D.; Li, J.; Zeng, W.; Zhang, X.; Wang, Y.; et al. 2024. DeepSeek-MoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models. In Proceedings of the 41st International Conference on Machine Learning .Fedus, W.; Zoph, B.; and Shazeer, N. 2022. Switch Trans-formers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity. Journal of Machine Learning Re-search , 23(120): 1–39. Frantar, E.; and Alistarh, D. 2023. SparseGPT: Massive Language Models Can Be Accurately Pruned in One-Shot. In Proceedings of the 40th International Conference on Ma-chine Learning .Fu, Z.; Zhang, Q.; Liu, X.; Liu, Z.; et al. 2023. Go Beyond the Impossible: MoEfication of Transformer Models. Hendrycks, D.; Burns, C.; Basart, S.; Zou, A.; Mazeika, M.; Song, D.; and Steinhardt, J. 2021. Measuring Massive Mul-titask Language Understanding. In Proceedings of the Inter-national Conference on Learning Representations .Jiang, A. Q.; Sablayrolles, A.; Roux, A.; Mensch, A.; Savary, B.; Bamford, C.; Chaplot, D. S.; Casas, D. d. l.; Hanna, E. B.; Bressand, F.; et al. 2024. Mixtral of Experts. Lepikhin, D.; Lee, H.; Xu, Y.; Chen, D.; Firat, O.; Huang, Y.; Krikun, M.; Shazeer, N.; and Chen, Z. 2021. GShard: Scal-ing Giant Models with Conditional Computation and Auto-matic Sharding. In Proceedings of the International Confer-ence on Learning Representations .Lightman, H.; Kosaraju, V.; Burda, Y.; Edwards, H.; Baker, B.; Lee, T.; Leike, J.; Schulman, J.; Sutskever, I.; and Cobbe, K. 2023. Let’s Verify Step by Step. Lu, X.; Huang, A.; Liu, Y.; Qiu, W.; Zhou, L.; Li, J.; Bian, J.; Li, G.; and Li, Z. 2024. Not All Experts are Equal: Efficient Expert Pruning and Skipping for Mixture of Experts Large Language Models. In Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing .Ma, X.; Fang, G.; and Wang, X. 2023. LLM-Pruner: On the Structural Pruning of Large Language Models. In Advances in Neural Information Processing Systems .Men, X.; He, M.; Xu, Q.; Wang, Y.; Luo, B.; and Zhang, M. 2024. ShortGPT: Layers in Large Language Models are More Redundant Than You Expect. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics .Merity, S.; Xiong, C.; Bradbury, J.; and Socher, R. 2017. Pointer Sentinel Mixture Models. In Proceedings of the 5th International Conference on Learning Representations .Raffel, C.; Shazeer, N.; Roberts, A.; Lee, K.; Narang, S.; Matena, M.; Zhou, Y.; Li, W.; and Liu, P. J. 2020. Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer. volume 21, 1–67. Sakaguchi, K.; Le Bras, R.; Bhagavatula, C.; and Choi, Y. 2021. WinoGrande: An Adversarial Winograd Schema Challenge at Scale. volume 64, 99–106. Shazeer, N.; Mirhoseini, A.; Maziarz, K.; Davis, A.; Le, Q.; Hinton, G.; and Dean, J. 2017. Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer. In Proceedings of the International Conference on Learning Representations .Sun, M.; Liu, Z.; Bair, A.; and Kolter, J. Z. 2024. A Sim-ple and Effective Pruning Approach for Large Language Models. In Proceedings of the International Conference on Learning Representations .Zellers, R.; Holtzman, A.; Bisk, Y.; Farhadi, A.; and Choi, Y. 2019. HellaSwag: Can a Machine Really Finish Your Sentence? In Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics .Zoph, B.; Bello, I.; Kumar, S.; Du, N.; Huang, Y.; Dean, J.; Shazeer, N.; and Fedus, W. 2022. ST-MoE: Designing Sta-ble and Transferable Sparse Expert Models. arXiv preprint arXiv:2202.08906 .
