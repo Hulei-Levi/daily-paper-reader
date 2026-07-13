@@ -1,0 +1,675 @@
+Title: 2026.acl-long.1474.pdf
+
+URL Source: https://aclanthology.org/2026.acl-long.1474.pdf
+
+Published Time: Thu, 11 Jun 2026 01:28:55 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 31959–31972 July 2-7, 2026 ©2026 Association for Computational Linguistics PASs-MoE: Mitigating Misaligned Co-drift among Router and Experts via Pathway Activation Subspaces for Continual Learning 
+
+Zhiyan Hou 1,2 , Haiyun Guo 1,2 *, Haokai Ma 3*, Yandu Sun 4, Yonghui Yang 3, Jinqiao Wang 1,2,5 
+
+> 1
+
+Institute of Automation, Chinese Academy of Sciences 2University of Chinese Academy of Sciences 
+
+> 3
+
+National University of Singapore 4Southeast University, Nanjing, China 
+
+> 5
+
+Wuhan AI Research, Wuhan, China 
+
+houzhiyan23@mails.ucas.ac.cn haiyun.guo@nlpr.ia.ac.cn haokai.ma@nus.edu.sg yh_yang@nus.edu.sg jqwang@nlpr.ia.ac.cn 
+
+Abstract 
+
+Continual instruction tuning (CIT) requires multimodal large language models (MLLMs) to adapt to a stream of tasks without forget-ting prior capabilities. A common strategy is to isolate updates by routing inputs to differ-ent LoRA experts. However, existing LoRA-based Mixture-of-Experts (MoE) methods of-ten jointly update the router and experts in an indiscriminate way, causing the router’s prefer-ences to co-drift with experts’ adaptation path-ways and gradually deviate from early-stage input–expert specialization. We term this as 
+
+Misaligned Co-drift , which blurs expert re-sponsibilities and exacerbates forgetting. To address this, we introduce the pathway ac-tivation subspace (PASs) , a LoRA-induced subspace that reflects which low-rank path-way directions an input activates in each ex-pert, providing a capability-aligned coordinate system for routing and preservation. Based on PASs, we propose a fixed-capacity PASs-based MoE–LoRA method with two compo-nents: PAS-guided Reweighting, which cali-brates routing using each expert’s pathway ac-tivation signals, and PAS-aware Rank Stabi-lization, which selectively stabilizes rank di-rections important to previous tasks. Exper-iments on a CIT benchmark show that our approach consistently outperforms a range of conventional continual learning baselines and MoE–LoRA variants in both accuracy and anti-forgetting without adding parameters. Our code is publicly available at https://github.com/ yueluoshuangtian/PASs-MoE .
+
+1 Introduction 
+
+Multimodal large language models (MLLMs) have recently become a strong backbone for vi-sion–language understanding and generation across diverse applications (Achiam et al., 2023; Liu et al., 2024, 2023; Bai et al., 2025; Ma et al., 2026b; Zhang et al., 2025d; Hao et al., 2026b). 
+
+> *
+
+Corresponding Authors MLLM   
+
+> 𝐵 !
+> 𝐴 !
+> 𝐵 "
+> 𝐴 "
+> Route r
+> LLM inference
+> on task 𝒏
+> 𝒈 𝟏 𝒈 𝒕
+
+…       
+
+> MoE -Adapter
+> 𝐴 ′"+∆𝐴 "
+> Route r
+> 𝒈 𝟏 +∆𝐺 !𝒈 𝒕 +∆𝐺 "
+
+…               
+
+> MoE -Adapter
+> LLM inference on task 𝒏
+> after tuned on task 𝒏 +𝟏
+> LLM training on
+> a new task 𝒏 +𝟏 𝐵′ !+∆𝐵 !
+> 𝐴 ′!+∆𝐴 !
+> 𝐵′ "+∆𝐵 "
+> Misaligned
+> Co -drift
+
+…
+
+Figure 1: Illustration of the Misaligned Co-drift in exist-ing MoE-LoRA methods, where the thickness of arrow indicates the sampling probability of router. Here, the drift in router assignments and the internal drift within expert parameters for the same task jointly drive this issue, thereby exacerbating catastrophic forgetting. 
+
+However, task requirements and data distribu-tions change over time in real-world deploy-ments (Ma et al., 2025b). Continual instruction tuning (CIT) studies how to sequentially adapt MLLMs on a stream of tasks with supervised in-struction–response data while retaining previously acquired capabilities (Chung et al., 2022). Serving as the most widely-used Parameter-efficient fine-tuning method for CIT (Sung et al., 2022; Zhang et al., 2021; Hu et al., 2022), the stan-dard practice of sharing a single Low-rank adapta-tion (LoRA) module across tasks forces MLLMs to concentrate updates within the same low-rank subspace, increasing interference and exacerbating forgetting. To address this issue, recent studies combine the unique strengths of MoE architectures with LoRA. For instance, DDAS (Yu et al., 2024), D-MoLE (Ge et al., 2025) and RMoE (Huai et al., 2025) attempt to expand MLLMs with additional experts and routing modules, which typically incur ever-growing parameters and storage, thereby in-creasing training and deployment complexity (Fe-dus et al., 2022). In contrast, MoELoRA (Chen et al., 2024) routes each input to a fixed pool of LoRA experts, reducing forgetting during con-tinual training without increasing model capacity. Nevertheless, its training procedure typically en-tails indiscriminate joint optimization of both the router and the expert parameters. As tasks pro-
+
+31959 gressively accumulate within the CIT sequence, both the router and expert parameters evolve to accommodate new tasks, yet their optimization di-rections are not fully aligned. This Misaligned Co-drift may undermine the input-expert special-ization established in earlier stages: Router updates can reroute the same input away from its previously associated expert, while expert updates alter that expert’s responses on samples from previous tasks. 
+
+Drilling down into the underlying mechanism of 
+
+Misaligned Co-drift , we observe that existing MoE-LoRA variants fail to anchor routing and preser-vation in a capability-aligned coordinate system defined by each expert’s low-rank adaptation path-way. Under this perspective, we revisit the formu-lation of MoE-LoRA (Jacobs et al., 1991; Shazeer et al., 2017), especially the structural property of LoRA as ∆y(x) = B(Ax ). Intuitively, the down-projection A specifies the set of input directions an expert can respond to through its low-rank path-way, while the up-projection B combines these coordinates into the additive correction within this low-rank coordinate system. Based on this observa-tion, we creatively propose the notion of Pathway 
+
+Activation Sub space ( PASs ) S = span( A⊤). Un-like prior notions of “activation subspace” which are typically derived from intermediate activations, the proposed PASs S is induced by LoRA’s down-projection A, where the low-rank activation Ax 
+
+provides a capability-tied coordinate system for aligning routing with parameter updates and selec-tively stabilizing task-critical rank directions, thus mitigating catastrophic forgetting in CIT. Building on this notion, we propose a PASs-based MoE-LoRA method to mitigate catas-trophic forgetting in CIT by aligning expert routing and preservation with each expert’s low-rank adap-tation pathway. Our method consists of two com-ponents, PASs-guided Reweighting (PASs-RW) and 
+
+PASs-aware Rank Stabilization (PASs-RS) , both grounded in the PASs . Specifically, the proposed 
+
+PASs-RW modulates each expert’s contribution ac-cording to the input’s activation within the corre-sponding pathway activation subspace. Here, each expert’s routing weight is driven by its own low-rank pathway rather than by a separate router space, thereby alleviating misaligned co-drift . Neverthe-less, even with the improved routing alignment, the experts selected by the router still must adapt to new tasks, and their low-rank pathways may drift under the sequential updates, potentially leading to forgetting. To address this expert-side drift, we further design PASs-RS to selectively constrain di-rections important to previous tasks by utilizing the same PASs signal. This rank-level stabilization reduces forgetting while preserving plasticity. Our contributions are threefold: (I) We introduce a pathway activation subspace perspective for CL, modeling the low-dimensional update directions induced by LoRA as task-dependent pathway ac-tivation subspaces to analyze knowledge update and retention in MoE-LoRA. ( cf. Section 3) (II) We propose implicit self-routing and rank-level sta-bility regularization for MoE-LoRA under a fixed parameter setting. ( cf. Section 4) (III) Experiments demonstrate consistent improvements over a range of traditional CL algorithms and advanced MoE-related methods in both forgetting mitigation and downstream task performance ( cf. Section 5). 
+
+2 Related Works 
+
+Continual Instruction Tuning. Continual In-struction Tuning (CIT) fine-tunes multimodal large language models (MLLMs) (Zhang et al., 2025c) over a task stream, training on task-specific instruc-tion–response pairs while aiming to retain prior capabilities (He et al., 2023; Chen et al., 2024; Guo et al., 2025b; Ma et al., 2025a). With lim-ited or no access to past data, CIT faces the stabil-ity–plasticity trade-off and catastrophic forgetting. Existing mitigation strategies include importance constraints (Kirkpatrick et al., 2017; Li and Hoiem, 2017a; Aljundi et al., 2018), relational knowledge distillation (Zhang et al., 2024), isolated adapta-tion (Razdaibiedina et al., 2023; Wang et al., 2022; Cui et al., 2025; Wang et al., 2023), and replay-based strategies (Rolnick et al., 2019a,b; Yan et al., 2021; Wang et al., 2024; He et al., 2024; Shao et al., 2026) for approximating past distributions. CIT in MLLMs is further challenged by cross-modal alignment drift, which destabilizes vision-language mappings and exacerbates task interference (Ma et al., 2026a; Yang et al., 2026a). 
+
+Activation Subspace. Activation subspaces pro-vide low-dimensional signals for interpreting and constraining model behavior (Kim et al., 2018; Yang et al., 2026b). CAV-style approaches repre-sent concepts as activation directions (Wenkmann and Garreau, 2025; Huang et al., 2024), and subspace-based methods reduce interference by separating or constraining updates to task-relevant subspaces (Farajtabar et al., 2020; Saha et al., 2021; Magistri et al., 2024; Roy et al., 2023), and low-31960 dimensional projections of model representations have also proven effective for compressing reason-ing traces into compact, task-aligned embeddings in multimodal models (Hao et al., 2026a; He et al., 2026). These subspaces are typically statistics-driven and not tied to specific architectural units by design.. We instead define a LoRA-parameter-induced pathway activation subspace that binds subspace signals to low-rank channel functionality, enabling routing alignment and expert responsibil-ity preservation. 
+
+Mixture of Experts. Sparse MoE has been ex-plored for continual vision-language tuning, includ-ing MoE adapters and MoE-LoRA variants (Chen et al., 2024; Zhang et al., 2025b; Sun et al., 2025) that dynamically compose LoRA experts, using rank-level micro-experts to retain pretrain-ing knowledge (Zhao et al., 2025). However, most rely on explicitly defined expert pools and a shared routing space, which can accumulate misalignment between routing decisions and expert functionality. Our activation-subspace view couples routing with LoRA expert pathways to reduce routing drift and responsibility drift. 
+
+3 Preliminary 
+
+3.1 Problem Formulation 
+
+We study continual instruction tuning (CIT) for Multimodal Large Language Models (MLLMs). Let {D t}Tt=1 denote a stream of tasks, where each stage-t dataset Dt = {(v(t) 
+
+> i
+
+, x (t) 
+
+> i
+
+, y (t) 
+
+> i
+
+)}Nt 
+
+> i=1
+
+consists of multimodal instruction-response pairs. Here, 
+
+v(t) 
+
+> i
+
+denotes a visual input (e.g., an image), x(t)
+
+> i
+
+a textual instruction, and y(t) 
+
+> i
+
+the target response. Starting from a pretrained multimodal backbone, training proceeds sequentially: at stage t, the model is updated using only the current dataset Dt.At each stage, the learning objective minimizes the empirical risk on the current task, 
+
+min 
+
+> θt
+
+E(v,x,y )∼D t
+
+[L(f (v, x ; θt), y )], (1) where f (·; θt) denotes the model at stage t. Fol-lowing standard instruction tuning for MLLMs, we adopt the autoregressive negative log-likelihood loss. Under parameter-efficient fine-tuning, we let 
+
+θt denote the trainable adapter parameters, while the pretrained backbone remains frozen. 
+
+3.2 Decomposition of MoE-LoRA 
+
+Parameter-efficient fine-tuning (PEFT) adapts a pre-trained model by introducing a small number of trainable parameters while keeping the backbone weights frozen (Zhang et al., 2025a). A widely used PEFT approach is Low-Rank Adaptation (LoRA), which augments a linear layer with a low-rank update. Given a weight matrix W ∈ Rdout ×din ,LoRA defines 
+
+W ′ = W + ∆ W, ∆W = BA, (2) where A ∈ Rr×din and B ∈ Rdout ×r are trainable matrices, and r ≪ min( din , d out ).MoE-LoRA extends LoRA by instantiating mul-tiple LoRA experts and combining their updates with a router. Consider E experts {(Ae, B e)}Ee=1 
+
+attached to a linear layer, and let h ∈ Rdin denote the hidden features input to this layer. The router 
+
+g(·) maps h to expert logits, from which mixture weights {πe(h)}Ee=1 are derived (e.g., dense nor-malization or sparse top-k selection). The resulting input-dependent update to the weight matrix is 
+
+∆W (h) = 
+
+> E
+
+∑
+
+> e=1
+
+πe(h) BeAeh. (3) In continual instruction tuning, PEFT optimizes the expert parameters {(Ae, B e)}Ee=1 together with the router parameters in g.
+
+3.3 Definition of Pathway Activation Subspace 
+
+We revisit the low-rank structure underlying MoE-LoRA. From the perspective of a single expert e,the LoRA branch adds an incremental output to the linear layer in the form 
+
+∆ye(h) = Be(Aeh). (4) This factorization exposes an intermediate response vector ze(h) = Aeh, which is a r-dimensional lin-ear response induced by Ae from the input h. The 
+
+j-th entry ze,j (h) can be interpreted as the response coefficient along the j-th rank direction, capturing how strongly expert e reacts to the input through that direction. The matrix Be then maps this r-dimensional response back to the output space, yielding the expert’s incremental contribution to the layer output. Motivated by this structure, we define the PASs of expert e as 
+
+Se = span( A⊤ 
+
+> e
+
+). (5) 31961 𝑥 !              
+
+> 𝑦 !
+> 𝐴 !𝐴 "𝐴 #
+> 𝐵 !𝐵 "𝐵 #
+> 𝑧 !
+> 𝒂 𝒌
+> 𝟏 𝒃 𝒌
+> 𝟏
+> low -rank response 𝑧
+> 𝒂 𝒌
+> 𝒏 𝒃 𝒌
+> 𝒏
+> 𝑧 #
+> the activation energy
+> 𝑠 !
+> 𝒂 𝒌
+> 𝟏 𝒃 𝒌
+> 𝟏 𝒂 𝒌
+> 𝒏 𝒃 𝒏
+> 𝑠 #
+> 𝑊 "
+> 𝑊 !𝑊 #
+> Pathway Activation Sub space ( PASs )
+> PASs -guided Reweighting
+> 𝑊 "𝑊 !𝑊 #
+> expert
+> level
+> ×
+> rank
+> level
+> ＋
+> PASs -aware Rank Stabilization
+
+... 
+
+... 
+
+...          
+
+> 𝑥 $on lora 𝐴 %
+> rank 𝒂 𝒌
+> 𝟏
+> rank 𝒃 𝒌
+> 𝟏
+> 𝑥 $on lora 𝐴 &
+> rank 𝒂 𝒌
+> 𝒏
+> rank 𝒃 𝒏
+
+... 
+
+... ... ... ...    
+
+> 𝐼 $
+> %&&
+> 𝒂 𝒌
+> 𝟏 𝒃 𝒌
+> 𝟏 𝒂 𝒌
+> 𝒏 𝒃 𝒌
+> 𝒏
+
+... ... ...    
+
+> ＋
+> 𝐼 !
+> %&& +...𝐼 $'!
+> %&&
+> 𝒂 𝟏
+> 𝟏
+
+... ... ...  
+
+> 𝒃 𝟏
+> 𝟏 𝒃 𝒌 '𝟏
+> 𝟏
+> update after
+> training on
+> task k 𝒂 𝒌 '𝟏
+> 𝟏
+> Input
+> Multi -Head
+> Attention
+> LayerNorm
+> MLP
+> LayerNorm
+> MoE -
+> Adapters
+> task k
+
+... 
+
+... 
+
+> MoE -
+> Adapters
+
+... ... Figure 2: Overview of the proposed PASs-based MoE-LoRA method. We consider continual instruction tuning with a fixed set of E LoRA experts. (Bottom) Each input xt generates a low-rank response ze and activation energy 
+
+se via the Pathway Activation Subspace (PASs) of each expert. (Right) PASs-guided Reweighting (PASs-RW) 
+
+leverages se to compute mixture weights, eliminating the need for an independent router. (Top) PASs-aware Rank Stabilization (PASs-RS) tracks rank-level importance Iagg (represented by bar heights) and applies stabilization constraints (indicated by lock icons) to protect historically critical directions from drift. 
+
+This subspace is induced by the row space of 
+
+Ae and characterizes the set of input-side direc-tions that the expert uses to generate its low-rank response ze(h). In this sense, Se provides a parameter-grounded reference space that directly links the expert’s input-side response pattern to its 
+
+Ae. Building on this view, we develop PASs-RW and PASs-RS in Section 4. 
+
+4 Methodology 
+
+4.1 Overview 
+
+We study continual instruction tuning (CIT) under a fixed-structure MoE-LoRA setting, where a single model learns tasks sequentially without expanding the expert pool. Figure 2 illustrates the overall pipeline. Given an input xt, the backbone produces a hidden representation h. Each LoRA expert e de-fines a capability-tied pathway activation subspace (PASs) induced by its down-projection Ae, which yields a low-rank activation ze. We use this PASs signal as a shared anchor to jointly design routing and preservation, targeting the Misaligned Co-drift 
+
+discussed in the introduction. Based on this view, we propose two complemen-tary and synergistic components. First, PASs-RW 
+
+computes mixture weights from the expert-specific low-rank activation, so that expert assignment is driven by the expert pathway itself rather than by an independent router space. Second, PASs-RS 
+
+dynamically accumulates PASs-based activation statistics during sequential training and selectively stabilizes historically important rank directions. 
+
+4.2 PASs-guided Reweighting 
+
+PASs-RW mitigates Misaligned Co-drift by tying routing to each expert’s functional response. Prior MoE-LoRA variants often learn routing in a shared space that is decoupled from the experts’ low-rank pathways, so routing policies and expert parameters can drift inconsistently as sequential tasks accumu-late. We instead derive routing weights from the low-rank activation ze = Aeh, which measures how strongly expert e responds specifically to the input along its LoRA pathway. We define the activation energy of expert e as 
+
+se(h) = 1
+
+r ∥Aeh∥22, (6) and compute mixture coefficients by softmax nor-malization: 
+
+πe(h) = exp( se(h)) 
+
+∑Ee′=1 exp( se′ (h)) . (7) Grounding πe(h) in ze anchors routing in a capability-tied signal, coupling routing behavior with expert evolution under sequential training. 
+
+4.3 PASs-aware Rank Stabilization 
+
+While PASs-RW couples routing to the expert path-way, the selected experts still need to adapt to new tasks, and their low-rank parameters may drift un-der sequential updates, which can induce forgetting. The PAS formulation makes this drift analyzable 31962 Method Math QA Arts VQA Math VQA Econ. QA Med. VQA OCR VQA Sci. VQA AP BWT                                                                                                                                                                                                                              
+
+> Acc Forget Acc Forget Acc Forget Acc Forget Acc Forget Acc Forget Acc Forget
+> SeqFT 37.89 −19 .75 5.52 −32 .35 39.91 −11 .97 64.42 −5.74 15.70 −20 .40 7.19 −16 .67 84.07 –36.39 −15 .27
+> SeqLoRA 0.00 −54 .43 6.28 −24 .81 27.75 −22 .18 38.44 −35 .15 24.70 −12 .54 16.96 −5.53 83.52 –28.24 −22 .09
+> Replay 40.64 −12 .56 25.44 −7.97 34.37 −14 .09 60.15 −11 .83 31.79 −2.34 23.68 −3.21 78.25 –42.05 −8.29
+> L2P 17.54 −26 .95 16.06 −19 .58 29.41 −17 .32 42.57 −29 .48 21.27 −6.48 16.45 −4.97 78.25 –31.65 −14 .97
+> EWC 16.78 −36 .18 6.83 −26 .42 25.68 −26 .66 37.40 −36 .19 23.63 −11 .25 17.49 −4.66 83.52 –30.19 −20 .20
+> LwF 18.98 −34 .71 6.45 −27 .01 26.80 −25 .31 36.51 −34 .66 23.61 −9.94 17.38 −8.10 81.68 –30.20 −19 .96
+> MAS 19.48 −34 .95 7.87 −25 .65 28.48 −23 .63 38.48 −35 .11 21.58 −13 .37 17.78 −6.80 78.74 –30.34 −19 .36
+> O-LoRA 24.58 −29 .85 9.87 −22 .61 30.79 −20 .98 38.48 −34 .01 22.82 −12 .85 18.64 −5.92 82.44 –32.52 −19 .46
+> HiDe-LLaVA 26.85 −25 .12 11.84 −22 .32 31.58 −16 .77 49.29 −9.08 8.22 −20 .75 14.67 −3.07 29.97 –24.63 −16 .16
+> DDAS 44.83 −7.88 20.87 −5.36 37.40 −1.25 58.77 −13 .51 23.74 −0.34 2.35 −0.07 74.46 –37.49 −4.06
+> MoELoRA (Top-k) 35.68 −15 .06 6.78 −24 .18 33.58 −17 .69 39.80 −27 .18 22.67 −10 .89 14.57 −3.41 73.56 –32.38 −15 .34
+> MoELoRA (Softmax) 42.98 −11 .45 35.89 +2 .65 40.84 −11 .61 56.10 −15 .47 29.24 −6.04 18.89 −4.57 79.57 –43.36 −6.64
+> Ours 49.52 −5.90 43.22 +10 .43 44.70 −6.50 66.13 −6.05 29.99 −5.38 21.95 −1.63 83.73 –48.46 −2.15
+
+Table 1: Comparison with traditional methods and MoE-LoRA-based methods on MLLM-CTB ENCH . Best and second-best results for Acc and AP are marked in bold and underline. 
+
+at the rank level. Specifically, we define the low-rank response as ze = Aeh, where ze ∈ Rr, which admits a coordinate-wise interpretation: each co-ordinate corresponds to the activation of one rank direction of Ae. Let ae,k ∈ Rd denote the k-th row of Ae, then the k-th component of ze is 
+
+ze,k = a⊤
+
+e,k h. (8) This view enables rank-level importance estimation within each expert. We define the importance of rank direction (e, k ) on task t as 
+
+Ie,k (t) ≜ Eh∼D t
+
+[
+
+πe(h) (ze,k 
+
+)2]
+
+= Eh∼D t
+
+[
+
+πe(h) ( a⊤
+
+e,k h)2]
+
+.
+
+(9) We maintain the aggregated importance over past tasks to track historical significance as 
+
+Iagg 
+
+e,k (t − 1) ≜
+
+t−1∑
+
+t′=1 
+
+Ie,k (t′). (10) Let be,k ∈ Rdout denote the k-th column of Be.Since drift in either the input-side factor ae,k or the output-side factor be,k can alter expert behavior along rank direction k, we regularize both factors using the same PASs-derived importance weights. When learning task t, we impose a weighted stabilization constraint on historically important rank directions to mitigate catastrophic forgetting: 
+
+LA
+
+stab =
+
+E∑
+
+e=1 
+
+r∑
+
+k=1 
+
+we,k 
+
+∥∥a(t)
+
+e,k − a(t−1) 
+
+e,k 
+
+∥∥22,
+
+LB
+
+stab =
+
+E∑
+
+e=1 
+
+r∑
+
+k=1 
+
+we,k 
+
+∥∥b(t)
+
+e,k − b(t−1) 
+
+e,k 
+
+∥∥22.
+
+(11) where we,k is a normalized and clipped version of the aggregated importance Iagg 
+
+e,k (t − 1) to ensure scale invariance and numerical stability. The over-all objective is L = Ltask +λALA
+
+stab +λB LB
+
+stab . By concentrating stabilization on rank directions that are more important to past tasks, PASs-RS reduces expert-side drift that harms prior capabilities. Here, 
+
+A serves as the structural anchor of the pathway ac-tivation subspace, while moderate regularization on the paired columns of B provides complementary robustness under multi-task interference. More-over, since PASs-RW derives routing weights from the same pathway response, stabilizing task-critical directions in A also helps maintain more consistent routing for earlier-task inputs during later training. 
+
+5 Experiments 
+
+5.1 Experimental Setting Datasets We evaluate our method on MLLM-CTBench, a continual instruction tuning bench-mark for multimodal large language models. Fol-lowing the official protocol, we perform sequential training on the default task sequence without revis-iting past data. MLLM-CTBench involves hetero-geneous tasks with substantial distribution shifts, posing a challenging testbed for continual adapta-tion. Detailed dataset descriptions and the exact evaluation protocol are provided in Appendix A.1. 
+
+Baselines We compare against representative continual learning methods for MLLMs, including LwF (Li and Hoiem, 2017b), EWC (Aich, 2021), L2P (Wang et al., 2022), O-LoRA (Wang et al., 2023), and HiDe-LLaVA (Guo et al., 2025a), and also include MoE-LoRA variants (MoELoRA and DDAS). Full training recipes and hyperparameters are provided in Appendix A.1. 31963 Method MoE PASs-RW PASs-RS Math QA Arts VQA Math VQA Econ. QA Med. VQA OCR VQA Sci. VQA AP BWT                                                                                          
+
+> Acc Forget Acc Forget Acc Forget Acc Forget Acc Forget Acc Forget Acc Forget
+> MoELoRA (top-k)Top-kxx35.68 −15 .06 6.78 −24 .18 33.58 −17 .69 39.80 −27 .18 22.67 −10 .89 14.57 −3.41 73.56 –32.38 −15 .34
+> MoELoRA (softmax) All xx42.98 −11 .45 35.89 +2 .65 40.84 −11 .61 56.10 −15 .47 29.24 −6.04 18.89 −4.57 79.57 –43.36 −6.64
+> + PASs-RW All ✓x49.99 −5.18 39.11 +6 .26 42.70 −8.27 60.90 −9.87 27.79 −8.74 20.27 −3.86 83.41 –46.31 −4.24
+> Ours (Full) All ✓✓49.52 −5.90 43.22 +10 .43 44.70 −6.50 66.13 −6.05 29.99 −5.38 21.95 −1.63 83.73 –48.46 −2.15
+
+Table 2: Structural ablation of our method on continual instruction learning. We compare two MoE-LoRA baselines, using either softmax weighting over all experts (All) or Top-k expert selection, and then progressively add PASs-RW and PASs-RS, where the combination corresponds to our method. Best and second-best results for Acc and AP are marked in bold and underline. 
+
+Implementation Details We adopt LLaVA-v1.5-7B (Liu et al., 2024) as the base model and use CLIP-L/14-336 (Radford et al., 2021) to extract visual and textual features. Following LLaVA’s LoRA protocol, we add LoRA to all language-model linear layers with rank r=128 . Unless oth-erwise specified, we use E = 6 experts and set the stabilization coefficients to λA = 5 × 10 −4
+
+for LoRA A and λB = 5 × 10 −5 for LoRA B.Under the continual learning setting, we perform sequential training strictly following the task or-der of each benchmark, with 3 epochs per task on MLLM-CTB ENCH , using a warmup ratio of 0.03. All methods are trained with a batch size of 12 on NVIDIA H20 GPUs, and all experiments are conducted with a fixed random seed of 42. 
+
+Metrics We report the final performance on each task t after training on the full stream, Acc final  
+
+> t
+
+,and the corresponding signed task-wise forgetting 
+
+Forget t = Acc final  
+
+> t
+
+− Acc after tt , where Acc after tt
+
+is the accuracy measured immediately after learn-ing task t. We summarize overall continual learn-ing performance with AP = 1
+
+> T
+
+∑Tt=1 Acc final  
+
+> t
+
+and 
+
+BWT = 1
+
+> T
+
+∑Tt=1 Forget t. Under this conven-tion, higher Forget t/BWT indicates less forget-ting; when values are negative, those closer to zero are better. 
+
+5.2 Main Results 
+
+The main results on MLLM-CTB ENCH are re-ported in Table 1, while results on an alternative task order are provided in Appendix A.2. Our method achieves the best overall performance, im-proving the final Average Performance (AP) and reducing forgetting measured by Backward Trans-fer (BWT) compared with conventional continual learning baselines. It also surpasses MoE-LoRA variants, including the two representative design lines summarized in the Introduction. Notably, on MLLM-CTB ENCH , our final AP exceeds that of the second-best method by 5.1% . We observe con-sistent gains under the alternative task order, where our AP improves by 9.46% over the second-best method (Appendix A.2). 
+
+5.3 Ablation Study 
+
+Table 2 reports the structural ablation results un-der a fixed MoE-LoRA parameter budget. Since the Top-k routing baseline performs substantially worse in the continual instruction tuning setting, we treat it only as a reference point. Accordingly, we introduce our designs on top of the softmax-based MoE-LoRA baseline and progressively ablate the two core components of our framework. 
+
+5.3.1 Structural Ablation 
+
+Table 2 presents structural ablations under a fixed MoE-LoRA parameter budget. Since the Top-k
+
+routing baseline performs notably worse in contin-ual instruction tuning, we include it only as a refer-ence point. All ablations are built upon a softmax-based MoE-LoRA baseline. We ablate the two key components of our frame-work to quantify their individual contributions. En-abling PASs-RW alone consistently improves the final performance over the MoE-LoRA baseline, suggesting that activation-subspace signals provide an effective basis for expert reweighting under se-quential training. This observation aligns with our motivation in the Introduction that routing should be grounded in expert-specific low-rank pathways, rather than learned in a separate shared routing space. We defer a closer examination of routing dynamics to the dedicated analysis section 5.5. Adding PASs-aware Rank Stabilization (PASs-RS) on top of reweighting yields additional gains, indicating that selectively constraining task-relevant rank directions can further improve reten-tion while preserving adaptation to new tasks. We further compare our stabilization with a random regularization scheme; the corresponding results are reported in Appendix A.3. Overall, the compar-ison consistently supports the essential importance 31964 0 
+
+> 20
+> 40
+> 60
+> 80
+> Final Accuracy (%)
+> Math QA
+> Arts VQA
+> Math VQA
+> Econ. QA
+> Med. VQA
+> OCR VQA
+> Sequential Tasks
+> −0.015
+> −0.010
+> −0.005
+> 0.000
+> Stability ( −MeanJS  ↑ )
+> MoE-LoRA (Ours) Baseline
+
+Figure 3: Comparison of final performance and router stability. Top and bottom panels display the final accuracy and the corresponding router stability across the task stream, respectively. Stability is quantified as the negative Mean Jensen–Shannon (JS) divergence. 
+
+of using these activation-subspace signals to judi-ciously decide which rank directions to stabilize. 
+
+5.3.2 Hyperparameter Ablation 
+
+We further study sensitivity to three key hyper-parameters: the number of experts E (Table 3), the stabilization strength λA on LoRA A (Fig. 4), and the stabilization strength λB on LoRA B
+
+(Fig. 5). For the expert count, the performance is non-monotonic: our method achieves the best final AP at a moderate E (peaking at E=6 ), while larger E brings marginal or slightly reduced gains (e.g., E=8 ). This trend suggests that there exists a favorable capacity regime under a fixed training budget, whereas further increasing E may yield diminishing returns (Table 3). For the stabilization strength λA, we observe a clear stability-plasticity trade-off (Fig. 4). As λA in-creases, forgetting is gradually alleviated, reflected by the monotonic increase of BWT. Meanwhile, the final performance (AP) exhibits a non-monotonic trend: it improves under mild regularization but starts to drop when λA becomes larger. This is ex-pected because stronger regularization increasingly constrains parameter updates, reducing the model’s ability to adapt to new tasks; as a result, forgetting is reduced at the cost of diminished task learning, leading to lower AP at high λA.For the output-side stabilization strength λB , we fix λA = 5 × 10 −4 and vary λB = αλ A (Fig. 5). Regularizing B provides complementary benefits for reducing forgetting, but is more sensitive to the 
+
+Figure 4: Ablation results on the regularization strength 
+
+λA for PASs-MoE in MLLM-CTBench. The upper panel reports AP, while the lower panel shows BWT. 
+
+Figure 5: Ablation results on the regularization strength 
+
+λB for PASs-MoE in MLLM-CTBench. The upper panel reports AP, while the lower panel shows BWT. 
+
+choice of α than stabilizing A. The best trade-off is obtained at α = 0 .5 (λB = 2 .5 × 10 −4), where AP reaches its peak while BWT is substantially improved. Larger values (e.g., α ≥ 1.0) tend to over-constrain plasticity and slightly degrade final AP, even though BWT can continue to improve. Overall, these results suggest that A serves as the more stable structural anchor, while moderate B
+
+regularization further improves robustness under multi-task interference. 
+
+5.4 Training Dynamics Across Tasks 
+
+To evaluate the robustness of our proposed PASs-MoE, we visualize its training loss curves on all downstream tasks from MLLM-CTB ENCH . From Figure 7, we can observe clear task-dependent con-vergence rates, where some tasks start with higher loss and decrease more slowly than others. This 31965 (a) Layer 1 (low-level) (b) Layer 15 (mid-level) (c) Layer 29 (top-level) 
+
+Figure 6: Update magnitude versus old-task importance across representative layers. Each plot bins coefficients by the previous task’s aggregated importance Iagg (low → high) and reports the median (with interquartile range) of the log update norm log ∥∆W ∥ within each bin. 
+
+Figure 7: Training loss curves across tasks. 
+
+disparity is consistent with the strong heterogeneity of MLLM-CTB ENCH in terms of modality depen-dence and reasoning difficulty (Guo et al., 2025b). Meanwhile, we can also notice that the optimiza-tion of our PASs-MoE on MLLM-CTB ENCH re-mains relatively stable throughout the training pro-cedure. That is, we do not observe any loss explo-sion phenomenon, and the loss of each task con-tinues to decrease steadily during the later stages of training rather than rebounding. These discover-ies suggest that our sequential training procedure does not suffer from severe optimization instability, and we do not observe evident overfitting under the adopted training protocol. 
+
+5.5 In-depth Analysis Routing drift correlates with old-task degrada-tion. To examine whether the specialization be-tween old-task inputs and experts is preserved un-der sequential updates, we track the gating distri-bution G(x) for a fixed set of old-task inputs at two checkpoints: immediately after learning the corresponding task and after completing the full task stream. We quantify the change using dis-tributional divergences (e.g., Jensen–Shannon di-
+
+Figure 8: Aggregated rank importance over the task stream. We show the cumulative importance map Iagg 
+
+over the sequential training procedure, and visualize the two most important experts for clarity. Importance concentrates on a small subset of all rank directions, suggesting that a few expert-rank directions dominate contributions across different tasks.                                                   
+
+> Method Experts Train Time Infer Time AP BWT LoRA 1120.14 129.87 28.24 −22 .09
+> MoE-LoRA 2130.66 143.81 39.44 −10 .18
+> Ours 2140.39 132.78 46.61 −2.44
+> MoE-LoRA 4130.48 131.15 41.11 −7.91
+> Ours 4140.29 148.59 44.85 −5.27
+> MoE-LoRA 6130.65 127.56 43.36 −6.64
+> Ours 6140.89 132.84 48.46 −2.15
+> MoE-LoRA 8130.60 130.91 43.58 −6.79
+> Ours 8140.48 145.71 47.67 −2.13
+
+Table 3: Effect of the number of experts on sequential multimodal continual learning. We compare our method against MoE-LoRA with softmax weighting across dif-ferent expert counts. 
+
+vergence), averaged over layers and samples. As shown in Fig. 3, the MoE-LoRA baseline exhibits substantially larger routing drift, which coincides with lower final accuracy on old tasks, whereas our method yields consistently smaller drift while retaining higher final performance. These results support the motivation in Section 1 that the mis-aligned co-drift issue can undermine previously established input-expert specialization. 
+
+Activation-derived importance is highly non-uniform across ranks. Rank importance is highly non-uniform. PASs-RS uses activation 31966 statistics to localize which rank directions within each expert are most critical for retaining prior-task behavior. Intuitively, if a channel (e, k ) consis-tently yields a stronger low-rank response on ear-lier tasks, it is more likely to encode functionality that should be preserved and thus warrants stronger stabilization. To quantify this effect, we continu-ously record and accumulate an importance score 
+
+Iagg  
+
+> e,k
+
+based on the low-rank response ze = Aeh.As shown in Fig. 8, Iagg exhibits a sparse, concen-trated pattern over the expert-rank grid rather than a uniform spread across rank directions, indicating that prior-task behavior is dominated by a small subset of rank directions. This pattern aligns with our PASs perspective that LoRA adaptation oper-ates through structured, capability-tied pathways, making Iagg  
+
+> e,k
+
+a principled rank-level weight for se-lectively stabilizing the most critical directions. 
+
+Rank stabilization reshapes updates toward low-importance directions. Building on the non-uniform importance, we examine whether rank-level stabilization preferentially protects high-importance directions. For each layer, we sort rank directions by Iagg , split them into quantile bins (e.g., deciles), and compute the median of 
+
+log ∥∆W ∥ with its interquartile range (IQR) within each bin. As shown in Fig. 6 for representative lay-ers (Layer 1/15/29), the median update magnitude generally decreases with increasing importance, in-dicating that stabilization suppresses drift on high-importance directions while leaving more flexibil-ity to low-importance ones. The trend strength varies across layers, consistent with layer-wise dif-ferences in representational roles and update dis-persion: when importance is flatter or updates are more diffuse, the coupling between Iagg and ∆W
+
+becomes weaker. 
+
+6 Conclusion 
+
+We study CIT of MLLMs under a fixed-capacity Mixture-of-Experts adapter setting, where indis-criminate joint updates of routers and experts can trigger Misaligned Co-drift and erode early input-expert specialization. We introduce PASs 
+
+induced by LoRA down-projections to provide a capability-tied coordinate system for aligning routing and preservation. Based on PASs, we propose a PASs-based MoE-LoRA method with PASs-guided Reweighting and PASs-aware Rank Stabilization, which couple routing to low-rank pathway responses and selectively stabilize histor-ically important rank directions, respectively. On MLLM-CTB ENCH , our method improves final performance and reduces forgetting, outperform-ing the second-best approach by 5.1% AP without increasing model capacity. We hope PASs offers a principled tool for capability-aligned routing and fine-grained preservation in CIT. 
+
+Limitations 
+
+This work has several limitations. First, we focus on fixed-capacity MoE-LoRA in continual instruc-tion tuning; the conclusions may not directly carry over to settings with capacity expansion, replay ac-cess, or substantially different continual learning paradigms. Second, PASs leverages the structural property of LoRA (the down-projection A and the induced low-rank response Aeh), so extending the framework to other PEFT forms may require re-defining a capability-aligned coordinate system and corresponding routing signals. Third, PASs-RW uses low-rank energy as a proxy for input-expert compatibility; while capability-related, its robust-ness and calibration under more severe distribution shifts or more complex instructions deserve further study. For PASs-RS, importance is estimated from activation statistics and can be noisy when task data are scarce or highly conflicting; it also requires maintaining historical statistics and tuning an addi-tional regularization hyperparameters, which intro-duces extra implementation and tuning overhead. Finally, our evaluation primarily relies on AP/BWT, which captures overall performance and forgetting, but more direct measurements of routing mismatch, stronger interpretability analyzes of evolving ex-pert responsibilities, and evaluations under realistic online distribution dynamics remain important fu-ture directions. 
+
+Acknowledgments 
+
+This work was supported by the Beijing Natural Science Foundation (Grant No. L252035). 
+
+References      
+
+> Josh Achiam, Steven Adler, Sandhini Agarwal, Lama Ahmad, Ilge Akkaya, Florencia Leoni Aleman, Diogo Almeida, Janko Altenschmidt, Sam Altman, Shyamal Anadkat, and 1 others. 2023. Gpt-4 techni-cal report. arXiv preprint arXiv:2303.08774 .Abhishek Aich. 2021. Elastic weight consolidation (EWC): nuts and bolts. CoRR , abs/2105.04093.
+
+31967 Rahaf Aljundi, Francesca Babiloni, Mohamed Elho-seiny, Marcus Rohrbach, and Tinne Tuytelaars. 2018. Memory aware synapses: Learning what (not) to for-get. Preprint , arXiv:1711.09601. Shuai Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wen-bin Ge, Sibo Song, Kai Dang, Peng Wang, Shi-jie Wang, Jun Tang, Humen Zhong, Yuanzhi Zhu, Mingkun Yang, Zhaohai Li, Jianqiang Wan, Pengfei Wang, Wei Ding, Zheren Fu, Yiheng Xu, and 8 oth-ers. 2025. Qwen2.5-vl technical report. Preprint ,arXiv:2502.13923. Cheng Chen, Junchen Zhu, Xu Luo, Hengtao Shen, Lianli Gao, and Jingkuan Song. 2024. Coin: A benchmark of continual instruction tuning for multimodel large language model. Preprint ,arXiv:2403.08350. Hyung Won Chung, Le Hou, S. Longpre, Barret Zoph, Yi Tay, William Fedus, Eric Li, Xuezhi Wang, Mostafa Dehghani, Siddhartha Brahma, Albert Web-son, Shixiang Shane Gu, Zhuyun Dai, Mirac Suzgun, Xinyun Chen, Aakanksha Chowdhery, Dasha Val-ter, Sharan Narang, Gaurav Mishra, and 13 others. 2022. Scaling instruction-finetuned language models. 
+
+ArXiv , abs/2210.11416. Yawen Cui, Jian Zhao, Zitong Yu, Rizhao Cai, Xun Wang, Lei Jin, Alex C Kot, Li Liu, and Xuelong Li. 2025. Cmoa: Contrastive mixture of adapters for generalized few-shot continual learning. IEEE Transactions on Multimedia .Mehrdad Farajtabar, Navid Azizan, Alex Mott, and Ang Li. 2020. Orthogonal gradient descent for continual learning. In International conference on artificial intelligence and statistics , pages 3762–3773. PMLR. William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23(120):1–39. Chendi Ge, Xin Wang, Zeyang Zhang, Hong Chen, Jia-pei Fan, Longtao Huang, Hui Xue, and Wenwu Zhu. 2025. Dynamic mixture of curriculum lora experts for continual multimodal instruction tuning. arXiv preprint arXiv:2506.11672 .Haiyang Guo, Fanhu Zeng, Ziwei Xiang, Fei Zhu, Da-Han Wang, Xu-Yao Zhang, and Cheng-Lin Liu. 2025a. Hide-llava: Hierarchical decoupling for con-tinual instruction tuning of multimodal large lan-guage model. arXiv preprint arXiv:2503.12941 .Haiyun Guo, ZhiYan Hou, Yu Chen, Jinghan He, Yandu Sun, Yuzhe Zhou, Shujing Guo, Kuan Zhu, and Jin-qiao Wang. 2025b. Mllm-cbench: A comprehensive benchmark for continual instruction tuning of multi-modal llms with chain-of-thought reasoning analysis. 
+
+arXiv preprint arXiv:2508.08275 .Xiangzhao Hao, Shijie Wang, Tianyu Yang, Tianyue Wang, Haiyun Guo, and Jinqiao Wang. 2026a. Trace: Task-adaptive reasoning and representation learning for universal multimodal retrieval. arXiv preprint arXiv:2603.02929 .Xiangzhao Hao, Zefeng Zhang, Zhenyu Zhang, Linhao Yu, Yao Chen, Yiqian Zhang, Haiyun Guo, Shuo-huan Wang, and Yu Sun. 2026b. Clear: Unlocking generative potential for degraded image understand-ing in unified multimodal models. arXiv preprint arXiv:2604.04780 .Chenwei He, Xiangzhao Hao, Tianyu Yang, Yuxiang Ma, Yuheng Jia, Lingxiang Wu, Chaoyang Zhao, Haiyun Guo, and Jinqiao Wang. 2026. Plume: Latent reasoning based universal multimodal embedding. 
+
+arXiv preprint arXiv:2604.02073 .Jinghan He, Haiyun Guo, Ming Tang, and Jinqiao Wang. 2023. Continual instruction tuning for large multi-modal models. arXiv preprint arXiv:2311.16206 .Jinghan He, Haiyun Guo, Kuan Zhu, Zihan Zhao, Ming Tang, and Jinqiao Wang. 2024. Seekr: Selective attention-guided knowledge retention for continual learning of large language models. arXiv preprint arXiv:2411.06171 .Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, Weizhu Chen, and 1 others. 2022. Lora: Low-rank adaptation of large language models. ICLR , 1(2):3. Tianyu Huai, Jie Zhou, Xingjiao Wu, Qin Chen, Qingchun Bai, Ze Zhou, and Liang He. 2025. Cl-moe: Enhancing multimodal large language model with dual momentum mixture-of-experts for contin-ual visual question answering. In Proceedings of the Computer Vision and Pattern Recognition Con-ference , pages 19608–19617. Qihan Huang, Jie Song, Mengqi Xue, Haofei Zhang, Bingde Hu, Huiqiong Wang, Hao Jiang, Xingen Wang, and Mingli Song. 2024. Lg-cav: Train any concept activation vector with language guidance. 
+
+Advances in Neural Information Processing Systems ,37:39522–39551. Robert A Jacobs, Michael I Jordan, Steven J Nowlan, and Geoffrey E Hinton. 1991. Adaptive mixtures of local experts. Neural computation , 3(1):79–87. Been Kim, Martin Wattenberg, Justin Gilmer, Carrie Cai, James Wexler, Fernanda Viegas, and 1 others. 2018. Interpretability beyond feature attribution: Quantitative testing with concept activation vectors (tcav). In International conference on machine learn-ing , pages 2668–2677. PMLR. James Kirkpatrick, Razvan Pascanu, Neil Rabinowitz, Joel Veness, Guillaume Desjardins, Andrei A. Rusu, Kieran Milan, John Quan, Tiago Ramalho, Ag-nieszka Grabska-Barwinska, Demis Hassabis, Clau-dia Clopath, Dharshan Kumaran, and Raia Hadsell. 2017. Overcoming catastrophic forgetting in neural networks. Proceedings of the National Academy of Sciences , 114(13):3521–3526. 31968 Zhizhong Li and Derek Hoiem. 2017a. Learning with-out forgetting. IEEE transactions on pattern analysis and machine intelligence , 40(12):2935–2947. Zhizhong Li and Derek Hoiem. 2017b. Learning with-out forgetting. Preprint , arXiv:1606.09282. Haotian Liu, Chunyuan Li, Yuheng Li, and Yong Jae Lee. 2024. Improved baselines with visual instruc-tion tuning. Preprint , arXiv:2310.03744. Haotian Liu, Chunyuan Li, Qingyang Wu, and Yong Jae Lee. 2023. Visual instruction tuning. Advances in neural information processing systems , 36:34892– 34916. Haokai Ma, Yunshan Ma, Ruobing Xie, Lei Meng, Jialie Shen, Xingwu Sun, Zhanhui Kang, and Tat-Seng Chua. 2025a. Large language model empow-ered recommendation meets all-domain continual pre-training. Preprint , arXiv:2504.08949. Haokai Ma, Ruobing Xie, Lei Meng, Fuli Feng, Xiaoyu Du, Xingwu Sun, Zhanhui Kang, and Xiangxu Meng. 2026a. Negative sampling in recommendation: A survey and future directions. ACM Trans. Inf. Syst. 
+
+Haokai Ma, Javier Yong, Yunshan Ma, Chen Kuei, Anis Yusof, Zhenkai Liang, and Ee-Chien Chang. 2025b. Attackseqbench: Benchmarking large language mod-els in analyzing attack sequences within cyber threat intelligence. Haokai Ma, Lee Yan Zhen, Gang Yang, Yunshan Ma, Ee-Chien Chang, and Tat-Seng Chua. 2026b. Less approximates more: Harmonizing performance and confidence faithfulness via hybrid post-training for high-stakes tasks. Simone Magistri, Tomaso Trinci, Albin Soutif-Cormerais, Joost van de Weijer, and Andrew D Bagdanov. 2024. Elastic feature consolidation for cold start exemplar-free incremental learning. arXiv preprint arXiv:2402.03917 .Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sas-try, Amanda Askell, Pamela Mishkin, Jack Clark, and 1 others. 2021. Learning transferable visual models from natural language supervision. In International conference on machine learning , pages 8748–8763. PmLR. Anastasia Razdaibiedina, Yuning Mao, Rui Hou, Ma-dian Khabsa, Mike Lewis, and Amjad Almahairi. 2023. Progressive prompts: Continual learning for language models. In The Eleventh International Con-ference on Learning Representations .David Rolnick, Arun Ahuja, Jonathan Schwarz, Tim-othy Lillicrap, and Gregory Wayne. 2019a. Expe-rience replay for continual learning. Advances in neural information processing systems , 32. David Rolnick, Arun Ahuja, Jonathan Schwarz, Tim-othy P. Lillicrap, and Greg Wayne. 2019b. Ex-perience replay for continual learning. Preprint ,arXiv:1811.11682. Kaushik Roy, Christian Simon, Peyman Moghadam, and Mehrtash Harandi. 2023. Subspace distillation for continual learning. Neural Networks , 167:65–79. Gobinda Saha, Isha Garg, and Kaushik Roy. 2021. Gradient projection memory for continual learning. 
+
+arXiv preprint arXiv:2103.09762 .Pengyang Shao, Naixin Zhai, Lei Chen, Yonghui Yang, Fengbin Zhu, Xun Yang, and Meng Wang. 2026. Baldro: A distributionally robust optimization based framework for large language model unlearning. In Proceedings of the ACM Web Conference 2026 ,WWW ’26, page 8874–8884. Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. 2017. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. arXiv preprint arXiv:1701.06538 .Mengyang Sun, Yihao Wang, Tao Feng, Dan Zhang, Yifan Zhu, and Jie Tang. 2025. A stronger mixture of low-rank experts for fine-tuning foundation models. 
+
+arXiv preprint arXiv:2502.15828 .Yi-Lin Sung, Jaemin Cho, and Mohit Bansal. 2022. Vl-adapter: Parameter-efficient transfer learning for vision-and-language tasks. In Proceedings of the IEEE/CVF conference on computer vision and pat-tern recognition , pages 5227–5237. Quanziang Wang, Renzhen Wang, Yuexiang Li, Dong Wei, Hong Wang, Kai Ma, Yefeng Zheng, and Deyu Meng. 2024. Relational experience replay: Continual learning by adaptively tuning task-wise relationship. 
+
+IEEE Transactions on Multimedia , 26:9683–9698. Xiao Wang, Tianze Chen, Qiming Ge, Han Xia, Rong Bao, Rui Zheng, Qi Zhang, Tao Gui, and Xuan-Jing Huang. 2023. Orthogonal subspace learning for lan-guage model continual learning. In Findings of the Association for Computational Linguistics: EMNLP 2023 , pages 10658–10671. Zifeng Wang, Zizhao Zhang, Chen-Yu Lee, Han Zhang, Ruoxi Sun, Xiaoqi Ren, Guolong Su, Vincent Perot, Jennifer Dy, and Tomas Pfister. 2022. Learn-ing to prompt for continual learning. Preprint ,arXiv:2112.08654. Julia Wenkmann and Damien Garreau. 2025. On the variability of concept activation vectors. arXiv preprint arXiv:2509.24058 .Shipeng Yan, Jiangwei Xie, and Xuming He. 2021. Der: Dynamically expandable representation for class in-cremental learning. Preprint , arXiv:2103.16788. 31969 Tianyu Yang, ChenWei He, Xiangzhao Hao, Tianyue Wang, Jiarui Guo, Haiyun Guo, Leigang Qu, Jinqiao Wang, and Tat-Seng Chua. 2026a. Recall: Recalibrat-ing capability degradation for mllm-based composed image retrieval. arXiv preprint arXiv:2602.01639 .Yonghui Yang, Wenjian Tao, Jilong Liu, Xingyu Zhu, Junfeng Fang, Weibiao Huang, Le Wu, Richang Hong, and Tat-Sent Chua. 2026b. Revisiting robust-ness for llm safety alignment via selective geometry control. arXiv preprint arXiv:2602.07340 .Jiazuo Yu, Yunzhi Zhuge, Lu Zhang, Ping Hu, Dong Wang, Huchuan Lu, and You He. 2024. Boosting continual learning of vision-language models via mixture-of-experts adapters. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pat-tern Recognition , pages 23219–23230. Dan Zhang, Tao Feng, Lilong Xue, Yuandong Wang, Yuxiao Dong, and Jie Tang. 2025a. Parameter-efficient fine-tuning for foundation models. arXiv preprint arXiv:2501.13787 .Duzhen Zhang, Yong Ren, Zhong-Zhi Li, Yahan Yu, Ji-ahua Dong, Chenxing Li, Zhilong Ji, and Jinfeng Bai. 2025b. Enhancing multimodal continual in-struction tuning with branchlora. arXiv preprint arXiv:2506.02041 .Renrui Zhang, Rongyao Fang, Wei Zhang, Peng Gao, Kunchang Li, Jifeng Dai, Yu Qiao, and Hongsheng Li. 2021. Tip-adapter: Training-free clip-adapter for better vision-language modeling. arXiv preprint arXiv:2111.03930 .Yongheng Zhang, Xinyun Zhao, Yunshan Ma, Haokai Ma, Yingxiao Guan, Guozheng Yang, Yuliang Lu, and Xiang Wang. 2025c. Mm-attackg: A multimodal approach to attack graph construction with large lan-guage models. arXiv preprint arXiv:2506.16968 .Zefeng Zhang, Xiangzhao Hao, Hengzhu Tang, Zhenyu Zhang, Jiawei Sheng, Xiaodong Li, Zhenyang Li, Li Gao, Daiting Shi, Dawei Yin, and 1 others. 2025d. Cooper: A unified model for cooperative perception and reasoning in spatial intelligence. arXiv preprint arXiv:2512.04563 .Zhiheng Zhang, Daojian Zeng, and Xue Bai. 2024. Improving continual few-shot relation extraction through relational knowledge distillation and proto-type augmentation. In Proceedings of the 2024 Joint International Conference on Computational Linguis-tics, Language Resources and Evaluation (LREC-COLING 2024) , pages 8756–8767. Ziyu Zhao, Yixiao Zhou, Zhi Zhang, Didi Zhu, Tao Shen, Zexi Li, Jinluan Yang, Xuwu Wang, Jing Su, Kun Kuang, and 1 others. 2025. Each rank could be an expert: Single-ranked mixture of ex-perts lora for multi-task learning. arXiv preprint arXiv:2501.15103 .31970 A Appendix 
+
+This appendix provides complementary details and additional results to support the main text. Ap-pendix A.1 describes the experimental setup, in-cluding dataset details, task order construction, training hyperparameters, and evaluation protocols. Appendix A.2 reports results on MLLM-CTBench under an alternative task order, evaluating the ro-bustness of our method to task order. Appendix A.3 presents an additional validation of PASs-RS by contrasting our structured regularization with a ran-dom regularization baseline, isolating the effect of stabilizing task-important rank directions. 
+
+A.1 Experimental Setup 
+
+We conduct all experiments on MLLM-CTB ENCH , a recently proposed benchmark for continual instruction tuning of multimodal large language models. It is designed to evaluate continual adaptation under reasoning-intensive, non-saturated tasks with explicit domain shifts, making it particularly suitable for diagnosing catastrophic forgetting in modern MLLMs. MLLM-CTB ENCH consists of seven tasks span-ning six diverse domains, including Math, Eco-nomics, Science, Medicine, OCR, and Arts. As summarized in Table 4, the benchmark covers both text-only QA and vision-language VQA set-tings, and integrates data from 16 public datasets. The tasks jointly stress symbolic reasoning, visual grounding, OCR robustness, and domain-specific knowledge. To avoid task dominance in contin-ual learning, the training data size of each task is carefully controlled to a comparable scale. For each task, MLLM-CTB ENCH defines a canonical instruction template and a task-specific final-answer evaluation metric, as shown in Table 5. These templates are consistently applied across all methods, ensuring protocol-consistent comparison. Depending on the task characteristics, final answers are evaluated using Exact Match or ROUGE-L, while reasoning traces are used only for analysis and are not directly optimized unless specified. Overall, the heterogeneity in modality, reasoning format, and domain semantics introduces substan-tial distribution shifts across tasks, posing signifi-cant challenges for continual instruction tuning. In this work, we strictly follow the official task order and training protocol of MLLM-CTB ENCH , with-out revisiting data from previous tasks. Additional details on task ordering and evaluation settings are provided in Appendix A.1. 
+
+A.2 Results under an Alternative Task Order Task Orders. MLLM-CTB ENCH provides two official continual instruction tuning protocols with different task orders. Order-A follows: Math QA 
+
+→ Arts VQA → Math VQA → Economics QA →
+
+Medicine VQA → OCR VQA → Science VQA. Order-B is the reverse of Order-A. 
+
+Supplementary Results on Order-B. All main experiments in the paper follow Order-A. To further examine robustness to task ordering, we addition-ally evaluate all methods under Order-B. As shown in Table 6, our method achieves the best overall performance and improves the final AP by 9.46% 
+
+over the second-best method, indicating that the gains are not tied to a specific task sequence. 
+
+A.3 Comparison with Random Rank Regularization 
+
+To further validate the effectiveness of PASs-RS ,we compare it with a random rank regularization scheme under the same MoE-LoRA parameter bud-get. Specifically, instead of weighting the paired rank directions in A and B according to their histor-ical importance in the pathway activation subspace, the random baseline assigns stabilization weights uniformly at random. The results are reported in Table 7. Random rank regularization consistently leads to inferior performance, indicating that constraining arbitrary rank directions does not effectively preserve task-relevant knowledge and may even hinder adapta-tion to new tasks. In contrast, PASs-RS yields more reliable improvements by selectively stabi-lizing rank directions that are important for previ-ous tasks, as identified by activation statistics in the pathway activation subspace. This compari-son highlights the importance of using capability-aligned signals, rather than indiscriminate or ran-dom constraints, when designing rank-level stabi-lization mechanisms for continual instruction tun-ing. 31971 Task Data Source Train Test (Text / Image) (Text / Image) 
+
+Math QA TRACE 10K / 0 0.5K / 0 Economics QA TRACE 5K / 0 0.5K / 0 Science VQA AI2D, ScienceQA 9K / 4K 1K / 0.5K Math VQA IconQA, GeoQA, CHARTX, MMMU 8.3K / 8.3K 0.9K / 0.9K Medicine VQA VQA-RAD, VQA-Med-2021, PMC-VQA, PathVQA 9K / 6.9K 1K / 1K OCR VQA ChartOCR, CROHME, ESTVQA 12K / 12.1K 1.4K / 1.4K Arts VQA AQUA 9K / 7K 1K / 0.9K 
+
+Table 4: Statistics of the MLLM-CTBench datasets. 
+
+Task Instruction Prompt (Canonical) Final-Answer Metric 
+
+Math QA Solve the following math problem and give your reasoning, then give the answer. Exact Match Economics QA Give your reasoning about the monetary policy stance, then answer with the option’s letter directly. Exact Match Science VQA Give the reasoning process, then answer with the option’s letter directly. Exact Match Math VQA Analyze the problem and give the solution; then answer with the option’s letter. Exact Match / ROUGE-L Medicine VQA Analyze and give the reasoning process, then answer using a single word or phrase. ROUGE-L OCR VQA Give the reasoning process for text recognition, then answer using a single word or phrase. ROUGE-L Arts VQA Analyze the artwork and give a reasoning process, then answer briefly. ROUGE-L 
+
+Table 5: Canonical instruction prompts and metrics across tasks. 
+
+Method Sci. VQA OCR VQA Med. VQA Econ. QA Math VQA Arts VQA Math QA AP BWT 
+
+Acc Forget Acc Forget Acc Forget Acc Forget Acc Forget Acc Forget Acc Forget 
+
+SeqFT 56.84 −28 .63 11.47 −14 .41 20.01 −16 .48 35.65 −37 .48 36.57 −14 .87 9.08 −24 .99 53.94 – 33.93 −17 .56 
+
+SeqLoRA 43.70 −42 .63 9.19 −15 .74 17.54 −19 .18 31.97 −40 .51 29.89 −23 .93 11.62 −25 .76 55.17 – 28.44 −23 .96 
+
+Replay 53.63 −28 .93 5.68 −16 .74 27.81 −5.87 61.29 −11 .49 35.92 −11 .40 23.41 −10 .50 52.71 – 37.21 −12 .13 
+
+L2P 44.33 −22 .87 9.47 −19 .58 19.68 −11 .33 39.54 −29 .21 31.36 −12 .89 6.87 −12 .54 51.45 – 28.96 −15 .49 
+
+EWC 50.99 −31 .20 2.27 −20 .17 22.93 −12 .09 37.90 −35 .29 30.56 −22 .12 2.27 −31 .25 53.94 – 28.69 −21 .74 
+
+LwF 52.40 −30 .35 19.84 −1.95 21.77 −11 .25 32.16 −39 .01 36.36 −15 .07 5.21 −28 .42 45.10 – 30.41 −18 .00 
+
+MAS 51.08 −31 .48 2.84 −19 .60 22.70 −12 .50 37.10 −36 .49 30.22 −21 .32 2.63 −30 .92 53.20 – 28.54 −21 .76 
+
+O-LoRA 56.84 −25 .35 13.49 −8.66 23.63 −10 .16 34.53 −37 .45 35.48 −16 .63 29.16 −5.00 54.84 – 35.42 −14 .75 
+
+HiDe-LLaVA 46.65 −36 .57 15.17 −8.62 24.87 −7.70 47.78 −14 .82 43.33 −1.82 28.33 −2.74 42.12 – 28.80 −16 .99 
+
+DDAS 50.05 −13 .95 1.07 −0.78 21.65 −2.82 54.64 −13 .71 37.06 +10 .38 13.48 −0.48 40.89 – 31.26 −3.05 
+
+MoELoRA (Top-k) 42.86 −35 .62 3.47 −18 .32 16.08 −16 .39 34.27 −32 .92 29.66 −19 .08 2.47 −30 .61 51.56 – 25.77 −21 .85 
+
+MoELoRA (Softmax) 50.42 −32 .14 2.27 −20 .38 22.94 −11 .81 38.71 −35 .08 31.24 −20 .19 2.49 −31 .05 53.45 – 28.79 −21 .52 
+
+Ours 64.94 −17 .72 6.25 −16 .04 28.11 −6.43 66.94 −1.61 46.52 −4.34 60.25 +26 .99 53.69 – 46.67 −2.74 
+
+Table 6: Comparison with traditional methods and MoE-LoRA-based methods on MLLM-CTB ENCH . Results are reported in the same order as the training sequence (from left to right). Best and second-best results for Acc and AP are marked in bold and underline. 
+
+Reg. scheme Math QA Arts VQA Math VQA Econ. QA Med. VQA OCR VQA Sci. VQA AP BWT 
+
+Acc Forget Acc Forget Acc Forget Acc Forget Acc Forget Acc Forget Acc Forget 
+
+Random 49.01 −6.16 40.79 +7 .94 41.50 −9.47 57.10 −13 .67 27.50 −9.03 20.19 −3.94 79.76 – 45.12 −4.90 
+
+Ours 49.52 −5.90 43.22 +10 .43 44.70 −6.50 66.13 −6.05 29.99 −5.38 21.95 −1.63 83.73 – 48.46 −2.15 
+
+Table 7: Ablation on the regularization scheme in sequential multimodal continual learning. We compare random regularization with our projection-aware regularization while keeping all other components fixed. 31972
