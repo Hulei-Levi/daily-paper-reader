@@ -6,65 +6,44 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-13
-- 运行时间：2026-07-13 20:13:03 UTC
+- 最新运行日期：2026-07-14
+- 运行时间：2026-07-14 21:34:37 UTC
 - 运行状态：成功
-- 本次总论文数：15
-- 精读区：6
-- 速读区：9
+- 本次总论文数：8
+- 精读区：4
+- 速读区：4
 
 ### 今日简报（AI）
-今日精选15篇论文，重点研究了6篇，其中《TriRoute》与《Communication-Aware Placement and Pruning》分别以10分和9分高居精读榜首。最值得关注的是统一路由学习方案（TriRoute）和面向MoE推理的通信感知剪枝与放置策略，两者均致力于提升混合专家模型的效率。建议读者优先精读这两篇高分论文，深入理解其自适应路由与资源分配机制。
-- 详情：[/202607/13/README](/202607/13/README)
+今日推荐8篇论文，精读2篇高分MoE相关研究。重点看《UMoE》的领域专用训练与《HCRMap》的3.5D芯片推理压力映射。建议优先精读这两篇，速读可关注主观监督多样性和LLM拍卖式推理。
+- 详情：[/202607/14/README](/202607/14/README)
 
 ### 精读区论文标签
-1. [TriRoute: Unified Learned Routing for Joint Adaptive Attention, Experts, and KV-Cache Allocation](/202607/13/2607.06601v1-triroute-unified-learned-routing-for-joint-adaptive-attention-experts-and-kv-cache-allocation)  
-   标签：评分：10.0/10、query:moe-special
-   evidence：统一学习路由用于MoE专家选择
-2. [Communication-Aware Placement and Pruning for Efficient Mixture-of-Experts Inference](/202607/13/2607.05116v1-communication-aware-placement-and-pruning-for-efficient-mixture-of-experts-inference)  
+1. [UMoE:Unlocking Every Expert in Domain-Specific Training](/202607/14/2607.11444v1-umoeunlocking-every-expert-in-domain-specific-training)  
    标签：评分：9.0/10、query:moe-special
-   evidence：专注于MoE推理中的专家放置与剪枝，直接涉及专家选择
-3. [NEST: Tackling Dataset-Level Distribution Shifts via Regime-Oriented Mixture-of-Experts](/202607/13/2607.06607v1-nest-tackling-dataset-level-distribution-shifts-via-regime-oriented-mixture-of-experts)  
+   evidence：剪枝并重新生长MoE专家以实现领域专业化
+2. [HCRMap: Pressure-Aware Hot-Expert Residency Mapping for 3.5D MoE Chiplet Inference](/202607/14/2607.11586v1-hcrmap-pressure-aware-hot-expert-residency-mapping-for-35d-moe-chiplet-inference)  
    标签：评分：9.0/10、query:moe-special
-   evidence：提出基于状态的混合专家架构
-4. [ProMoE-FL: Prototype-conditioned Mixture of Experts for Multimodal Federated Learning with Missing Modalities](/202607/13/2607.06633v1-promoe-fl-prototype-conditioned-mixture-of-experts-for-multimodal-federated-learning-with-missing-modalities)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：原型条件混合专家在多模态联邦学习中的应用
-5. [It Takes a MAESTRO To Prune Bad Experts](/202607/13/2607.08601v1-it-takes-a-maestro-to-prune-bad-experts)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：使用马尔可夫链路由分析进行MoE专家结构剪枝
-6. [BrownoutMoE: Structure-Aware Expert Grouping for Efficient and Accurate LLM Web-based Services](/202607/13/2607.04164v1-brownoutmoe-structure-aware-expert-grouping-for-efficient-and-accurate-llm-web-based-services)  
+   evidence：直接研究MoE专家热度倾斜与动态放置
+3. [PrismAD: Decoupled Planning via Semantic Mixture-of-Planners for End-to-End Autonomous Driving](/202607/14/2607.10336v1-prismad-decoupled-planning-via-semantic-mixture-of-planners-for-end-to-end-autonomous-driving)  
    标签：评分：8.0/10、query:moe-special
-   evidence：提出BrownoutMoE，通过结构感知的专家分组来优化稀疏专家激活的MoE推理效率
+   evidence：语义混合规划器，包含专门的专家分组
+4. [Mixture of Cognitive Experts in Large Vision-Language Models](/202607/14/2607.10796v1-mixture-of-cognitive-experts-in-large-vision-language-models)  
+   标签：评分：8.0/10、query:moe-special
+   evidence：大型视觉语言模型中的认知专家混合模型
 
 ### 速读区论文标签
-1. [GeMoE: Gating Entropy is All You Need for Uncertainty-aware Adaptive Routing in MoE-based Large Vision-Language Models](/202607/13/2606.26287v1-gemoe-gating-entropy-is-all-you-need-for-uncertainty-aware-adaptive-routing-in-moe-based-large-vision-language-models)  
-   标签：评分：8.0/10、query:moe-special
-   evidence：基于门控熵的不确定性感知自适应路由
-2. [FRAME: Learning the Adaptation Domain with a Mixture of Fractional-Fourier Experts](/202607/13/2607.00162v1-frame-learning-the-adaptation-domain-with-a-mixture-of-fractional-fourier-experts)  
-   标签：评分：8.0/10、query:moe-special
-   evidence：每个专家学习可分数阶傅里叶变换的混合专家适配器，促进专业化
-3. [On the Utility and Factual Reliability of Pruned Mixture-of-Experts Models in the Biomedical Domain](/202607/13/2607.01444v1-on-the-utility-and-factual-reliability-of-pruned-mixture-of-experts-models-in-the-biomedical-domain)  
-   标签：评分：8.0/10、query:moe-special
-   evidence：研究专家剪枝对生物医学MoE模型多样性与可靠性的影响
-4. [H-SAGE: Holistic Speaker-Aware Guided Experts for MoE-based Multi-Talker ASR](/202607/13/2607.01566v1-h-sage-holistic-speaker-aware-guided-experts-for-moe-based-multi-talker-asr)  
-   标签：评分：8.0/10、query:moe-special
-   evidence：基于MoE的语音识别中说话人感知引导专家与路由
-5. [EPnG: Adaptive Expert Prune-and-Grow for Parameter-Efficient MoE Fine-tuning](/202607/13/2607.01789v1-epng-adaptive-expert-prune-and-grow-for-parameter-efficient-moe-fine-tuning)  
-   标签：评分：8.0/10、query:moe-special
-   evidence：基于路由器门概率的专家重要性进行剪枝与扩展
-6. [WPG-MoE: Weak-Prior-Guided Dense Mixture-of-Experts for User-Level Social Media Depression Detection](/202607/13/2607.04350v1-wpg-moe-weak-prior-guided-dense-mixture-of-experts-for-user-level-social-media-depression-detection)  
-   标签：评分：8.0/10、query:moe-special
-   evidence：提出WPG-MoE，一个用于用户级抑郁症检测的密集混合专家框架
-7. [Mixture of Enhanced-View Experts for Multi-Query Vehicle ReID and A Large-Scale Benchmark](/202607/13/2607.08085v1-mixture-of-enhanced-view-experts-for-multi-query-vehicle-reid-and-a-large-scale-benchmark)  
-   标签：评分：8.0/10、query:moe-special
-   evidence：提出了一种名为EV-MoE的混合专家模型
-8. [SpaR3D-MoE: Adaptive 3D Spatial Reasoning from Sparse Views Meets Geometry-Inductive Mixture-of-Experts](/202607/13/2607.06620v1-spar3d-moe-adaptive-3d-spatial-reasoning-from-sparse-views-meets-geometry-inductive-mixture-of-experts)  
+1. [Ensemble Diversity Optimization for Subjective Supervision](/202607/14/2607.08493v1-ensemble-diversity-optimization-for-subjective-supervision)  
    标签：评分：7.0/10、query:moe-special
-   evidence：提出几何归纳混合专家用于3D空间推理
-9. [SHAP-Weighted Cross-Modal Expert Fusion for Emotion and Sentiment Recognition: Evidence and Limits](/202607/13/2607.08573v1-shap-weighted-cross-modal-expert-fusion-for-emotion-and-sentiment-recognition-evidence-and-limits)  
+   evidence：集成多样性优化方法可应用于提升MoE专家多样性
+2. [Agora: Enhancing LLM Agent Reasoning Via Auction-Based Task Allocation](/202607/14/2607.09600v1-agora-enhancing-llm-agent-reasoning-via-auction-based-task-allocation)  
+   标签：评分：7.0/10、query:moe-special
+   evidence：Agora使用拍卖机制动态路由任务给专家模型，实现专家选择与路由
+3. [From Global to Factor-Wise Expert Composition in Discrete Diffusion Models](/202607/14/2607.11758v1-from-global-to-factor-wise-expert-composition-in-discrete-diffusion-models)  
+   标签：评分：7.0/10、query:moe-special
+   evidence：探索扩散模型中专家专业化组合，与混合专家中的专家专业化研究类似
+4. [RouteRec: Strict Evaluation of Recommender-Agent Selection and Aggregation](/202607/14/2607.09908v1-routerec-strict-evaluation-of-recommender-agent-selection-and-aggregation)  
    标签：评分：6.0/10、query:moe-special
-   evidence：基于SHAP权重的树状混合专家融合
+   evidence：研究智能体选择与聚合，概念上类似于MoE中的专家路由
 
 
 <div class="dpr-home-promo-card">
