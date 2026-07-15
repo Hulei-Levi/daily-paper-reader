@@ -1,0 +1,1337 @@
+Title: HCRMap: Pressure-Aware Hot-Expert Residency Mapping for 3.5D MoE Chiplet Inference
+
+URL Source: https://arxiv.org/pdf/2607.11586v1
+
+Published Time: Tue, 14 Jul 2026 03:24:20 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+# HCRMap: Pressure-Aware Hot-Expert Residency Mapping for 3.5D MoE Chiplet Inference 
+
+## Yongqin Zhang a,∗
+
+> a
+
+Nanjing Vocational College of Information Technology, 99 Wenlan Road, Xianlin College Community, Nanjing, Jiangsu, 210023, P.R.C. 
+
+A R T I C L E I N F O 
+
+Keywords :Mixture-of-Experts 3.5D chiplets Runtime mapping Hot expert residency Hierarchical memory 
+
+A B S T R A C T 
+
+Mixture-of-Experts (MoE) large language models (LLM) activate only a small number of experts during inference, but token routing introduces persistent expert hotness skew: a small set of hot experts continuously receives most tokens, while the remaining experts are lightly loaded. On 3.5D multi-chiplet systems, this skew not only causes compute imbalance but also amplifies pressure on communication, memory bandwidth, I/O, and execution queues. Therefore, the core problem is not simply to reduce token movement, but to dynamically place and reuse hot expert replicas across different memory tiers. This paper proposes HCRMap, a hot expert residency mapping framework for pressure-aware expert replica management in 3.5D MoE inference. Based on expert hotness, weight loading cost, migration overhead, and runtime resource pressure, HCRMap dynamically determines which experts should be promoted, retained, demoted, or evicted. It then maps routed token groups to suitable resident replicas, thereby jointly mitigating communication, memory, and queue bottlenecks. Experimental results show that HCRMap reduces end-to-end latency by 43.6% and 43.0% over Hydra in the prefill and decode stages, respectively; by 34.5% and 33.1% over MoEntwine; and by 46.7% and 46.0% over PIMoE. 
+
+## 1. Introduction 
+
+Mixture-of-Experts large language models (MoE-LLMs) scale capacity by activating only a few experts per token through Top-𝑘 gating [1–4], but token-dependent routing produces persistent expert-popularity skew: a small set of hot experts repeatedly receives most tokens across serving windows while others stay lightly used [5–8]. As shown in Figure 1, this skew is not only a compute-load problem. It reshapes token dispatch and gather, expert-weight access, memory-bank pressure, and shared-I/O pressure. The routed expert-FFN bottleneck is therefore a cross-resource imbalance over compute, memory, and interconnect, affecting full-model latency and energy in both prefill and decode execution. On 3.5D multi-chiplet systems with hierarchical mem-ory, this skew surfaces as repeated expert-weight stream-ing [9–11]. Expert weights are too large to keep all active experts in the nearest stacked-SRAM tier; in our evaluation, each benchmark uses the routed-expert footprint computed from its own hidden and intermediate dimensions, while the near-tier budget of each chiplet group is only 64 MB. There-fore, finite near-tier capacity can hold only a small number of hot experts, while routing profiles may require more hot or warm resident experts in the same layer. Warm experts that overflow the near tier must repeatedly stream from group-shared DRAM through shared I/O and D2D/NoP links. This transfer recurs across windows and continuously occupies shared interfaces and package links. Because 3.5D integra-tion co-packages stacked SRAM, local HBM, and group-shared DRAM into a finer-grained hierarchy, expert weights should not be classified simply as resident or non-resident; 
+
+> ∗
+
+Corresponding author. 
+
+Email address: zyq1350335@126.com (Y. Zhang) 
+
+Figure 1: MoE FFN serving pipeline for selected experts. 
+
+they can be placed at different residency levels according to runtime hotness, streaming cost, and resource pressure. Existing MoE systems optimize expert execution along separate axes: placement and routing that use popularity, affinity, or co-activation to cut dispatch latency; replica-tion or shadow replicas that relieve hot-expert queueing; and heterogeneous execution or memory-aware offloading driven by compute and memory behavior [7, 8, 12–16]. Hy-dra [6], MoEntwine [17], and PIMoE [18] respectively target popularity-aware remapping, wafer-scale shadow replica-tion, and NPU–PIM execution, while Mozart [10] shows the potential of profile-driven allocation and hierarchical streaming on a 3.5D base. Several of these systems combine multiple signals: PROBE co-balances computation and com-munication with dynamic replication, GRACE-MoE cou-ples replication with locality-aware routing, and MoEntwine hides migration over cold links. Their shared limitation is that these signals are not tied to a 3.5D MoE layer-latency 
+
+Y. Zhang: Preprint submitted to Elsevier Page 1 of 15 arXiv:2607.11586v1 [cs.AI] 13 Jul 2026 Pressure-Aware Residency Mapping for 3.5D MoE 
+
+model that includes tier capacity, memory-bank service, shared-I/O pressure, and live package-link occupancy. That gap leaves open the question that governs 3.5D MoE perfor-mance: where hot expert weights reside, which copy a token is sent to, and how those choices propagate into dispatch, queueing, memory, compute, and gather latency. Our characterization with LEGOSim [19] makes this concrete. First, minimizing communication does not mini-mize latency: the reproduced Hydra baseline substantially reduces D2D traffic but leaves most end-to-end latency un-resolved, because reduced token movement does not relieve compute imbalance, repeated streaming, or bank pressure. Second, resident-copy capacity creates a sharp boundary: when the hot set cannot receive enough execution locations, latency increases sharply relative to the capacity-sufficient setting. Separately, an intermediate HBM tier reduces re-peated streaming when warm experts do not fit in the nearest tier. Hot-expert residency is thus not a cache-hit problem but a cross-resource tradeoff: it spends near-tier capacity, copy bandwidth, and token-routing flexibility to reduce repeated streaming, queueing, and memory pressure. Traffic is both an overhead and a means of moving work to a better tier, so it should be budgeted and scheduled as part of latency control. Concretely, “scheduling traffic” means four runtime decisions that Section 6 develops: which resident copy a routed token is sent to, whether an expert weight is promoted or demoted across tiers, whether a cross-tier migration is paced or deferred, and whether that migration avoids a dispatch- or gather-congested link. Realizing this control on a 3.5D package is constrained on several fronts. Residency tiers differ in capacity, path, and sharing scope: SRAM is cheapest but tightest and must reserve space for activations and buffers; local HBM adds capacity but finite bank bandwidth; shared DRAM has the most capacity but repeatedly consumes shared I/O and NoP paths. Promotion and demotion are not free; they contend with foreground dispatch and gather. A token’s completion time depends on target queue, bank, path, and shared-I/O pressure, so the shortest distance or lowest load need not yield the lowest completion time. Finally, hotness drifts with serving mode, batch composition, and request domain: reacting to every burst churns migrations before copy cost amortizes, while reacting too slowly leaves new hot ex-perts remote. Stable online control therefore requires min-imum residency, benefit-cost amortization, hysteresis, and bounded updates. We propose HCRMap, a two-timescale pressure-aware residency-mapping framework on a Mozart 3.5D base [10]. It adds a bounded hot-expert residency substrate–bank-isolated replica regions, a versioned cross-tier expert-to-replica directory, non-blocking chunked weight transfer, and lightweight pressure counters for compute, links, banks, and shared I/O–so that warm experts can be demoted to an intermediate tier instead of being evicted to far DRAM. A masked feasibility-constrained slow residency loop decides promotion, retention, demotion, and eviction across tiers, weighing streaming and queueing reduction against copy overhead, token-transfer cost, destination pressure, tier capacity, and residency age; a deterministic fast token loop assigns tokens to the current layout under queueing, path, bank, and streaming-cost pressure. Separating the two timescales keeps the layout stable while routing reacts to instantaneous pressure. The slow controller uses fixed checkpoints and legal action masks, while the fast loop uses fixed pressure-proxy weights. Under matched resident-copy capacity, the latency-oriented placement and token assignment of HCRMap reduce normalized end-to-end latency by 24.95% and 23.91% relative to the strongest replication-capable baseline in prefill and decode, respectively, and improve EDP by 19.94% and 19.86%. In the unified LEGOSim evaluation, where Hydra, MoEntwine, PIMoE, and HCRMap run on the same 3.5D substrate, HCRMap reduces normalized end-to-end latency by 34.5% and 33.1% relative to the strongest reproduced baseline in prefill and decode, respectively. This paper makes two contributions: 
+
+• A bounded multi-level hot-expert residency substrate for 3.5D MoE serving. The substrate distributes hot-expert weights across stacked SRAM, chiplet-local HBM, and group-shared DRAM by streaming cost and hotness, letting warm experts degrade to an intermediate tier and avoid the near-tier capacity cliff. 
+
+• A two-timescale pressure-aware mapper. The map-per couples slow cross-tier residency updates with fast token assignment, using minimum residency, amor-tization, hysteresis, and bounded updates for stable online control. The rest of this paper is organized as follows. Section 2 reviews related work; Section 3 motivates the pressure-aware residency problem; Section 4 defines the system model; Sec-tion 5 formulates the latency-minimization mapping prob-lem; Section 6 presents HCRMap; Section 7 evaluates the design; and Section 8 concludes. 
+
+## 2. Related Work 
+
+This section reviews the work most related to HCRMap. These systems already use expert popularity, replication, prefetching, cold-expert offloading, or dynamic balancing to handle hot experts. Their key difference is which latency bottleneck they expose to the runtime mapper when deciding whether a residency update, expert placement, or token reassignment is worth performing. 
+
+2.1. Runtime Expert Balancing and Replication 
+
+Tutel addresses distributed training and serving chal-lenges caused by routing and load imbalance [5]. Production serving stacks also expose similar mechanisms; for example, TensorRT-LLM documents Wide-EP and EPLB deployment choices for large MoE models [20].   
+
+> Y. Zhang: Preprint submitted to Elsevier Page 2 of 15 Pressure-Aware Residency Mapping for 3.5D MoE
+
+More recent work makes replication and balancing more explicit. PROBE co-balances computation and communi-cation through lookahead prediction, dynamic replication, and token assignment [7]. UltraEP performs exact-load, real-time balancing for expert-parallel training and prefill serving on rack-scale nodes [8]. CRAFT studies fine-grained expert replication under a memory budget and shows that naive replication can over-replicate experts with little benefit [12]. GRACE-MoE combines grouping, dynamic replication, and locality-aware routing for distributed MoE inference [13]. These systems all treat hot experts as dynamic runtime objects. Token splitting and migration hiding are also not new by themselves: GRACE-MoE uses locality-aware replica selection, and MoEntwine’s NI-Balancer performs non-invasive migration through cold links [13, 17]. They differ from HCRMap in the hardware cost model. In GPU clusters, rack-scale nodes, or WSC meshes, the main costs are rank load, all-to-all communication, GPU memory, topology-specific cold links, and exposed transfer overhead. In 3.5D chiplet inference, the same action must also account for package-link pressure, switch/link occupancy that overlaps with dispatch and gather, shared HBM-bank or I/O pressure, and near-tier residency capacity. These costs do not appear in GPU or rack-scale cost models. 
+
+2.2. Hot/Cold Expert Tiering, Caching, and Streaming 
+
+FineMoE uses fine-grained expert selection patterns and semantic hints to guide expert prefetching, caching, and of-floading for MoE serving [14]. DiffMoE uses priority-driven differential expert caching for batched MoE inference [15]. MoNDE transfers hot experts to the GPU and computes cold experts near host memory [16]. Expert Streaming proposes FSE-DP for low-batch MoE inference on multi-chiplet ac-celerators, orchestrating fine-grained expert streams across D2D links [11]. These systems mainly expose cache misses, offload delay, or streaming delay to the scheduler. These works do not make the same mapping decision as HCRMap. A cache/offload system asks which expert weights should reside in which memory tier. Expert Stream-ing asks how complementary expert streams should move along a trajectory. These decisions do not jointly decide expert residency and token routing across multiple resi-dency levels under real-time physical pressure. Cache hit rate is therefore also insufficient for this problem: it only says whether a weight is near the consumer, whereas 3.5D residency control is multi-level, multi-replica, and coupled to token routing. 
+
+2.3. Chiplet and Wafer-Scale MoE Accelerators 
+
+Another line of work organizes MoE execution directly on chiplet or wafer-scale substrates. These systems are the closest targets used in our evaluation. Hydra targets chiplet MoE accelerators [6]. It predicts expert popularity and maps popular experts close to domi-nant token sources to reduce routed-token D2D communi-cation. Popularity and source distance can provide a good initial layout, but they do not account for how a multi-level residency update changes queueing, bank-service, and migration latency under live link pressure, bank pressure, and tier-capacity pressure. A distance-optimal location may still contend with dispatch and gather on the same D2D link. MoEntwine targets wafer-scale chips [17]. It uses ER-Mapping to balance WSC communication and NI-Balancer to perform non-invasive expert migration over cold links. Its cost model depends on wafer-mesh topology and the availability of complementary cold links. This abstraction emphasizes WSC topology, while 3.5D chiplet inference also exposes tier and bank pressure. PIMoE targets NPU-PIM systems [18]. It uses throttle-aware task offloading to send memory-bound cold-expert work toward PIM while keeping hotter work on NPU re-sources. It therefore centers execution-medium selection, while 3.5D residency control couples dispatch, queueing, memory service, and gather latency across residency lev-els. For evaluation, we implement the expert-management policies of Hydra, MoEntwine, and PIMoE inside the same LEGOSim event flow used by HCRMap. This setup evalu-ates all policies under identical 3.5D hardware constraints, routing outputs, memory hierarchy, and energy accounting. Mozart is the closest 3.5D MoE architecture reference [10]. It provides chiplet modularity, co-activated expert allocation, token and expert streaming, and aNoP-tree topology for MoE training. However, Mozart generates expert allocation from offline profiles, targets training-oriented static layout, and does not manage multi-level residency during inference under real-time physical pressure. LaMoSys3.5D studies a scalable 3.5D-IC architecture for LLM serving, co-designing heterogeneous 3D-DRAM chiplets, dataflow, and scheduling [9]. These works show that 3.5D platforms are plausible for large-model serving, but they do not manage inference-time multi-level residency updates as runtime decisions. Recent Tau ( 𝜏 ) Scaling Law work, also known as Tao’s Law, further frames post-Moore scaling as time-constant reduction across devices, circuits, chips, and systems [21]. HCRMap is orthogonal to this device/circuit-level direction: it does not introduce new 3D devices or bonding structures, but studies how a 3.5D MoE runtime can reduce the effective system-level time spent on expert-weight movement, bank service, package-link contention, and hot-expert queues. 
+
+## 3. Motivation: Challenges and Opportunities in 3.5D MoE Serving 
+
+When MoE inference runs on a 3.5D (2.5D/3D hybrid-packaged) multi-chiplet system, the problem caused by hot experts is no longer only conventional compute-load imbal-ance. Because MoE uses token-dependent routing, a small number of hot experts repeatedly receive many tokens across consecutive serving windows. In ordinary distributed sys-tems, this phenomenon is usually understood as expert-load imbalance or communication imbalance. In a 3.5D package,           
+
+> Y. Zhang: Preprint submitted to Elsevier Page 3 of 15 Pressure-Aware Residency Mapping for 3.5D MoE
+> Figure 2: Motivation observations from LEGOSim on the shared 3.5D substrate: (a) communication-oriented placement; (b) added resident copies; (c) reduced memory capacity.
+> Figure 3: Mechanism sketches: (a) residual hot-load con-centration; (b) replica-enabled load spreading; (c) capacity-constrained re-concentration.
+
+however, the same hot routing pattern simultaneously de-termines which D2D or NoP path each token takes, which memory tier supplies the expert weights, which memory banks are accessed, and whether shared I/O remains con-tinuously occupied. Therefore, the hot-expert problem in a 3.5D system evolves into a coupled pressure problem across compute, memory, and interconnect. 
+
+Challenge 1. 3.5D provides a richer hierarchical mem-ory structure, but the resource attributes of different tiers are not the same. SRAM is closest to the compute units and has the lowest access latency, so it is suitable for hot experts, but its capacity is limited and it must also reserve space for activations, buffers, and metadata. HBM provides larger intermediate capacity and is suitable for warm ex-perts or demoted hot experts, but its bank bandwidth is limited and can easily form a memory-service bottleneck. DRAM provides the largest shared capacity, but repeatedly streaming expert weights from DRAM continuously occu-pies shared I/O and D2D/NoP paths. Therefore, placing a hot expert at the location closest to the token source does not necessarily minimize end-to-end latency; that location may still be disturbed by compute queueing, bank contention, or dispatch/gather traffic. Figure 2(a) shows this challenge. Taking directly sim-ulated communication-oriented one-copy baselines as an example, these methods can significantly reduce D2D traffic, but the final latency decreases only slightly. They mainly shorten the token transfer path while leaving the hot expert’s service location unchanged. As shown in Figure 3(a), tokens still queue behind a small number of overloaded expert locations, and the system critical path remains dominated by residual hot-load concentration instead of average commu-nication distance. 
+
+Challenge 2. In a 3.5D system, expert replication is not unconditionally effective. Figure 2(b) shows that adding a small number of resident copies can significantly reduce latency, because each resident copy is not only redundant weight storage, but also an additional legal execution slot for a hot expert. It can spread tokens that were originally con-centrated in one long queue across multiple near execution locations, thereby alleviating hot-expert queueing. However, Figure 2(c) further shows that when memory capacity decreases, the benefit of fixed replication quickly disappears and may even increase latency. As shown in Fig-ure 3(c), when near-tier capacity is insufficient, some expert copies cannot continue to reside in useful locations, or they must compete for service bandwidth from the same memory bank. The load that was originally spread by replication re-concentrates on a small number of feasible locations, while replication itself introduces additional capacity occupation, weight movement, and memory-service pressure. Therefore, a resident copy is not simply one more stored weight copy, but a scarce near-execution resource; it truly helps reduce latency only when the system can retain and serve it at low cost. These phenomena together reveal the core problem in 3.5D MoE serving: hot-expert management is not a pure communication-minimization problem, not a simple replication-maximization problem, and not something that a conventional cache hit rate can fully describe. The real problem is pressure-aware residency scheduling. The runtime system must simultaneously decide which hot experts deserve extra resident locations, which memory tier and memory bank should hold these copies, which expert copy each routed token should be sent to, and whether promotion, demotion, or migration should be suppressed when capacity, bank, link, or shared-I/O pressure becomes too high. At the same time, 3.5D also brings a new opportunity. Unlike a flat accelerator memory model, 3.5D naturally pro-vides a multi-level residency hierarchy composed of SRAM, HBM, and DRAM. This means expert weights do not need to be simply divided into resident and non-resident states. The hottest experts can occupy scarce SRAM regions; warm ex-perts can be retained in or demoted to HBM to avoid repeated streaming from shared DRAM; and cold experts can stay in the shared capacity tier. This multi-level residency path   
+
+> Y. Zhang: Preprint submitted to Elsevier Page 4 of 15 Pressure-Aware Residency Mapping for 3.5D MoE
+
+provides new scheduling freedom for the runtime system, allowing it to trade near-tier capacity, copy bandwidth, and token-routing flexibility in order to reduce repeated weight movement, hot-expert queueing, and memory pressure. Based on this motivation, this paper proposes HCRMap. HCRMap does not treat expert copies as redundancy that should be increased unconditionally, but as constrained resi-dency resources. Through a slow residency loop, it performs promotion, retention, demotion, and eviction across memory tiers while considering hotness stability, saved streaming cost, queueing reduction, migration exposure, tier capacity, and bank pressure. Through a fast token-mapping loop, it selects an appropriate resident copy for each routed token group under the current residency layout, balancing queue pressure, path pressure, bank pressure, and streaming cost. By separating stable cross-tier residency updates from in-stantaneous token-assignment decisions, HCRMap uses the multi-level resource opportunity provided by 3.5D systems while avoiding replication and migration themselves becom-ing new bottlenecks. 
+
+## 4. System Model 
+
+4.1. Software Execution Model 
+
+Software execution graph. LEGOSim instantiates in-ference events for each evaluated MoE model, including non-routed transformer events and routed MoE-FFN events. The formal model captures the routed-MoE matching prob-lem among routed token groups, expert-weight objects, res-ident expert replicas, and token-to-replica assignments. Let 
+
+ be the set of modeled MoE layers. Layer 𝑙 ∈  has an expert set 𝑙 , and its routed token groups are 𝑙 = { 𝑔 ∣ 𝑔 =(𝑙, 𝑒 𝑔 , 𝑠 𝑔 , 𝑎 𝑔 , 𝑁 𝑔 )} Here 𝑒 𝑔 ∈ 𝑙 is the expert selected by the router for group 𝑔 , 𝑠 𝑔 ∈  is the source compute chiplet that holds the input activations, 𝑎 𝑔 ∈  is the aggregation chiplet for the expert output, and 𝑁 𝑔 is the number of tokens in the group. The compute-chiplet set  is defined by the hardware model below. Expert 𝑒 in layer 𝑙 has a weight object 𝑊 𝑙,𝑒 with size 𝑆 wt  
+
+> 𝑙,𝑒
+
+.At runtime, the expert can have one or more resident replicas 
+
+𝑙,𝑒 , and all replicas in the layer are 𝑙 = ⋃ 
+
+> 𝑒 ∈𝑙
+
+𝑙,𝑒 For a replica 𝑟 , 𝓁 (𝑟 ) denotes its layer and 𝑒 (𝑟 ) denotes its logical expert. The token-assignment variable is 𝑥 𝑔,𝑟 ∈ {0 , 1} ,where 𝑥 𝑔,𝑟 = 1 means token group 𝑔 executes on resident replica 𝑟 . Routing correctness requires each group to choose exactly one legal replica of its target expert: ∑𝑟 ∈𝑙,𝑒𝑔 
+
+𝑥 𝑔,𝑟 =1, ∀𝑙 ∈ , 𝑔 ∈ 𝑙 
+
+4.2. Hardware Resource Model 
+
+Figure 4 illustrates the 3.5D multi-chiplet substrate used by the model. The figure grounds the abstractions used below: logic tiles form the compute-chiplet set , local SRAM/HBM/DRAM regions form tiered bank sets 𝑡,𝑐 , and mesh links, switch-fabric paths, D2D links, and memory-access paths form the hardware edge set 𝐸 hw .The accelerator is represented as a directed hardware graph 𝐺 hw = ( 𝑉 hw , 𝐸 hw ) The node set contains compute  
+
+> Figure 4: Target 3.5D multi-chiplet substrate.
+
+chiplets, routers, memory controllers, and memory banks. Each link 𝑢 ∈ 𝐸 hw has bandwidth 𝐵 𝑢 , per-byte energy 𝜖 𝑢 ,physical distance 𝛿 𝑢 , signal speed 𝑣 𝑢 , and fixed routing over-head 𝜆 0
+
+> 𝑢
+
+. Its fixed transfer latency is 𝜆 𝑢 = 𝜆 0 
+
+> 𝑢
+
++ 𝛿 𝑢 ∕𝑣 𝑢 Each compute chiplet 𝑐 ∈  has 𝑁 core  
+
+> 𝑐
+
+cores, per-core throughput 
+
+Πcore , aggregate throughput Π𝑐 , and buffer capacity 𝑆 buf  
+
+> 𝑐
+
+:
+
+Π𝑐 = 𝑁 core  
+
+> 𝑐
+
+Πcore 
+
+Expert weights can reside in three tiers  ={SRAM , HBM , DRAM} SRAM provides near hot-expert residency, HBM provides intermediate capacity for warm or demoted hot experts, and DRAM provides shared capacity and fallback residency. For tier 𝑡 ∈  and chiplet 𝑐 ∈ ,
+
+𝑡,𝑐 denotes the visible bank set. Bank (𝑡, 𝑐, 𝑏 ) has capacity 
+
+𝐶𝑎𝑝 𝑡,𝑐,𝑏 , bandwidth 𝐵𝑊 𝑡,𝑐,𝑏 , fixed access latency 𝐿𝑎𝑡 𝑡,𝑐,𝑏 ,and per-byte access energy 𝜖 𝑡,𝑐,𝑏 . All evaluated policies use the same graph, tier capacities, bank bandwidths, link bandwidths, and compute resources. 
+
+4.3. Expert Residency and Constraints 
+
+Replica 𝑟 is placed by 𝜙 (𝑟 ) = ( 𝑡 𝑟 , 𝑐 𝑟 , 𝑏 𝑟 ) where 𝑡 𝑟 ∈ 
+
+is its tier, 𝑐 𝑟 ∈  is its execution chiplet, and 𝑏 𝑟 ∈ 𝑡 𝑟 ,𝑐 𝑟 is its backing bank. For any physical bank, resident weights, activation/token-buffer reservation, and metadata state must fit: ∑
+
+> 𝑟 ∶𝜙 (𝑟 )=( 𝑡,𝑐,𝑏 )
+
+𝑆 wt  
+
+> 𝓁 (𝑟 ),𝑒 (𝑟 )
+
++ 𝐴 𝑡,𝑐,𝑏 + 𝑀 𝑡,𝑐,𝑏 ≤ 𝐶𝑎𝑝 𝑡,𝑐,𝑏 . (1) Here 𝐴 𝑡,𝑐,𝑏 reserves space for activations and token buffers, and 𝑀 𝑡,𝑐,𝑏 accounts for the directory, version state, and replication buffers. Replica counts and the global residency budget satisfy 
+
+1 ≤ |𝑙,𝑒 | ≤ 𝑅 max  
+
+> 𝑙,𝑒
+
+, ∑
+
+> 𝑙 ∈
+
+∑
+
+> 𝑒 ∈𝑙
+
+𝑆 wt  
+
+> 𝑙,𝑒
+
+|𝑙,𝑒 | ≤ 𝐵 res . (2) The runtime directory keeps the logical-to-physical mapping (𝑙, 𝑒 ) = {( 𝑟, 𝜙 (𝑟 ), 𝜈 𝑟 ) ∣ 𝑟 ∈ 𝑙,𝑒 } where 𝜈 𝑟 is the published version. During promotion or demotion, the target chunks are copied into a private pending region.   
+
+> Y. Zhang: Preprint submitted to Elsevier Page 5 of 15
+
+Pressure-Aware Residency Mapping for 3.5D MoE 
+
+The mapper publishes a new directory version only after the copy completes; token groups already assigned to the old version continue there until their in-flight count reaches zero. Because inference weights are read-only, this versioned protocol prevents partial-copy reads without requiring coherence between old and new replicas. Let 𝜉 𝑟 ∈ {0 , 1} indicate whether replica 𝑟 is used in the current layer execution. Token assignment and replica use are coupled by 
+
+𝑥 𝑔,𝑟 ≤ 𝜉 𝑟 , 𝜉 𝑟 ≤ ∑  
+
+> 𝑔 ∈𝑙 ∶𝑒 𝑔 =𝑒 (𝑟 )
+
+𝑥 𝑔,𝑟 . (3) Let 𝑘 𝑟,𝑐 ∈ ℤ≥0 be the number of cores assigned to replica 𝑟 
+
+on chiplet 𝑐 . Since a replica executes on its mapped chiplet, 
+
+𝑘 𝑟,𝑐 = 0 for 𝑐 ≠ 𝑐 𝑟 , and 
+
+𝜉 𝑟 ≤ 𝑘 𝑟,𝑐 𝑟 ≤ 𝑁 core  
+
+> 𝑐 𝑟
+
+𝜉 𝑟 , ∑ 
+
+> 𝑟 ∈𝑙 ∶𝑐 𝑟 =𝑐
+
+𝑘 𝑟,𝑐 ≤ 𝑁 core  
+
+> 𝑐
+
+. (4) For decision window 𝑤 , candidate cross-tier movements are 
+
+𝑤 = { 𝑚 ∣ 𝑚 = ( 𝑟 𝑚 , 𝑠 𝑚 , 𝑑 𝑚 , 𝑆 mig  
+
+> 𝑚
+
+, 𝑦 𝑚 )} where 𝑦 𝑚 indicates whether migration 𝑚 is executed. 
+
+4.4. Communication, Storage, and Pressure 
+
+The communication classes are 𝐿 ={disp , gath , mem , mig} A request ℎ = ( 𝑠 ℎ, 𝑑 ℎ, 𝐷 ℎ, ℎ, 𝑧 ℎ)
+
+records source, destination, bytes, route path, and an activation indicator. Dispatch requests are generated by (𝑠 𝑔 , 𝑐 𝑟 , 𝐷 act  
+
+> 𝑔
+
+, (𝑠 𝑔 , 𝑐 𝑟 ), 𝑥 𝑔,𝑟 ), gather requests by 
+
+(𝑐 𝑟 , 𝑎 𝑔 , 𝐷 out  
+
+> 𝑔
+
+, (𝑐 𝑟 , 𝑎 𝑔 ), 𝑥 𝑔,𝑟 ), memory requests by 
+
+(( 𝑡 𝑟 , 𝑐 𝑟 , 𝑏 𝑟 ), 𝑐 𝑟 , 𝐷 wt 
+
+> 𝑔,𝑟
+
+, mem (𝑡 𝑟 , 𝑐 𝑟 , 𝑏 𝑟 ), 𝑥 𝑔,𝑟 ), and migration requests by (𝑠 𝑚 , 𝑑 𝑚 , 𝑆 mig  
+
+> 𝑚
+
+, (𝑠 𝑚 , 𝑑 𝑚 ), 𝑦 𝑚 ).Physical link load is separated from weighted scheduling pressure. For 𝜅 ∈ 𝐿 ,
+
+𝐿 phys  
+
+> 𝑢,𝜅
+
+(𝑤 ) = ∑
+
+> ℎ∈𝑤,𝜅
+
+𝑧 ℎ𝐷 ℎ𝕀 [𝑢 ∈ ℎ],̃ 𝐿 𝑢,𝜅 (𝑤 ) = 𝛼 𝜅 𝐿 phys  
+
+> 𝑢,𝜅
+
+(𝑤 ),
+
+(5) with 𝛼 𝜅 = 1 for foreground dispatch, gather, and memory traffic, and 𝛼 mig used only to weight migration pressure. The total physical and weighted loads are 
+
+𝐿 phys  
+
+> 𝑢
+
+(𝑤 ) = ∑
+
+> 𝜅 ∈𝐿
+
+𝐿 phys  
+
+> 𝑢,𝜅
+
+(𝑤 ),̃ 𝐿 𝑢 (𝑤 ) = ∑
+
+> 𝜅 ∈𝐿
+
+̃𝐿 𝑢,𝜅 (𝑤 ). (6) Only 𝐿 phys  
+
+> 𝑢
+
+is used for physical latency and energy. The route time of request ℎ is 
+
+𝑇 route  
+
+> ℎ
+
+= ∑
+
+> 𝑢 ∈ℎ
+
+(
+
+𝜆 𝑢 + 𝐷 ℎ
+
+𝐵 𝑢 
+
+)
+
+, (7) and the network-side critical path of layer 𝑙 in window 𝑤 is 
+
+𝑇 net  
+
+> 𝑙
+
+(𝑤 ) = max 
+
+(
+
+max 
+
+> 𝑢 ∈𝐸 hw
+
+𝐿 phys  
+
+> 𝑢
+
+(𝑤 )
+
+𝐵 𝑢 
+
+,
+
+max 
+
+> 𝜅 ∈𝐿
+
+max 
+
+> ℎ∈𝑤,𝜅
+
+𝑧 ℎ𝑇 route 
+
+> ℎ
+
+)
+
+.
+
+(8) Storage requests are divided into foreground weight ac-cess and migration access, 𝑄 = {fg , mig} . Each access 
+
+𝑎 = ( 𝑡 𝑎 , 𝑐 𝑎 , 𝑏 𝑎 , 𝑄 𝑎 , 𝑧 𝑎 ) records tier, chiplet, bank, bytes, and activity. With 𝛽 fg = 1 and 𝛽 mig = 𝛼 mig , bank traffic is 
+
+𝑄 phys  
+
+> 𝑡,𝑐,𝑏
+
+(𝑤 ) = ∑
+
+> 𝜒 ∈𝑄
+
+∑
+
+> 𝑎 ∈𝑤,𝜒
+
+𝑧 𝑎 𝑄 𝑎 𝕀 [( 𝑡 𝑎 , 𝑐 𝑎 , 𝑏 𝑎 ) = ( 𝑡, 𝑐, 𝑏 )] ,̃ 𝑄 𝑡,𝑐,𝑏 (𝑤 ) = ∑
+
+> 𝜒 ∈𝑄
+
+𝛽 𝜒 
+
+∑
+
+> 𝑎 ∈𝑤,𝜒
+
+𝑧 𝑎 𝑄 𝑎 𝕀 [( 𝑡 𝑎 , 𝑐 𝑎 , 𝑏 𝑎 ) = ( 𝑡, 𝑐, 𝑏 )] .
+
+(9) The bank service time is 
+
+𝑇 bank  
+
+> 𝑡,𝑐,𝑏
+
+(𝑤 ) = 𝕀 [𝑄 phys  
+
+> 𝑡,𝑐,𝑏
+
+(𝑤 ) > 0] 𝐿𝑎𝑡 𝑡,𝑐,𝑏 + 𝑄 phys  
+
+> 𝑡,𝑐,𝑏
+
+(𝑤 )
+
+𝐵𝑊 𝑡,𝑐,𝑏 
+
+. (10) Thus 
+
+𝑇 bank  
+
+> 𝑙
+
+(𝑤 ) = max  
+
+> 𝑡 ∈
+
+max  
+
+> 𝑐 ∈
+
+max 
+
+> 𝑏 ∈𝑡,𝑐
+
+𝑇 bank  
+
+> 𝑡,𝑐,𝑏
+
+(𝑤 ), (11) and memory-side latency is the maximum of bank service and memory-route service: 
+
+𝑇 mem  
+
+> 𝑙
+
+(𝑤 ) = max 
+
+(
+
+𝑇 bank  
+
+> 𝑙
+
+(𝑤 ), max 
+
+> 𝑢 ∈𝐸 hw
+
+𝐿 phys 
+
+> 𝑢, mem
+
+(𝑤 )
+
+𝐵 𝑢 
+
+,
+
+max 
+
+> ℎ∈𝑤, mem
+
+𝑧 ℎ𝑇 route 
+
+> ℎ
+
+)
+
+.
+
+(12) 
+
+4.5. Latency, Energy Accounting, and Runtime State 
+
+Replica 𝑟 processes 𝑁 𝑟 = ∑𝑔 ∈𝑙 𝑥 𝑔,𝑟 𝑁 𝑔 tokens and performs 𝑂𝑝𝑠 𝑟 = 𝑁 𝑟 𝑂𝑝𝑠 token  
+
+> 𝑙,𝑒 (𝑟 )
+
+expert operations. For an active replica, compute time is 
+
+𝑇 comp  
+
+> 𝑟
+
+= 𝑂𝑝𝑠 𝑟 
+
+𝑘 𝑟,𝑐 𝑟 Πcore 𝜂 𝑟 
+
+, 𝜉 𝑟 = 1 , (13) where 𝜂 𝑟 ∈ (0 , 1] is the legal-tile utilization factor. The implemented artifact uses 𝑂𝑝𝑠 token  
+
+> 𝑙,𝑒
+
+= 2 𝑑 model 𝑑 f fn for a two-layer FFN expert and 3𝑑 model 𝑑 f fn for a SwiGLU expert. The layer compute critical path is 𝑇 comp  
+
+> 𝑙
+
+= max 𝑟 ∈𝑙 ∶𝜉 𝑟 =1 𝑇 comp 
+
+> 𝑟
+
+LEGOSim [19] records each token group’s stage times over 𝑇 = {gate , disp , queue , mem , comp , gath , combine} 
+
+The group completion time and layer latency are 
+
+𝐶 𝑔 = ∑
+
+> 𝜃 ∈𝑇
+
+𝑇 𝑔,𝜃 , 𝑇 MoE  
+
+> 𝑙
+
+= max 
+
+> 𝑔 ∈𝑙
+
+𝐶 𝑔 . (14) At the stage level, the same event graph is summarized as 
+
+𝑇 MoE  
+
+> 𝑙
+
+= 𝑇 gate  
+
+> 𝑙
+
++ 𝑇 disp  
+
+> 𝑙
+
++ 𝑇 queue 
+
+> 𝑙
+
++ max( 𝑇 comp  
+
+> 𝑙
+
+, 𝑇 mem  
+
+> 𝑙
+
+) + 𝑇 gath  
+
+> 𝑙
+
++ 𝑇 combine  
+
+> 𝑙
+
+. (15) This stage-level expression summarizes the routed-MoE event graph; it complements event-level simulation. The max term summarizes compute–memory overlap under compatible event dependencies; serialization caused by dependencies or resource contention is captured by the event-level completion time. The HCRMap control objective and the stage attribution use the LEGOSim group completion time for routed MoE layers. 
+
+Y. Zhang: Preprint submitted to Elsevier Page 6 of 15 Pressure-Aware Residency Mapping for 3.5D MoE 
+
+Serving-window completion metric. For each serving window 𝑤 , LEGOSim records the full event-graph comple-tion time: 
+
+𝑇 E2E (𝑤 ) = Finish full (𝑤 ) − Start full (𝑤 ). (16) The stage attribution uses routed-MoE events, and 𝑇 E2E (𝑤 )
+
+aggregates all instantiated model events in the serving win-dow. For evaluation, window energy accounting is decom-posed into compute, link, storage, migration-control, and gating terms: 
+
+𝐸 (𝑤 ) = 𝐸 comp (𝑤 ) + 𝐸 NoC (𝑤 ) + 𝐸 D2D (𝑤 )+ 𝐸 SRAM (𝑤 ) + 𝐸 HBM (𝑤 ) + 𝐸 DRAM (𝑤 )+ 𝐸 mig (𝑤 ) + 𝐸 gate (𝑤 ).
+
+(17) Following RAPL power capping [22, 23], the configured window energy budget is computed from the system power cap and the decision-window length. When the accumulated window energy exceeds this budget, the following decision window is modeled with reduced effective compute throughput, capturing the DVFS and clock-throttling response used to enforce power limits. Compute and link energy are 𝐸 comp (𝑤 ) = ∑𝑟 ∈𝑙 𝑂𝑝𝑠 𝑟 𝜖 MAC 𝐸 𝜅 (𝑤 ) =
+
+∑𝑢 ∈𝜅 𝐿 phys  
+
+> 𝑢
+
+(𝑤 )𝜖 𝑢 , 𝜅 ∈ {NoC , D2D} Storage energy uses physical bank traffic: 𝐸 𝑡 (𝑤 ) = ∑𝑐 ∈
+
+∑𝑏 ∈𝑡,𝑐 𝑄 phys  
+
+> 𝑡,𝑐,𝑏
+
+(𝑤 )𝜖 𝑡,𝑐,𝑏 
+
+Migration data movement is already charged through link and bank traffic, so the migration term covers only directory and control overhead: 
+
+𝐸 mig (𝑤 ) = ∑
+
+> 𝑚 ∈𝑤
+
+𝑦 𝑚 𝐸 ctrl  
+
+> 𝑚
+
+, 𝐸 gate (𝑤 ) = ∑
+
+> 𝑔 ∈𝑙
+
+𝐸 gate  
+
+> 𝑔
+
+. (18) The runtime pressure state consumed by the mapper is 𝑃 𝑤 = ( 𝑃 link  
+
+> 𝑤
+
+, 𝑃 bank  
+
+> 𝑤
+
+, 𝑃 tier  
+
+> 𝑤
+
+, 𝑃 load  
+
+> 𝑤
+
+, 𝑃 mig  
+
+> 𝑤
+
+) The implemented pressure counters include 
+
+𝑃 load  
+
+> 𝑤
+
+= max 
+
+> 𝑐 ∈
+
+∑𝑟 ∈𝑙 ∶𝑐 𝑟 =𝑐,𝜉 𝑟 =1 ̂ 𝑇 comp  
+
+> 𝑟
+
+(𝑤 )Δ𝑤 
+
+,𝑃 link  
+
+> 𝑤
+
+= max 
+
+> 𝑢 ∈𝐸 hw
+
+̃𝐿 𝑢 (𝑤 )
+
+𝐵 𝑢 Δ𝑤 
+
+,𝑃 bank  
+
+> 𝑤
+
+= max 
+
+> 𝑡,𝑐,𝑏
+
+̃𝑄 𝑡,𝑐,𝑏 (𝑤 )
+
+𝐵𝑊 𝑡,𝑐,𝑏 Δ𝑤 
+
+.
+
+(19) Here Δ𝑤 is the decision-window length, and ̂ 𝑇 comp  
+
+> 𝑟
+
+(𝑤 ) is the short-window compute service-time estimate for replica 
+
+𝑟 under routed demand. Thus 𝑃 load  
+
+> 𝑤
+
+measures service-time utilization rather than static core occupancy. 𝑃 tier  
+
+> 𝑤
+
+records tier-capacity scarcity and 𝑃 mig  
+
+> 𝑤
+
+records exposed migration pressure. These state variables connect the physical substrate in Figure 4 to the latency-minimization formulation in Sec-tion 5; they are not optimized as independent objectives. 
+
+## 5. Problem Formulation 
+
+Based on the 3.5D MoE system model in Section 4, we define pressure-aware hot-expert residency mapping as an online constrained optimization problem. In each decision window 𝑤 , the system observes the routed token groups, cur-rent resident expert replicas, tier capacities, and runtime link and bank pressure. The goal is to choose the resident replica set, physical placement, and token-to-replica assignment that minimize routed-MoE completion cost while satisfying routing correctness and hardware resource constraints. 
+
+5.1. Decision Variables 
+
+For decision window 𝑤 , the runtime mapping decision is 𝑀 𝑤 = ( 𝑤 , 𝜙 𝑤 , 𝑥 𝑤 ) Here 𝑤 is the set of expert replicas retained in the current window. The placement function 
+
+𝜙 𝑤 (𝑟 ) = ( 𝑡 𝑟 , 𝑐 𝑟 , 𝑏 𝑟 ) maps replica 𝑟 to storage tier 𝑡 𝑟 , exe-cution chiplet 𝑐 𝑟 , and backing memory bank 𝑏 𝑟 . The token-assignment variable 𝑥 𝑔,𝑟 ∈ {0 , 1} indicates whether routed token group 𝑔 executes on replica 𝑟 .Thus, 𝑀 𝑤 captures three coupled runtime decisions: which expert replicas remain resident, where those replicas are placed across tiers and chiplets, and which legal replica receives each routed token group. 
+
+5.2. Latency Objective 
+
+Latency objective. Given mapping 𝑀 𝑤 , HCRMap min-imizes routed MoE-FFN completion cost: 
+
+min 
+
+> 𝑀 𝑤
+
+∑
+
+> 𝑙 ∈
+
+𝑇 MoE  
+
+> 𝑙
+
+(𝑀 𝑤 ). (20) Here  is the set of modeled MoE layers, and 𝑇 MoE  
+
+> 𝑙
+
+(𝑀 𝑤 ) is the routed MoE execution latency of layer 𝑙 under mapping 
+
+𝑀 𝑤 . The end-to-end serving-window metric 𝑇 E2E is defined in Equation 16. D2D traffic, NoP congestion, memory-bank pressure, compute imbalance, tier-capacity scarcity, and migration overhead are factors that change 𝑇 MoE  
+
+> 𝑙
+
+(𝑀 𝑤 ) through dispatch, queueing, compute, memory-access, gather, and migration exposure. Communication, storage, and replica movement are therefore not final goals by themselves; the control goal is to reduce routed MoE execution latency produced by their interaction, thereby reducing serving-window completion time. 
+
+5.3. Constraints 
+
+First, the mapping must satisfy routing correctness. Each token group is assigned to exactly one legal replica of its target expert: 
+
+∑
+
+> 𝑟 ∈𝑙,𝑒𝑔
+
+𝑥 𝑔,𝑟 = 1 , ∀𝑙 ∈ , 𝑔 ∈ 𝑙 . (21) Here 𝑒 𝑔 is the target expert selected for token group 𝑔 , and 
+
+𝑙,𝑒 𝑔 is the resident replica set of that expert in layer 𝑙 . This constraint guarantees that each token group is executed once and only by a legal replica of its routed expert. Second, the mapping must satisfy bank-capacity con-straints. For any storage tier, chiplet, and bank, resident ex-pert weights, activation/token-buffer reservation, and meta-data overhead cannot exceed bank capacity: 
+
+∑
+
+> 𝑟 ∶𝜙 𝑤 (𝑟 )=( 𝑡,𝑐,𝑏 )
+
+𝑆 wt  
+
+> 𝓁 (𝑟 ),𝑒 (𝑟 )
+
++ 𝐴 𝑡,𝑐,𝑏 + 𝑀 𝑡,𝑐,𝑏 
+
+≤ 𝐶𝑎𝑝 𝑡,𝑐,𝑏 , ∀𝑡 ∈  , 𝑐 ∈ , 𝑏 ∈ 𝑡,𝑐 .
+
+(22) 
+
+Y. Zhang: Preprint submitted to Elsevier Page 7 of 15 Pressure-Aware Residency Mapping for 3.5D MoE 
+
+Here 𝑆 wt  
+
+> 𝓁 (𝑟 ),𝑒 (𝑟 )
+
+is the weight size of replica 𝑟 ’s logical expert, 
+
+𝐴 𝑡,𝑐,𝑏 reserves activation and token-buffer space, 𝑀 𝑡,𝑐,𝑏 ac-counts for directory, version, and replica-management meta-data, and 𝐶𝑎𝑝 𝑡,𝑐,𝑏 is the capacity of bank (𝑡, 𝑐, 𝑏 ).Finally, the mapping must satisfy replica-count and total residency-budget constraints. Each expert keeps at least one legal replica and no more than the allowed maximum: 
+
+1 ≤ |𝑙,𝑒 | ≤ 𝑅 max  
+
+> 𝑙,𝑒
+
+, ∀𝑙 ∈ , 𝑒 ∈ 𝑙 . (23) The total resident expert-weight footprint cannot exceed the system residency budget: 
+
+∑
+
+> 𝑙 ∈
+
+∑
+
+> 𝑒 ∈𝑙
+
+𝑆 wt  
+
+> 𝑙,𝑒
+
+|𝑙,𝑒 | ≤ 𝐵 res . (24) Here 𝑅 max  
+
+> 𝑙,𝑒
+
+is the maximum allowed replica count for expert 
+
+𝑒 in layer 𝑙 , and 𝐵 res is the total expert residency budget. In summary, the problem is to choose expert replicas, their physical tier/chiplet/bank locations, and token-group assignments under finite SRAM, HBM, and DRAM ca-pacity so that the routed-MoE contribution to full-model latency is minimized. The core challenge is not simply reducing communication or unconditionally increasing hot-expert replicas; it is finding a runtime mapping that lowers final execution latency under coupled capacity, link, bank, and compute-load constraints. 
+
+## 6. Method Design 
+
+6.1. Overview: Challenge-Oriented Two-Timescale Control 
+
+Section 5 defines pressure-aware hot-expert residency mapping as an online constrained optimization problem whose objective is to reduce full-model latency by mini-mizing the policy-controlled routed-MoE component. The runtime decision is 𝑀 𝑤 = ( 𝑤 , 𝜙 𝑤 , 𝑥 𝑤 ), where 𝑤 is the expert-replica set in the current window, 𝜙 𝑤 places each replica across memory tier, chiplet, and bank, and 𝑥 𝑤 maps routed token groups to expert replicas. Solving this problem directly is impractical. First, SRAM, HBM, and DRAM in a 3.5D system have different capacities, access paths, and sharing scopes, so expert-replica placement simultaneously changes dispatch latency, queueing latency, memory-access latency, and gather latency. Second, hot-expert replicas have cross-window benefits and costs: a new replica may reduce queueing and repeated weight streaming over several future windows, but it immediately consumes capacity and introduces migration traffic and bank pressure. Fixed thresholds or single-window heuristics therefore cannot reliably decide whether a residency update is worth performing. HCRMap uses a hybrid two-timescale control frame-work. A slow residency controller uses a masked feasibility-constrained Double DQN to learn cross-window promotion, retention, demotion, and eviction policies for expert repli-cas, thereby updating 𝑤 and 𝜙 𝑤 . The action mask en-forces replica-count, residency-budget, bank-capacity, and migration-path feasibility before action selection, so the con-troller chooses only from legal residency edits. A fast token mapper uses an explicit normalized pressure proxy under the current expert-replica directory to select the execution replica for each token group, thereby updating 𝑥 𝑤 . Together, these two loops construct the runtime mapping 𝑀 𝑤 used in Section 5. This decomposition corresponds to the two challenges in Section 3. For Challenge 1, HCRMap no longer places experts by communication distance alone. The residency controller observes tier capacity, bank pressure, link pres-sure, and compute load, and then combines these signals with latency-aware placement to select multi-level resident locations. For Challenge 2, HCRMap does not treat expert replicas as redundancy that should be increased uncondi-tionally. Instead, the masked Double-DQN controller learns the long-term tradeoff between replica benefit and migration cost. Once a replica layout is chosen, the fast token mapper lets tokens avoid congested queues, congested links, and pressured memory banks in real time. 
+
+6.2. Runtime State and Expert Demand 
+
+In each decision window 𝑤 , HCRMap first extracts per-expert demand from the routing result. For expert 𝑒 in layer 
+
+𝑙 , the window token demand is 
+
+𝑑 𝑙,𝑒 (𝑤 ) = ∑  
+
+> 𝑔 ∈𝑙 (𝑤 )∶ 𝑒 𝑔 =𝑒
+
+𝑁 𝑔 . (25) Here 𝑙 (𝑤 ) is the routed token-group set of layer 𝑙 in window 
+
+𝑤 , 𝑒 𝑔 is the target expert of token group 𝑔 , and 𝑁 𝑔 is the number of tokens in that group. Because expert hotness changes with serving mode, batch composition, and request domain, HCRMap triggers migration from smoothed hotness using an exponentially weighted moving average (EWMA): ̄ 𝑑 𝑙,𝑒 (𝑤 ) = 𝛼̄𝑑 𝑙,𝑒 (𝑤 −1) + (1 − 𝛼 )𝑑 𝑙,𝑒 (𝑤 ) where 𝛼 ∈ [0 , 1] controls the balance between historical and current windows. Smoothed hotness separates persistent hot experts from short burst experts, avoiding frequent expert-weight migration caused by one-window traffic fluctuation. To represent physical pressure in the 3.5D system, HCRMap uses the runtime pressure state defined in Section 4: 𝑃 𝑤 = ( 𝑃 load  
+
+> 𝑤
+
+, 𝑃 link  
+
+> 𝑤
+
+, 𝑃 bank  
+
+> 𝑤
+
+, 𝑃 tier  
+
+> 𝑤
+
+, 𝑃 mig  
+
+> 𝑤
+
+) Here 𝑃 load 
+
+> 𝑤
+
+captures compute-load pressure, 𝑃 link  
+
+> 𝑤
+
+captures NoP and D2D link pressure, 𝑃 bank  
+
+> 𝑤
+
+captures memory-bank pressure, 
+
+𝑃 tier  
+
+> 𝑤
+
+captures tier-capacity pressure, and 𝑃 mig  
+
+> 𝑤
+
+captures exposed migration pressure. The slow controller observes the following state in win-dow 𝑤 :
+
+𝑠 𝑤 = [̄𝑑 𝑙,𝑒 (𝑤 ), 𝜎 𝑙,𝑒 (𝑤 ), 𝐻 src  
+
+> 𝑙,𝑒
+
+(𝑤 ), 𝑤 −1 , 𝑃 𝑤 , 𝐴𝑔𝑒 𝑤 , 𝐵 𝑤 
+
+].
+
+(26) Here 𝜎 𝑙,𝑒 (𝑤 ) is the recent fluctuation of expert demand, 
+
+𝐻 src  
+
+> 𝑙,𝑒
+
+(𝑤 ) is the entropy of the expert’s request sources across chiplets, 𝑤 −1 is the previous-window expert-to-replica di-rectory, 𝐴𝑔𝑒 𝑤 is the current replica residency age, and 
+
+𝐵 𝑤 is the remaining capacity of each tier and bank. The state jointly captures expert hotness, hotness stability, source   
+
+> Y. Zhang: Preprint submitted to Elsevier Page 8 of 15 Pressure-Aware Residency Mapping for 3.5D MoE
+
+locality, current replica layout, and hardware pressure, al-lowing the controller to estimate how a residency update may affect future latency. 
+
+6.3. Masked Double DQN for Slow Residency Updates 
+
+HCRMap models slow expert-residency update as a masked MDP with hard feasibility constraints. In each deci-sion window 𝑤 , the controller selects a legal residency edit action 𝑎 𝑤 from state 𝑠 𝑤 to update the expert-replica set and part of the physical placement. The action set is 
+
+𝑎 𝑤 ∈ {no -op , promote( 𝑒, 𝑡, 𝑐 ), retain( 𝑒, 𝑡, 𝑐 ),
+
+demote( 𝑒, 𝑡, 𝑐 ), evict( 𝑒, 𝑡, 𝑐 )} . (27) Here no-op means that the current window performs no res-idency update; promote moves or creates a replica of expert 
+
+𝑒 in a nearer tier 𝑡 and chiplet 𝑐 ; retain keeps an existing replica; demote moves a replica to a tier with more capacity or lower pressure; and evict removes an extra replica that no longer provides latency benefit. To control action-space size, HCRMap does not enu-merate all experts and all locations. It generates actions only for a candidate expert set 𝑤 , including persistent hot experts, warm experts that overflow SRAM, and stale replicas that have not been useful for a long time. For each candidate expert, the target tier/chiplet location must belong to a feasible candidate set Ω𝑒 (𝑤 ) that satisfies capacity and path constraints. Before action execution, HCRMap applies a legal mask to remove all actions that violate constraints. Legal actions must satisfy 
+
+1 ≤ |𝑙,𝑒 | ≤ 𝑅 max  
+
+> 𝑙,𝑒
+
+, (28) 
+
+∑
+
+> 𝑙 ∈
+
+∑
+
+> 𝑒 ∈𝑙
+
+𝑆 wt  
+
+> 𝑙,𝑒
+
+|𝑙,𝑒 | ≤ 𝐵 res , (29) 
+
+∑
+
+> 𝑟 ∶𝜙 (𝑟 )=( 𝑡,𝑐,𝑏 )
+
+𝑆 wt  
+
+> 𝓁 (𝑟 ),𝑒 (𝑟 )
+
++ 𝐴 𝑡,𝑐,𝑏 + 𝑀 𝑡,𝑐,𝑏 
+
+≤ 𝐶𝑎𝑝 𝑡,𝑐,𝑏 .
+
+(30) Thus, an action cannot evict the last legal replica of an expert, exceed the total residency budget, exceed any bank capacity, or force a cross-tier migration when the path is unavailable. With legal masking, the controller chooses di-rectly inside the feasible action space, keeping action selec-tion feasible before reward evaluation. 
+
+6.4. Reward: Same-Window Counterfactual Benefit 
+
+Residency actions are trained with a same-window coun-terfactual reward. Adjacent windows can differ in token demand, so HCRMap evaluates the selected action and the previous layout on the same routed token groups. This assigns credit to residency and token-to-replica decisions without mixing in workload drift across windows. For each training window 𝑤 , the simulator evaluates the same routed token groups 𝑤 under two layouts. The coun-terfactual layout keeps the previous directory and applies only the fast token mapper: 
+
+𝑇 cf  
+
+> 𝑤
+
+= 𝑇 MoE (𝑤 , 𝑤 −1 , FastTokenMap) . (31) The acted layout schedules the selected residency action 
+
+𝑎 𝑤 , inserts the corresponding migration events, publishes only completed replicas, and then applies the same fast token mapper to the published directory: 
+
+𝑇 act  
+
+> 𝑤
+
+= 𝑇 MoE (𝑤 , act  
+
+> 𝑤
+
+, FastTokenMap) ,
+
+(Pnd act  
+
+> 𝑤
+
+, MigEvents act  
+
+> 𝑤
+
+) = ScheduleAction( 𝑎 𝑤 , 𝑤 −1 ),
+
+act  
+
+> 𝑤
+
+= PublishCompleted(Pnd act  
+
+> 𝑤
+
+, 𝑤 −1 ).
+
+(32) The reward is 
+
+𝑅 𝑤 = 𝑇 cf  
+
+> 𝑤
+
+− 𝑇 act 
+
+> 𝑤
+
+𝑇 cf 
+
+> 𝑤
+
+− 𝜇 1̂ 𝑇 mig  
+
+> 𝑤
+
+− 𝜇 2𝐶 churn  
+
+> 𝑤
+
+. (33) Here 𝑇 cf  
+
+> 𝑤
+
+and 𝑇 act  
+
+> 𝑤
+
+are measured on the same routed-token demand, so the first term attributes latency change to the residency edit rather than to workload drift. ̂ 𝑇 mig 
+
+> 𝑤
+
+penalizes foreground-exposed migration time, and 𝐶 churn 
+
+> 𝑤
+
+penalizes frequent promotion, demotion, or eviction. The counterfactual evaluation is used only during offline training. During evaluation, the controller is frozen and does not execute both layouts online. During offline training, HCRMap uses Masked Double DQN. For transition (𝑠 𝑤 , 𝑎 𝑤 , 𝑅 𝑤 , 𝑠 𝑤 +1 ), the target value is 
+
+𝑦 𝑤 = 𝑅 𝑤 + 𝛾𝑄 ̄ 𝜃 
+
+(
+
+𝑠 𝑤 +1 , arg max 
+
+> 𝑎 ′∈legal
+> 𝑤 +1
+
+𝑄 𝜃 (𝑠 𝑤 +1 , 𝑎 ′)
+
+)
+
+, (34) and the training loss is (𝜃 ) = ( 𝑄 𝜃 (𝑠 𝑤 , 𝑎 𝑤 ) − 𝑦 𝑤 )2. Here 𝛾 is the future-reward discount factor, legal  
+
+> 𝑤 +1
+
+is the next-window action set after legal masking, 𝑄 𝜃 is the online network, and 
+
+𝑄 ̄ 𝜃 is the target network. Double DQN reduces overestima-tion in action-value estimates, while the legal mask ensures that training and inference always satisfy capacity, replica-count, and migration-feasibility constraints. 
+
+6.5. Latency-Aware Multi-Level Placement 
+
+Challenge 1 arises because 3.5D systems provide multi-ple memory tiers with different resource properties. SRAM has the lowest latency but the tightest capacity. HBM pro-vides larger intermediate capacity but is limited by bank bandwidth. DRAM has the largest capacity but introduces shared-I/O and D2D/NoP pressure. Therefore, placing an expert nearest to the token source does not guarantee the lowest execution latency. HCRMap addresses this issue with the RL residency controller and a latency-aware placement rule. The RL con-troller decides which residency tier an expert should occupy according to expert hotness, hotness stability, and system pressure. Persistent hot experts compete for near SRAM residency regions, warm experts are preferentially kept in HBM to avoid repeated streaming from shared DRAM, and   
+
+> Y. Zhang: Preprint submitted to Elsevier Page 9 of 15 Pressure-Aware Residency Mapping for 3.5D MoE
+
+cold experts retain one legal replica in the shared capacity tier. When the RL controller selects a promote or retain action, HCRMap chooses the concrete tier/chiplet/bank lo-cation from legal candidates: 
+
+(𝑡 𝑟 , 𝑐 𝑟 , 𝑏 𝑟 ) = arg min 
+
+> (𝑡,𝑐,𝑏 )∈Ω 𝑟
+
+𝐶 place (𝑟, 𝑡, 𝑐, 𝑏 ), (35) where Ω𝑟 is the candidate set satisfying capacity and path feasibility. The placement cost is 
+
+𝐶 place (𝑟, 𝑡, 𝑐, 𝑏 ) = 𝛼 𝑝 𝐷 src (𝑒 (𝑟 ), 𝑐 ) + 𝛽 𝑝 𝑄 𝑐 + 𝜒 𝑝 𝑈 bank 
+
+> 𝑡,𝑐,𝑏
+
++ 𝜓 𝑝 𝑈 cap  
+
+> 𝑡
+
+− 𝜂 𝑝 𝐷 div (𝑟, 𝑐 ). (36) Here 𝐷 src (𝑒 (𝑟 ), 𝑐 ) is the weighted distance from the routed-token sources of expert 𝑒 (𝑟 ) to chiplet 𝑐 , 𝑄 𝑐 is the current compute-queue pressure on chiplet 𝑐 , 𝑈 bank  
+
+> 𝑡,𝑐,𝑏
+
+is the access pressure of bank (𝑡, 𝑐, 𝑏 ), 𝑈 cap  
+
+> 𝑡
+
+is the capacity scarcity of tier 
+
+𝑡 , and 𝐷 div (𝑟, 𝑐 ) is the location diversity between this replica and existing replicas of the same expert. This placement rule does not minimize communication distance alone. It prevents hot experts from being concen-trated on the same source-near chiplet or the same pressured bank. By jointly considering source locality, compute queue, bank pressure, tier capacity, and replica diversity, HCRMap turns expert-weight placement into a local approximation of its effect on 𝑇 MoE  
+
+> 𝑙
+
+, reducing latency uncertainty caused by heterogeneous tiers and coupled physical pressure. 
+
+6.6. Bounded RL-Guided Replica Control 
+
+Challenge 2 arises because expert replicas can reduce hot-expert queueing, but they also consume SRAM/HBM capacity and introduce weight migration, bank access, and link occupancy. When capacity is insufficient or bank pres-sure is high, a fixed replication policy can re-concentrate load and even increase latency. HCRMap treats expert replicas as constrained residency resources with explicit capacity and migration costs. The RL controller learns whether an action can amortize its migration cost across multiple windows. For a hot expert, the controller promotes a new replica only when the replica provides positive long-term latency benefit. For a short burst expert, the controller tends to choose no-op or retain to avoid migration churn. If a replica no longer contributes to load spreading or repeated-streaming reduction, the controller demotes or evicts it to release near-tier capacity. To prevent uncontrolled replication, HCRMap bounds the number of residency updates per window: ∑𝑚 ∈𝑤 𝑦 𝑚 ≤
+
+𝑈 max where 𝑤 is the candidate migration or residency-update set in window 𝑤 , 𝑦 𝑚 indicates whether update 𝑚 
+
+is executed, and 𝑈 max is the maximum number of updates allowed in one window. HCRMap also maintains a residency age for each replica. A newly promoted replica can be evicted only after it reaches a minimum residency time: age( 𝑟 ) ≥ 𝐴 min This mechanism prevents replicas from oscillating among hot, warm, and cold states. Compared with fixed replication, HCRMap’s replica control is value-guided and bounded: the masked Double DQN controller selects one legal residency action per window, spending residency capacity only when the learned long-term value justifies the update and releasing resources when a replica is no longer useful. 
+
+6.7. Fast Token-to-Replica Mapping 
+
+The slow RL controller decides which replicas exist and where they are placed. Inside each window, however, the runtime must still decide which replica receives each token group. This decision is high-frequency, latency-sensitive, and must strictly preserve routing correctness. HCRMap therefore uses an explicit normalized pressure proxy for deterministic selection of 𝑥 𝑤 .For token group 𝑔 with target expert 𝑒 𝑔 , HCRMap chooses the lowest-cost replica from the legal replica set 
+
+𝑙,𝑒 𝑔 :
+
+𝑟 ∗ 
+
+> 𝑔
+
+= arg min 
+
+> 𝑟 ∈𝑙,𝑒𝑔
+
+𝐶 tok (𝑔, 𝑟 ), (37) and sets 
+
+𝑥 𝑔,𝑟 =
+
+{
+
+1, 𝑟 = 𝑟 ∗ 
+
+> 𝑔
+
+,
+
+0, otherwise . (38) The token-assignment cost is a normalized pressure proxy rather than a physical latency equation: 
+
+𝐶 tok (𝑔, 𝑟 ) = 𝜔 𝑞 𝐶 queue  
+
+> 𝑔,𝑟
+
++𝜔 𝑝 𝐶 path  
+
+> 𝑔,𝑟
+
++𝜔 𝑏 𝐶 bank  
+
+> 𝑔,𝑟
+
++𝜔 𝑠 𝐶 stream  
+
+> 𝑔,𝑟
+
+. (39) Here 𝐶 queue  
+
+> 𝑔,𝑟
+
+measures queued service at replica 𝑟 , 𝐶 path 
+
+> 𝑔,𝑟
+
+measures dispatch and gather path pressure, 𝐶 bank  
+
+> 𝑔,𝑟
+
+measures backing-bank pressure, and 𝐶 stream  
+
+> 𝑔,𝑟
+
+measures tier-dependent streaming cost. The weights are fixed during evaluation and only rank legal replicas inside the current directory; physical latency is still measured by the event-level simulator. In execution, HCRMap assigns tokens in small token blocks and updates replica load, chiplet load, link load, and bank pressure after each block. This avoids sending all tokens to the same replica using stale window-start state. Fast token mapping allows HCRMap to exploit existing replicas to spread hot-expert queues and avoid congested links or banks without changing the residency layout. 
+
+6.8. Stable Migration and Versioned Directory 
+
+Promotion, demotion, and eviction are not zero-cost operations. Cross-tier migration consumes D2D/NoP paths, HBM interfaces, and bank service time. If migration con-flicts with foreground dispatch/gather traffic, it can become a new latency bottleneck. HCRMap therefore applies migration throttling and a versioned directory when executing RL residency actions. For a candidate migration path mig , migration is allowed only when foreground utilization plus migration utilization remains below a threshold on every path link: 
+
+𝑈 fg  
+
+> 𝑢
+
+(𝑤 ) + 𝑈 mig  
+
+> 𝑢
+
+(𝑤 ) ≤ 𝜂 𝑢 , ∀𝑢 ∈ mig . (40) Here 𝑈 fg  
+
+> 𝑢
+
+(𝑤 ) is the utilization of foreground dispatch, gather, and memory traffic on link 𝑢 , 𝑈 mig  
+
+> 𝑢
+
+(𝑤 ) is migration-traffic utilization, and 𝜂 𝑢 is the safety threshold used to avoid interfering with foreground execution. If this condition is not   
+
+> Y. Zhang: Preprint submitted to Elsevier Page 10 of 15
+
+Pressure-Aware Residency Mapping for 3.5D MoE 
+
+satisfied, the migration is delayed and the current window falls back to no-op or retain. For directory consistency, HCRMap uses a versioned expert-to-replica directory. When a replica is promoted or demoted, the system does not overwrite the old replica. Instead, it copies weights in chunks into a pending region in the target tier. A new directory version is published only after all chunks complete and the target location satisfies capacity and pressure constraints. Token groups already assigned to the old version finish on the old location, while later token groups use the new directory. FastTokenMap always consumes the last published directory. A pending replica created by a residency action is not a legal execution target until all migration chunks have completed and the new directory version has been published. Therefore, migration consumes physical link and bank resources before it can produce token-mapping benefit. Because expert weights are read-only during inference, this mechanism prevents partial-copy reads without requiring a complex coherence protocol. 
+
+6.9. Runtime Flow 
+
+Algorithm 1 gives the evaluation-time pseudocode of the HCRMap slow residency control loop. The slow controller does not greedily rank residency edits by one-window esti-mated benefit. Instead, it uses a frozen masked Double DQN checkpoint to select one legal residency action per deci-sion window. The legal action mask enforces replica-count, residency-budget, bank-capacity, and migration-feasibility constraints before action selection. Algorithm 2 details the deterministic fast token mapping used after the current pub-lished directory is fixed. Algorithm 1 summarizes slow residency control with a frozen Q-network checkpoint. Offline training uses simulator-generated transitions and the same-window counterfactual reward above. Through this flow, HCRMap turns hot-expert manage-ment in a 3.5D system from fixed replication or pure commu-nication optimization into feasibility-masked cross-window residency control. The slow controller learns the long-term tradeoff among capacity, migration, and future latency ben-efit, while the deterministic fast token mapper keeps per-window replica selection explainable, low-overhead, and routing-correct. Multi-level residency, bounded replica con-trol, and real-time token assignment together reduce the routed-MoE critical path inside full-model execution. The controller is trained offline with simulator-generated transitions and the same-window counterfactual reward above. Evaluation uses a frozen masked Double-DQN checkpoint. The legal action mask enforces replica-count, residency-budget, bank-capacity, and migration-path constraints, and the runtime applies at most one legal residency update per decision window. 
+
+## 7. Experimental Evaluation 
+
+7.1. Experimental Setup 
+
+We evaluate HCRMap using LEGOSim [19], a hetero-geneous multi-chiplet event-level simulator. HCRMap and 
+
+Algorithm 1: HCRMap Online Residency Control with a Frozen Masked Double DQN                                                                                                     
+
+> Input: Routed token groups 𝑤 ; previous directory 𝑤 −1 ;previous replicas 𝑤 −1 ; previous placement 𝜙 𝑤 −1 ;frozen Q-network 𝑄 𝜃 .
+> Output: Current directory 𝑤 ; replicas 𝑤 ; placement 𝜙 𝑤 ;token assignment 𝑥 𝑤 .
+> 1for each decision window 𝑤 do
+> 2Compute expert demand 𝑑 𝑙,𝑒 (𝑤 )←∑𝑔 ∈𝑙 (𝑤 )∶ 𝑒 𝑔 =𝑒 𝑁 𝑔 ;
+> 3Update smoothed demand ̄𝑑 𝑙,𝑒 (𝑤 )←𝛼̄𝑑 𝑙,𝑒 (𝑤 − 1) + (1 − 𝛼 )𝑑 𝑙,𝑒 (𝑤 );
+> 4Collect pressure state
+> 𝑃 𝑤 ←(𝑃 load
+> 𝑤 , 𝑃 link
+> 𝑤 , 𝑃 bank
+> 𝑤 , 𝑃 tier
+> 𝑤 , 𝑃 mig
+> 𝑤 );
+> 5Build state
+> 𝑠 𝑤 ←[̄𝑑 𝑙,𝑒 (𝑤 ), 𝜎 𝑙,𝑒 (𝑤 ), 𝐻 src
+> 𝑙,𝑒 (𝑤 ),𝑤 −1 , 𝑃 𝑤 , 𝐴𝑔𝑒 𝑤 , 𝐵 𝑤 ];
+> 6Generate candidate expert set 𝑤 from persistent hot experts, SRAM-overflow warm experts, and stale replicas;
+> 7Initialize action set 𝑤 ←{no -op} ;
+> 8for each 𝑒 ∈𝑤 and each (𝑡, 𝑐 ) ∈ Ω 𝑒 (𝑤 )do
+> 9Add promote( 𝑒, 𝑡, 𝑐 ),retain( 𝑒, 𝑡, 𝑐 ),demote( 𝑒, 𝑡, 𝑐 ), and
+> evict( 𝑒, 𝑡, 𝑐 )to 𝑤 ;
+> 10 legal
+> 𝑤 ←{𝑎 ∈𝑤 ∣
+> 𝐶 rep (𝑎 ) ∧ 𝐶 budget (𝑎 ) ∧ 𝐶 bank (𝑎 ) ∧ 𝐶 mig (𝑎 )} ;
+> 11 𝑎 𝑤 ←arg max 𝑎 ∈legal
+> 𝑤
+> 𝑄 𝜃 (𝑠 𝑤 , 𝑎 );
+> 12 (Pnd 𝑤 ,MigEvents 𝑤 )←
+> ScheduleAction( 𝑎 𝑤 ,𝑤 −1 , 𝜙 𝑤 −1 ,𝑤 −1 );
+> 13 Insert MigEvents 𝑤 into the LEGOSim event graph subject to migration throttling;
+> 14 (𝑤 , 𝜙 𝑤 ,𝑤 )←
+> PublishCompleted(Pnd 𝑤 ,𝑤 −1 , 𝜙 𝑤 −1 ,𝑤 −1 );
+> 15 𝑥 𝑤 ←FastTokenMap( 𝑤 ,𝑤 , 𝑃 𝑤 );
+
+all compared baselines run on the same 3.5D substrate. Each benchmark in Table 2 instantiates an MoE model configuration with layer topology, number of MoE lay-ers, expert count, Top-𝑘 , hidden and intermediate dimen-sions, routing output, and prefill and decode execution shape. Router outputs are collected from model execution and replayed without synthetic popularity generation or skew calibration. The MoE-to-LEGOSim adapter consumes the model-specific routed expert IDs and token-group sizes, and expands each MoE layer into dispatch, queueing, memory access, expert compute, gather, and combine events. All policies use identical per-model routing outputs under the same hardware graph, memory hierarchy, link bandwidths, bank bandwidths, and energy coefficients. Table 1 summarizes the simulation and hardware configuration. We evaluate eight MoE models: DeepSeekMoE-16B, DeepSeek-V2-Lite, DeepSeek-V2, DeepSeek-V3, Mixtral-8x7B, Mixtral-8x22B, DBRX, and Qwen1.5-MoE-A2.7B. The two serving settings are prefill inference with 2048 input tokens and decode inference with 512 active sequence tokens. 
+
+Policy comparison. Hydra, MoEntwine, PIMoE, and HCRMap use the same model configuration, recorded router-output trace, and prefill and decode execution shape. Before system mapping, each routed token group is bound to the expert selected by Top-𝑘 routing and executes on a legal replica of that expert. The policies manage expert placement, replication, migration, offloading, and token-to-replica assignment under the same 3.5D 
+
+Y. Zhang: Preprint submitted to Elsevier Page 11 of 15 Pressure-Aware Residency Mapping for 3.5D MoE 
+
+Algorithm 2: Fast Token Mapping under the Cur-rent Residency Layout 
+
+Input: Routed token groups 𝑤 ; current directory 
+
+𝑤 ; runtime pressure state 𝑃 𝑤 .
+
+Output: Token-to-replica assignment 𝑥 𝑤 .
+
+1 for each routed token group 𝑔 ∈ 𝑤 do 
+
+2 Get the target expert 𝑒 𝑔 and legal replicas 𝑙,𝑒 𝑔 
+
+from 𝑤 ;
+
+3 for each legal replica 𝑟 ∈ 𝑙,𝑒 𝑔 do 
+
+4 Estimate queue pressure 𝐶 queue 
+
+𝑔,𝑟 ;
+
+5 Estimate dispatch/gather path pressure 
+
+𝐶 path 
+
+𝑔,𝑟 ;
+
+6 Estimate backing-bank pressure 𝐶 bank 
+
+𝑔,𝑟 ;
+
+7 Estimate tier-dependent streaming cost 
+
+𝐶 stream 
+
+𝑔,𝑟 ;
+
+8 Compute pressure-proxy cost 
+
+𝐶 tok (𝑔, 𝑟 ) = 𝜔 𝑞 𝐶 queue 
+
+𝑔,𝑟 + 𝜔 𝑝 𝐶 path 
+
+𝑔,𝑟 
+
++ 𝜔 𝑏 𝐶 bank 
+
+𝑔,𝑟 + 𝜔 𝑠 𝐶 stream 
+
+𝑔,𝑟 .
+
+;
+
+9 Assign 𝑔 to the lowest-cost replica 
+
+𝑟 ∗ = arg min 
+
+𝑟 ∈𝑙,𝑒𝑔 
+
+𝐶 tok (𝑔, 𝑟 ).
+
+;
+
+10 Set 𝑥 𝑔,𝑟 ∗ = 1 and 𝑥 𝑔,𝑟 = 0 for all 𝑟 ≠ 𝑟 ∗;
+
+11 Update temporary queue, link, and bank pressure counters; 
+
+12 return 𝑥 𝑤 ;
+
+Table 1 
+
+Simulation and hardware configuration.                         
+
+> Simulation
+> Simulator LEGOSim [19] Model frontend MoE-to-LEGOSim adapter Benchmark unit Complete MoE model configuration Router output Full-model recorded trace
+> Hardware
+> Package 3.5D, UCIe-class D2D [24, 25] Compute chiplets 16 IO/memory chiplets 4Total cores 256 Cores/chiplet 16 Topology 4×4 mesh Frequency 1 GHz
+> Interconnect model
+> Flit size 128 bits D2D bandwidth 256 GB/s per direction; 512 GB/s full-duplex aggregate [24, 25] Intra-chiplet latency Router: 2 cycles; link: 1 cycle Inter-chiplet latency Router: 2 cycles; UCIe-class link target [24, 25] Routing algorithm XY routing Buffer depth 4 flits/router
+> Memory and execution
+> Expert footprint Model-specific expert-weight size SRAM tier 64 MB stacked near-tier budget; 16 banks; 2.0 TB/s; 1.25 pJ/B [26, 27] HBM tier 8 GB HBM2 subsystem; 32 pseudo-channels; 460 GB/s; 31.8 pJ/B [28, 29] DRAM tier 32 GB shared DDR5 tier; 8 DDR5-6400 channels; 409.6 GB/s; 160 pJ/B [27, 30] Memory budget 1.3× resident-copy capacity Residency tiers SRAM hot; HBM warm; DRAM fallback
+
+hardware constraints. Unless otherwise stated, normalized latency uses the single-copy static placement baseline as the denominator within the same model, serving mode, 
+
+Table 2 
+
+Evaluation setup.     
+
+> Benchmarks DBRX-MoE (DBRX) [31]; DeepSeek-V2-Lite (DSV2L) [32]; DeepSeek-V2 (DSV2) [32]; DeepSeek-V3 (DSV3) [33]; DeepSeekMoE-16B (DSM16) [3]; Mixtral-8 ×7B (MX7B) [2]; Mixtral-8 ×22B (MX22B) [34]; Qwen1.5-MoE-A2.7B (Qwen) [35] Prefill 2048 input tokens Decode 512 active tokens Compared policies Hydra; MoEntwine; PIMoE; HCRMap
+
+and routing seed. HCRMap uses the masked feasibility-constrained slow residency controller and latency-aware fast token mapper described in Section 6. Energy and EDP are tracked alongside latency. 
+
+7.2. Overall Results 
+
+Figure 5 reports end-to-end full-model latency for the four expert-management policies across all eight MoE benchmarks. The stacked segments attribute the policy-sensitive portion of the critical path to communication, queueing, memory service, and execution events affected by routed expert management. In the unified LEGOSim simulation, Hydra, MoEntwine, and PIMoE instantiate the same full models on the same 3.5D substrate as HCRMap. Across eight models, HCRMap reduces geometric-mean end-to-end latency by 43.6% and 43.0% over Hydra, 34.5% and 33.1% over MoEntwine, and 46.7% and 46.0% over PIMoE in prefill and decode, respectively. The improvement is consistent across benchmarks. The routed-MoE stage attribution also explains the mechanism: Hydra reduces communication traffic but leaves a large queueing component, MoEntwine reduces part of the queueing pressure but still leaves memory and communication service on the critical path, and PIMoE improves memory service for colder work while the hot-expert queue remains visible. HCRMap is faster because it jointly reduces the dominant queueing and memory-service components through pressure-aware resident mapping and fast token assignment. Bounded additional traffic lowers routed-expert queueing and memory-service contribution on the full-model critical path. Under matched resident-copy capacity, HCRMap reduces geometric-mean end-to-end latency by 24.95% and 23.91% relative to the strongest fixed-replica baseline in prefill and decode, respectively. When improvement is computed per benchmark first and then averaged, HCRMap reduces latency by 19.63% ±2.74% and 19.04% ±3.09%, respectively. The corresponding EDP improves by 19.94% ±2.80% and 19.86% ±3.24%, respectively. 
+
+7.3. Ablation Study 
+
+Figure 6 isolates the pressure signals used by HCRMap. Removing link-pressure awareness increases latency because token assignment and migration can reuse already congested package paths. Removing bank-pressure awareness is harmful when hot or warm replicas compete for the same SRAM/HBM banks. Removing compute-load awareness causes routed tokens to concentrate on source-near but already queued replicas. Removing 
+
+Y. Zhang: Preprint submitted to Elsevier Page 12 of 15 Pressure-Aware Residency Mapping for 3.5D MoE  
+
+> Figure 5: Normalized end-to-end latency across eight MoE models: (a) prefill; (b) decode. Stacked bars show stage-level attribution. Lower is better.
+
+migration-exposure awareness allows useful copies to be created at the wrong time, making migration traffic visible to foreground dispatch, gather, or memory service. The full HCRMap controller uses all four pressure signals and therefore achieves the lowest normalized end-to-end latency. We also run selected component checks under matched resident-copy capacity. Compared with static replicas and simple routing, full HCRMap reduces latency by 24.95% and 23.91% in prefill and decode, respectively. Compared with the no-fast-mapping variant, HCRMap reduces latency by 51.2% and 50.7% in prefill and decode, respectively, because legal copies are selected using live queue, path, bank, and streaming pressure. Compared with the no-HBM-tier variant, HCRMap reduces decode latency by 18.4% and repeated streaming bytes by 44.0%. These checks support the same conclusion as Figure 6: HCRMap’s benefit comes from pressure-aware residency and token assignment, not from extra copy capacity alone. 
+
+7.4. Sensitivity Study 
+
+Figure 7 varies both resident-copy budget and SRAM/HBM capacity. In the budget sweep, moving from one copy to a modest extra-copy budget sharply reduces latency before the benefit saturates. This supports the claim that a small number of useful hot-expert execution slots removes the single-copy queueing bottleneck. In the capacity sweep, reducing SRAM/HBM capacity makes fixed replication increasingly fragile because resident copies become harder to retain without increasing memory pressure. The pressure-aware HCRMap controller avoids harmful promotions when near-tier capacity is scarce.  
+
+> Figure 6: Pressure-signal ablation normalized to full HCRMap: (a) prefill; (b) decode. Lower is better.
+
+Figure 8 compares spatial compute-pressure heatmaps under Hydra, MoEntwine, PIMoE, and HCRMap. All panels use the same 4 × 4 chiplet-grid layout and the same color scale, with the colorbar reporting normalized compute load. The first three policies form localized hot spots in different   
+
+> Y. Zhang: Preprint submitted to Elsevier Page 13 of 15
+
+Pressure-Aware Residency Mapping for 3.5D MoE 
+
+Figure 7: Sensitivity study: (a) resident-copy budget; (b) SRAM/HBM-capacity scale. Lower is better. 
+
+Figure 8: Spatial compute-pressure heatmaps: (a) Hydra; (b) MoEntwine; (c) PIMoE; (d) HCRMap. 
+
+grid regions, whereas HCRMap produces a smoother and less concentrated pressure distribution. 
+
+7.5. Metadata Footprint 
+
+After the performance, ablation, and sensitivity studies, we quantify the metadata footprint needed to support the evaluated runs. 
+
+Metadata footprint. Directory entries, version state, pressure counters, and pending migration buffers are mod-eled as accelerator metadata and are included in the capacity reservation term 𝑀 𝑡,𝑐,𝑏 in Equation (1). Directory entries are bounded at 64 B per replica, directory storage stays below 2 MB for the largest evaluated directory, pressure counters require less than 4 KB, and at most one replica is moved per decision window with the pending migration region bounded by one model-specific expert object and 𝑈 max = 1 .
+
+## 8. Conclusion 
+
+This paper identifies hot-expert residency as a central runtime control problem in 3.5D MoE serving. Dynamic routing creates hot experts whose weights, token traffic, compute queues, and memory-bank pressure interact across the package. HCRMap introduces a multi-level hot-expert residency substrate and a two-timescale pressure-aware mapper that jointly controls cross-tier promotion/demotion and token assignment in the routed MoE-FFN path. LEGOSim evaluation shows that reducing routed-expert queueing, memory service, and migration pressure lowers end-to-end MoE inference latency. In the matched-capacity comparison, pressure-aware placement and token assignment reduce normalized end-to-end latency by 24.95% and 23.91% in prefill and decode, respectively, and improve EDP by 19.94% and 19.86%. In the unified LEGOSim comparison against reproduced Hydra, MoEntwine, and PIMoE baselines on the same 3.5D substrate, HCRMap reduces end-to-end latency by 34.5% and 33.1% in prefill and decode, respectively, showing the combined value of bounded multi-level residency and pressure-aware token assignment. 
+
+## CRediT authorship contribution statement 
+
+Yongqin Zhang: Writing – original draft, Visualization, Software, Methodology, Investigation, Conceptualization, Writing – review & editing, Supervision. 
+
+## Declaration of competing interest 
+
+The author declares that there are no known competing financial interests or personal relationships that could have appeared to influence the work reported in this paper. 
+
+## Data availability 
+
+No data was used for the research described in the article. 
+
+## References                
+
+> [1] W. Fedus, B. Zoph, N. Shazeer, Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity, Journal of Machine Learning Research 23 (120) (2022) 1–39. [2] A. Q. Jiang, et al., Mixtral of experts (2024). arXiv:2401.04088 .[3] D. Dai, et al., DeepSeekMoE: Towards ultimate expert specialization in mixture-of-experts language models (2024). arXiv:2401.06066 .[4] A. Yang, et al., Qwen3 technical report (2025). arXiv:2505.09388 .[5] C. Hwang, W. Cui, Y. Xiong, Z. Yang, Z. Liu, H. Hu, Z. Wang, R. Salas, J. Jose, P. Ram, J. Chau, P. Cheng, F. Yang, M. Zhou, Y. Xiong, Tutel: Adaptive mixture-of-experts at scale, in: Proceedings of Machine Learning and Systems, 2023, pp. 1–19. [6] S. He, H. Zhu, J. Zheng, L. Wu, B. Jiao, Q. Liu, X. Zeng, C. Chen, Hydra: Harnessing expert popularity for efficient mixture-of-expert inference on chiplet system, in: Proceedings of the Design Automation Conference, 2025. [7] Q. Zhu, X. Ye, Y. Liu, H. Ouyang, C. Song, PROBE: Co-balancing computation and communication in MoE inference via real-time predictive prefetching (2026). arXiv:2602.00509 .[8] X. Wei, C. Jin, T. Dai, Y. Zhong, S. Yu, C. Yang, B. Wu, Z. Zhang, J. Mai, Q. Zhu, Z. Li, Y. Liu, G. Luo, UltraEP: Unleash MoE training and inference on rack-scale nodes with near-optimal load balancing (2026). arXiv:2606.04101 .[9] Q. Wang, Z. Zhang, S. Li, H. Zheng, Z. Liang, Y. Lin, R. Wang, R. Huang, LaMoSys3.5D: Enabling 3.5D-IC-based large language model inference serving systems via hardware/software co-design (2025). arXiv:2512.08731 .
+
+Y. Zhang: Preprint submitted to Elsevier Page 14 of 15 Pressure-Aware Residency Mapping for 3.5D MoE 
+
+[10] S. Luo, H. Ye, P. Li, J. Qin, J. Peng, Y. Zhao, Y. Cao, T. Chen, Mozart: Modularized and efficient MoE training on 3.5D wafer-scale chiplet architectures, in: Advances in Neural Information Processing Systems, 2025. [11] S. Ma, H. Li, W. Zhang, Y. Tan, P. Dong, Y. Liu, L. Liu, Y. Jiao, X. Liu, L. Liang, K.-T. Cheng, Expert streaming: Accelerating low-batch MoE inference via multi-chiplet architecture and dynamic expert trajectory scheduling (2026). arXiv:2603.27624 .[12] A. Zhao, Z. Cai, Z. Song, L. Yu, H. Fan, J. Wu, Y. Wang, N. Vijayku-mar, CRAFT: Fine-grained cost-aware expert replication for efficient mixture-of-experts serving (2026). arXiv:2603.28768 .[13] Y. Han, L. Pan, J. Peng, Z. Tao, H. Zhu, W. Zhang, Y. Zhang, GRACE-MoE: Grouping and replication with locality-aware routing for efficient distributed MoE inference (2025). arXiv:2509.25041 .[14] H. Yu, X. Cui, H. Zhang, H. Wang, H. Wang, Taming latency-memory trade-off in moe-based llm serving via fine-grained expert offloading, in: Proceedings of the 21st European Conference on Computer Sys-tems, 2026. doi:10.1145/3767295.3769319 .[15] K. Li, W. Huang, Q. Wang, L. Zheng, X. Liao, H. Jin, J. Xue, Diff-moe: Efficient batched moe inference with priority-driven differential expert caching, in: Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis, 2025. doi:10.1145/3712285.3759903 .[16] T. Kim, K. Choi, Y. Cho, J. Cho, H.-J. Lee, J. Sim, Monde: Mixture of near-data experts for large-scale sparse models, in: Proceedings of the Design Automation Conference, 2024. [17] X. Tang, J. Hou, D. Jiang, T. Wei, J. Liu, J. Deng, H. Wang, Q. Yang, H. Shang, C. Li, Y. Hu, S. Yin, MoEntwine: Unleashing the potential of wafer-scale chips for large-scale expert parallel inference, in: Pro-ceedings of the IEEE International Symposium on High-Performance Computer Architecture, 2026. [18] L. Wu, H. Zhu, S. He, X. Lin, X. Zeng, C. Chen, PIMoE: Towards efficient MoE transformer deployment on NPU-PIM system through throttle-aware task offloading, in: Proceedings of the Design Automa-tion Conference, 2025. [19] T. Lin, C. Qiu, X. Wang, L. Wang, Z. Zheng, Y. Jiang, A. K. Singh, J. Yin, S. Qiu, X. Li, X. Tang, J. Song, M. Zhang, K. Ren, Legosim: A unified parallel simulation framework for multi-chiplet heterogeneous integration, in: Proceedings of the 58th IEEE/ACM International Symposium on Microarchitecture, MICRO ’25, Association for Com-puting Machinery, New York, NY, USA, 2025, pp. 1347–1362. doi: 10.1145/3725843.3756068 .URL https://doi.org/10.1145/3725843.3756068 
+
+[20] NVIDIA, Scaling expert parallelism in TensorRT-LLM: Performance status and optimization, TensorRT-LLM documentation. Accessed: 2026-07-05 (2026). URL https://nvidia.github.io/TensorRT-LLM/blogs/tech_blog/blog0 8_Scaling_Expert_Parallelism_in_TensorRT-LLM_part2.html 
+
+[21] T. He, A Time Scaling Theory for Multi-Layer Electronic Systems, ChinaXiv:202605.00224 (May 2026). [22] P. Petoumenos, L. Mukhanov, Z. Wang, H. Leather, D. S. Nikolopou-los, Power capping: What works, what does not, in: 2015 IEEE 21st International Conference on Parallel and Distributed Systems (ICPADS), 2015, pp. 525–534. doi:10.1109/ICPADS.2015.72 .[23] A. Haidar, H. Jagode, P. Vaccaro, A. YarKhan, S. Tomov, J. Don-garra, Investigating power capping toward energy-efficient scientific applications, Concurrency and Computation: Practice and Experience (2018). doi:10.1002/cpe.4485 .[24] Universal Chiplet Interconnect Express Consortium, UCIe: Overview and usage models, Hot Chips 2023 Tutorial, includes UCIe data-rate, per-module bandwidth, latency, and energy-efficiency targets. Accessed: 2026-06-30 (2023). URL https://hc2023.hotchips.org/assets/program/tutorials/ucie/ UCIe%20overview%20and%20usage%20models.pdf 
+
+[25] Universal Chiplet Interconnect Express Consortium, UCIe specifica-tions, specification portal for UCIe revisions and supported data rates. Accessed: 2026-06-30 (2026). URL https://www.uciexpress.org/specifications 
+
+[26] J. Wuu, R. Agarwal, M. Ciraula, C. Dietz, B. Johnson, D. Johnson, R. Schreiber, R. Swaminathan, W. Walker, S. Naffziger, 3D V-Cache: The implementation of a hybrid-bonded 64MB stacked cache for a 7nm x86-64 CPU, in: 2022 IEEE International Solid-State Circuits Conference (ISSCC), Vol. 65, IEEE, 2022, pp. 428–429. doi:10.110 9/ISSCC42614.2022.9731565 .[27] M. Horowitz, 1.1 computing’s energy problem (and what we can do about it), in: 2014 IEEE International Solid-State Circuits Conference Digest of Technical Papers (ISSCC), Vol. 57, IEEE, 2014, pp. 10–14. 
+
+> doi:10.1109/ISSCC.2014.6757323
+
+.[28] Advanced Micro Devices, Inc., Alveo U280 Data Center Accelerator Card User Guide, uG1314, Revision 1.1. Documents the U280 HBM2 subsystem with 8 GB capacity and 460 GB/s bandwidth. Accessed: 2026-06-30 (2023). URL https://docs.amd.com/r/en-US/ug1314-alveo-u280-reconfig-a ccel 
+
+[29] M. O’Connor, N. Chatterjee, D. Lee, J. Wilson, A. Agrawal, S. W. Keckler, W. J. Dally, Fine-grained DRAM: Energy-efficient DRAM for extreme bandwidth systems, in: Proceedings of the 50th An-nual IEEE/ACM International Symposium on Microarchitecture (MICRO-50), Association for Computing Machinery, New York, NY, USA, 2017, pp. 41–54. doi:10.1145/3123939.3124545 .[30] Micron Technology, Inc., DDR5 SDRAM Core Product Data Sheet, used for DDR5 data-rate and bandwidth parameters. Accessed: 2026-06-30 (2024). URL https://static6.arrow.com/aropdfconversion/fc2b144ccf06116 0504edd742d01cb58fdda91bb/ddr5_sdram_core.pdf 
+
+[31] Databricks, Introducing DBRX: A new state-of-the-art open LLM, accessed: 2026-07-05 (2024). URL https://www.databricks.com/blog/introducing-dbrx-new-state -art-open-llm 
+
+[32] DeepSeek-AI, DeepSeek-V2: A strong, economical, and efficient mixture-of-experts language model (2024). arXiv:2405.04434 .[33] DeepSeek-AI, DeepSeek-V3 technical report (2024). arXiv:2412.194 37 .[34] Mistral AI, Cheaper, better, faster, stronger: Mixtral 8x22B, accessed: 2026-07-05 (2024). URL https://mistral.ai/news/mixtral-8x22b 
+
+[35] Qwen Team, Qwen1.5-MoE-A2.7B, accessed: 2026-07-05 (2024). URL https://huggingface.co/Qwen/Qwen1.5-MoE-A2.7B 
+
+Y. Zhang: Preprint submitted to Elsevier Page 15 of 15
