@@ -6,32 +6,26 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-15
-- 运行时间：2026-07-15 21:34:08 UTC
+- 最新运行日期：2026-07-16
+- 运行时间：2026-07-16 21:27:01 UTC
 - 运行状态：成功
-- 本次总论文数：4
-- 精读区：3
+- 本次总论文数：2
+- 精读区：1
 - 速读区：1
 
 ### 今日简报（AI）
-今日精读两篇MoE相关高分论文，聚焦芯片推理映射与解码加速。最值得关注的是压力感知映射与成本感知投机解码两大方向。建议深入阅读这两篇9分论文，它们对提升MoE模型实际部署效率有直接指导意义。
-- 详情：[/202607/15/README](/202607/15/README)
+今日精读1篇高分论文《Discovering Heterogeneous Neurodegenerative Disease Patterns From MRI Data for Improved Prediction》，速读《Multi-Expert Routing for Multi-Domain Low-Resource OCR: A Manchu Case Study》。精读论文提出从MRI中发现异质性神经退行性疾病模式以提升预测准确率，速读论文则聚焦多领域低资源OCR专家路由方法。建议优先深入精读论文的疾病模式发现机制。
+- 详情：[/202607/16/README](/202607/16/README)
 
 ### 精读区论文标签
-1. [HCRMap: Pressure-Aware Hot-Expert Residency Mapping for 3.5D MoE Chiplet Inference](/202607/15/2607.11586v1-hcrmap-pressure-aware-hot-expert-residency-mapping-for-35d-moe-chiplet-inference)  
+1. [Discovering Heterogeneous Neurodegenerative Disease Patterns From MRI Data for Improved Prediction](/202607/16/biorxiv-10-64898-2026-07-10-737869-v1-discovering-heterogeneous-neurodegenerative-disease-patterns-from-mri-data-for-improved-prediction)  
    标签：评分：9.0/10、query:moe-special
-   evidence：HCRMap针对MoE推理中的热专家偏斜问题，通过动态专家复制实现专业化管理
-2. [Less Experts, Faster Decoding: Cost-Aware Speculative Decoding for Mixture-of-Experts](/202607/15/2607.12696v1-less-experts-faster-decoding-cost-aware-speculative-decoding-for-mixture-of-experts)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：MoE专家散射问题源于路由；提出成本感知的候选选择以减少专家激活开销
-3. [Understanding Structured Health Data through Interaction-Aware Mixture-of-Experts](/202607/15/2607.12255v1-understanding-structured-health-data-through-interaction-aware-mixture-of-experts)  
-   标签：评分：8.0/10、query:moe-special
-   evidence：使用混合专家模型并通过路由归因分析健康数据
+   evidence：提出包含路由器的混合专家框架用于亚型识别
 
 ### 速读区论文标签
-1. [Are we Merging the Right Models? Impact of Expert Training Duration on Model Merging for LLMs](/202607/15/2607.11997v1-are-we-merging-the-right-models-impact-of-expert-training-duration-on-model-merging-for-llms)  
-   标签：评分：6.0/10、query:moe-special
-   evidence：研究专家训练时长对LLM模型合并的影响
+1. [Multi-Expert Routing for Multi-Domain Low-Resource OCR: A Manchu Case Study](/202607/16/2607.14041v1-multi-expert-routing-for-multi-domain-low-resource-ocr-a-manchu-case-study)  
+   标签：评分：7.0/10、query:moe-special
+   evidence：多专家路由系统，通过页面级分类器分配
 
 
 <div class="dpr-home-promo-card">
