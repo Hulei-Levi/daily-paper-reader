@@ -6,28 +6,24 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-17
-- 运行时间：2026-07-17 21:11:25 UTC
+- 最新运行日期：2026-07-18
+- 运行时间：2026-07-18 20:51:05 UTC
 - 运行状态：成功
 - 本次总论文数：1
 - 精读区：0
 - 速读区：1
 
 ### 今日简报（AI）
-今天阅读了一篇关于生物持续预训练如何重塑基础模型能力分布且不导致灾难性遗忘的研究。
-
-该工作发现生物领域持续预训练可调整模型能力轮廓，同时保持原有知识不丢失。
-
-建议读者关注该预训练策略在跨领域模型微调中的迁移潜力。
-- 详情：[/202607/17/README](/202607/17/README)
+今日速读《EmoStyle》，一篇利用情感条件控制风格专家生成情绪化图像的论文。核心方向：通过专家模型将特定情绪（如快乐、悲伤）编码为图像风格，实现情感驱动的图像生成。建议对情感AI或图像风格迁移感兴趣的读者关注其“情绪-风格映射”方法，未来或可应用于社交媒体滤镜或艺术创作。
+- 详情：[/202607/18/README](/202607/18/README)
 
 ### 精读区论文标签
 - 本次无精读推荐。
 
 ### 速读区论文标签
-1. [Biological Continued Pretraining Reshapes the Capability Profile of a Foundation Model Without Catastrophic Forgetting](/202607/17/biorxiv-10-64898-2026-07-06-736700-v1-biological-continued-pretraining-reshapes-the-capability-profile-of-a-foundation-model-without-catastrophic-forgetting)  
-   标签：评分：7.0/10、query:moe-special
-   evidence：使用26B参数的MoE模型（Gemma-4-26B-A4B）研究继续预训练对能力的影响。
+1. [EmoStyle: Affective Conditioning of Style-Specialist Experts for Emotional Image Generation](/202607/18/2607.10165v1-emostyle-affective-conditioning-of-style-specialist-experts-for-emotional-image-generation)  
+   标签：评分：6.0/10、query:moe-special
+   evidence：使用风格专家进行情感条件控制
 
 
 <div class="dpr-home-promo-card">
