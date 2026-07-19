@@ -6,24 +6,26 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-18
-- 运行时间：2026-07-18 20:51:05 UTC
+- 最新运行日期：2026-07-19
+- 运行时间：2026-07-19 20:30:17 UTC
 - 运行状态：成功
-- 本次总论文数：1
-- 精读区：0
+- 本次总论文数：2
+- 精读区：1
 - 速读区：1
 
 ### 今日简报（AI）
-今日速读《EmoStyle》，一篇利用情感条件控制风格专家生成情绪化图像的论文。核心方向：通过专家模型将特定情绪（如快乐、悲伤）编码为图像风格，实现情感驱动的图像生成。建议对情感AI或图像风格迁移感兴趣的读者关注其“情绪-风格映射”方法，未来或可应用于社交媒体滤镜或艺术创作。
-- 详情：[/202607/18/README](/202607/18/README)
+今日收录2篇，精读1篇《MixCompress: Mixture of Experts for Variable Rate Learned Image Compression》（8.0分），速读1篇《Structural Composition Enables Very Fast Learning》（7.0分）。重点关注基于混合专家模型的变速率图像压缩技术，为高效压缩提供新思路。建议普通读者优先精读图像压缩论文，速读快速学习论文可作为补充了解。
+- 详情：[/202607/19/README](/202607/19/README)
 
 ### 精读区论文标签
-- 本次无精读推荐。
+1. [MixCompress: Mixture of Experts for Variable Rate Learned Image Compression](/202607/19/2607.14334v1-mixcompress-mixture-of-experts-for-variable-rate-learned-image-compression)  
+   标签：评分：8.0/10、query:moe-special
+   evidence：MixCompress使用混合专家模型进行变速率图像压缩
 
 ### 速读区论文标签
-1. [EmoStyle: Affective Conditioning of Style-Specialist Experts for Emotional Image Generation](/202607/18/2607.10165v1-emostyle-affective-conditioning-of-style-specialist-experts-for-emotional-image-generation)  
-   标签：评分：6.0/10、query:moe-special
-   evidence：使用风格专家进行情感条件控制
+1. [Structural Composition Enables Very Fast Learning](/202607/19/biorxiv-10-64898-2026-07-14-738142-v1-structural-composition-enables-very-fast-learning)  
+   标签：评分：7.0/10、query:moe-special
+   evidence：模块组合实现快速学习，与MoE中的专家专业化相关
 
 
 <div class="dpr-home-promo-card">
