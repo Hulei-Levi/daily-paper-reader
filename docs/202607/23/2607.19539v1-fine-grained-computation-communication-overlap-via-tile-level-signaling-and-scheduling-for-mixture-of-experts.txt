@@ -1,0 +1,578 @@
+Title: Fine-grained Computation-Communication Overlap via Tile-level Signaling and Scheduling for Mixture-of-Experts
+
+URL Source: https://arxiv.org/pdf/2607.19539v1
+
+Published Time: Thu, 23 Jul 2026 00:10:15 GMT
+
+Number of Pages: 11
+
+Markdown Content:
+# Fine-grained Computation-Communication Overlap via Tile-level Signaling and Scheduling for Mixture-of-Experts 
+
+# Minyu Cui 
+
+Linnaeus University Växjö, Sweden minyu.cui@lnu.se 
+
+# Anna Wingkvist 
+
+Linnaeus University Växjö, Sweden anna.wingkvist@lnu.se 
+
+# Morgan Ericsson 
+
+Linnaeus University Växjö, Sweden morgan.ericsson@lnu.se 
+
+## Abstract 
+
+Mixture-of-Experts (MoE) architectures increase model capacity without proportionally increasing computation cost and have be-come a key building block for scaling large language models (LLMs) to trillion-parameter regimes. Efficient deployment of these MoE models relies on distributed execution across multiple GPUs, where each MoE layer involves two all-to-all communications: dispatch-ing tokens to expert ranks and returning the expert outputs to their source ranks. Conventional MoE implementations launch this return all-to-all after expert compute completes, exposing commu-nication latency on the critical path and reducing GPU utilization. We present a fine-grained approach that overlaps expert compute with the second all-to-all via tile-level signaling and scheduling. Our producer-consumer co-design combines: (1) a persistent per-rank computation kernel (producer) that covers all local experts on the rank to eliminate repeated kernel launch overhead and prioritizes remote-critical tiles, and (2) a persistent communica-tion kernel (consumer) on a small dedicated partition of streaming multiprocessors (SMs) that issues segment-granular transfers as tiles become ready. Our co-design avoids intrusive changes to the underlying computation operators or communication primitives, making it practical for improving distributed MoE execution effi-ciency on multi-GPU systems. On a 4-A100 GPU platform, evaluated on three MoE models against four state-of-the-art MoE systems, our approach achieves up to 2.64x end-to-end speedup and 2.74x MoE-layer speedup. Compared with a conventional non-overlap baseline, our approach consistently improves both operator- and MoE-layer-level performance across varying GEMM shapes, router modes, and a broad range of producer/consumer SM partitions, while preserving correctness. 
+
+## CCS Concepts 
+
+• Computing methodologies → Parallel algorithms .
+
+## Keywords 
+
+Distributed machine learning, MoE, Compute–communication over-lap, Multi-GPU systems, GPU resource utilization 
+
+ACM Reference Format: 
+
+Minyu Cui, Anna Wingkvist, and Morgan Ericsson. 2026. Fine-grained Computation-Communication Overlap via Tile-level Signaling and Sched-uling for Mixture-of-Experts. In Proceedings of the 55th International Con-ference on Parallel Processing (ICPP ’26), September 28-October 01, 2026, Sin-gapore, Singapore. ACM, New York, NY, USA, 11 pages. https://doi.org/10. 1145/3832810.3832907 
+
+## 1 Introduction 
+
+The computational demands of modern machine learning (ML) models are increasing rapidly, driven by growing model sizes, longer sequence lengths, and the rise of multimodal models. Recent large language models have grown from billions to trillions of parameters in just a few years [ 6, 13 ]. In dense transformer blocks, each token is processed by the same dense computation path, so per-token compute scales with model size. As models continue to grow, this coupling between model capacity and active per-token compute is becoming a primary scalability bottleneck. The pressure to scale model capacity without proportionally increasing active computation has motivated sparse MoE architec-tures. The MoE layers route each token to only a subset of experts, thereby increasing model capacity while limiting the computa-tion performed per token. However, in distributed MoE execution, the experts are typically partitioned across GPUs through expert parallelism, and token routing introduces substantial all-to-all com-munication overhead, accounting for nearly half of total execution time [ 27 ]. This problem is further amplified by hardware trends: GPU compute throughput has scaled much faster than interconnect bandwidth across recent generations, causing accelerators to spend an increasing fraction of time idle during communication phase. A natural way to mitigate this communication overhead is to overlap communication with the dependent computation. Several decomposition-based methods [ 2, 10 , 11 , 20 , 24 , 26 ] split collec-tives and surrounding GEneral Matrix Multiplications (GEMMs) into chunks and pipeline them, typically in separate streams. MoE-specific systems [ 7 , 9 , 20 – 22 , 28 ] apply the similar idea along the token dimension, pipelining experts compute with all-to-all com-munication. These coarse-grained overlap methods are straight-forward to implement in existing frameworks, but they often do not fully exploit tensor-core efficiency at small chunk sizes and incur non-trivial host-side synchronization costs between chunks. In addition, collective APIs from GPU communication libraries such as NCCL usually require contiguous-buffer, so the decom-position is often limited to a single tensor dimension and the re-sulting chunks tend to be misaligned with the GEMM tile struc-ture. As a result, tile-level overlap is hard to achieve through de-composition alone. Another major bottleneck is the overhead of host-side kernel launches. Kernel-fusion methods [ 1, 19 , 25 , 27 ]instead fuse computation and communication into a single kernel, thereby eliminating both host-side orchestration [ 19 ] and redun-dant kernel launches [ 1 ]. These solutions universally improve over-lap efficiency, but typically require intrusive engineering, including custom barriers, inter-rank atomic protocols, and per-target ker-nel specialization. Recent studies [ 8, 18 ] use tile-level signaling to initiate communication from completed GEMM output regions, arXiv:2607.19539v1 [cs.DC] 21 Jul 2026 ICPP ’26, September 28-October 01, 2026, Singapore, Singapore Minyu Cui, Anna Wingkvist, and Morgan Ericsson 
+
+enabling finer-grained computation-communication overlap. Our design adopts this signaling principle while keeping compute and communication kernels separate. In this paper, we target distributed MoE inference and present a method that achieves fine-grained overlap by coordinating GEMM (producer) and communication (consumer) kernels through tile-level device-resident signals. Accordingly, our design and evalua-tion cover forward-pass execution only. Supporting the backward pass for training is left for future work. The producer raises a signal when a tile completes, and the consumer issues a segment-granular transfer for one or more row bands (a row band is a contiguous strip of output rows spanning the full output width, defined in Section 3.2.1, illustrated in Figure 3b) as soon as the corresponding tiles are ready, without host-side synchronization. Compared with decomposition-based methods, this design preserves tensor-core efficiency and incurs neither inter-chunk synchronization nor the kernel-launch overhead of chunked execution. It also avoids the implementation complexity of fusion-based approaches. Concretely, we launch both kernels as persistent kernels on disjoint SM parti-tions: a tunable share of SMs is dedicated to the communication kernel, while the remaining SMs run the GEMM. This partition gives each kernel interference-free compute resources, while per-sistent kernels and device-resident signals keep host and barrier synchronization off the critical path. Realizing this design for the return path of an MoE layer, i.e., the expert output projection fol-lowed by the second all-to-all communication, is more challenging than for static communication patterns used in tensor parallelism. The difficulty arises because each expert output row must return to the rank that originally held its input token, and this row-to-rank mapping is determined at runtime. Our key advance is a remote-owner-aligned row layout that aligns every output tile with a single destination rank, so the consumer issues one contiguous remote write per segment, i.e., row band(s), without per-row routing logic inside the communication kernel [8]. In summary, this paper makes the following contributions: 
+
+• Fine-grained computation–communication overlap for MoE return path. We propose a signaling-based, fine-grained overlap mechanism for the return path of distributed MoE layers. The GEMM and communication kernels run as per-sistent kernels on disjoint SM partitions, with the consumer assigned to a small, tunable subset of SMs. The two kernels coordinate through tile-level device-resident signals. As soon as all tiles in a segment are signaled complete, the consumer issues that segment as one remote write, minimizing the gap between data production and transfer. 
+
+• Communication-aware remote-owner-aligned row lay-out. We apply a remote-owner-aligned row layout that maps every output tile to a single destination rank. This layout allows the producer to prioritize tiles on the remote critical path and enables the consumer to issue each segment as one contiguous remote write. 
+
+• Rank-wide GEMM kernel. A single persistent producer kernel per rank covers all local experts, eliminating repeated kernel-launch overhead and amortizing scheduling cost across the full set of GEMM tiles. 
+
+• Evaluation across MoE models and configurations. We conduct a comprehensive evaluation across three MoE mod-els, three routing distributions, varied GEMM shapes, and a broad range producer/consumer SM partitions, with operator-, MoE-layer-, and end-to-end speedup analysis, SM-partition contention study, and correctness validation. The paper is organized as follows. Section 2 reviews distributed MoE, GEMM tile signaling, and device-initiated communication. Section 3 presents our producer-consumer co-design. Section 4 eval-uates our approach. Section 5 discusses related work, and Section 6 concludes this paper. 
+
+## 2 Background 2.1 Mixture-of-Experts Architectures 
+
+In transformer-based models, an MoE layer replaces the standard feed-forward network (FFN) with multiple sub-layers (known as 
+
+experts ) and a gating (router) network [ 12 ]. For each token, the router selects the 𝑡𝑜𝑝𝑘 experts via a probability distribution, and the layer output is the gate-weighted sum of their outputs. Because only a few experts run per token, the active compute is much smaller than that of a dense feed-forward network with the same parameter count. This sparsity is the property that lets MoE scale model capacity without proportionally scaling compute cost. In distributed settings, experts are distributed across GPUs (or ranks). A forward pass through the MoE layer requires: (1) Routing: Each rank evaluates the gating function on its local tokens to produce per-token expert assignments and gate weights. (2) First all-to-all (dispatch): Tokens are dispatched to the ranks hosting their assigned experts. (3) Expert computation: Each rank executes the expert com-putations for its local experts on the received tokens. (4) Second all-to-all (combine): Expert outputs are returned to each token’s original rank after expert compute. (5) Weighted reduction (scale): The owner rank scales its per-token output as a gate-weighted sum of the returned expert outputs. The two all-to-all operations are the primary communication bot-tleneck [ 4 ]. This paper focuses on overlapping expert compute with the second all-to-all. 
+
+## 2.2 GEMM Kernels and Epilogue Signaling 
+
+General matrix multiplication (GEMM), formulated as 𝐶 𝑀 ×𝑁 =
+
+𝐴 𝑀 ×𝐾 × 𝐵 𝐾 ×𝑁 , is the dominant computational operation in mod-ern neural networks. Modern GPU GEMM kernels decompose the output matrix into rectangular output tiles. A thread block, or cooperative thread array (CTA), typically computes one output tile at a time. It iterates along 𝐾 dimension, with its warps using tensor-core instructions to perform matrix multiply-accumulate operations, and accumulate partial sums in registers. After the re-duction is complete, the final results are written to global memory. This tile structure is central to GPU GEMM performance. It reveals parallelism across the output matrix, improves data reuse through shared memory and registers, and provides a natural unit of sched-uling. Crucially for our work, it also provides a natural granularity Fine-grained Computation-Communication Overlap for Mixture-of-Experts ICPP ’26, September 28-October 01, 2026, Singapore, Singapore 
+
+Figure 1: Overview of our design for the MoE layer. 
+
+for producer-consumer coordination. Because CTAs are scheduled independently, individual output tiles become ready before the full GEMM completes, allowing downstream work to consume ready tiles without waiting for the entire kernel to finish. Libraries, such as CUTLASS, enable the tiled structure through templates, including tile shape, memory layout, pipeline depth, and epilogue operator. A GEMM kernel consists of a main loop, per-forming the repeated tensor-core multiply-accumulate operations, followed by an epilogue. The epilogue performs output conver-sion, optional element-wise operations, and the final store of each completed tile. Since this store is where the tile becomes visible in memory, the epilogue is the natural place to publish a tile-level completion signal. With epilogue signaling, the producer sets a device-resident flag after storing each tile, and a consumer kernel can poll these flags to process ready tiles while other GEMM tiles are still being computed. The overhead is a small, fixed number of additional instructions per tile and does not perturb the main loop. Tile-level signaling therefore enables fine-grained producer-consumer coordination entirely on the GPU, withou host-side syn-chronization. This mechanism forms the basis of our design. 
+
+## 2.3 Device-Initiated Communication 
+
+Distributed GPU workloads increasingly rely on device-initiated communication: transfers issued from inside a CUDA kernel rather than launched from the host. Libraries such as NVSHMEM expose one-sided put/get APIs over a symmetric heap, so that a kernel on one rank can write directly into symmetric GPU memory of another rank. This makes it possible to implement the all-to-all of an MoE layer as a single CUDA kernel that issues remote writes of tiles, rather than a chain of host-driven collective calls. We use this primitive to implement the second all-to-all of the MoE return path as a single consumer kernel driven by the per-tile signals. 
+
+## 2.4 Concurrent Kernels and SM Partitioning 
+
+CUDA streams allow multiple kernels to execute concurrently. How-ever, these concurrent kernels share the available SM resources and contend for them by default. Launching each kernel as a persistent kernel (one with a fixed CTA count, where each CTA stays resident on its SM until the kernel exits) lets the two kernels run on disjoint SM subsets, removing this SM-level interference. We use this mech-anism to run the communication consumer on a small SM partition alongside the producer GEMM, detailed in Section 3.3.3. 
+
+## 3 System Design 3.1 Overview 
+
+Figures 1 and 2 illustrate our design of the distributed MoE exe-cution flow to enable fine-grained computation-communication overlap. We focus on the second all-to-all (return communication) after expert compute, which stays on the critical path in conven-tional MoE implementations. Throughout this section, each row in the GEMM input corresponds to one routed token copy ; we use the two terms interchangeably. Our design is built around the following cooperating components: 1 Expert problem construction and combine plan. We impose a “remote tokens first, local tokens last” layout on the rank-wide GEMM input so that remote rows precede local rows and are grouped by destination (dest.) rank, with alignment padding inserted at owner-rank boundaries. We construct a tile schedule that produces remote-bound out-put earliest while minimizing expert transitions. We build a combine plan that pre-resolves all routing-derived transfer metadata into flat, per-tile device-resident arrays. 2 Overlapped execution. On the producer side, each rank launches a single long-lived persistent GEMM kernel that executes all local experts on the rank, and marks each com-pleted output tile as ready through a lightweight signaling epilogue. On the communication side, a persistent consumer kernel runs concurrently on a disjoint subset of SMs, polls for ready data segments, and transfer them to their owner ranks via non-blocking NVSHMEM puts. The two kernels are launched on separate CUDA streams, with the consumer assigned higher priority, and coordinate entirely through device-resident flags with no host involvement on the critical path. We detail each component in the following subsections. 
+
+## 3.2 Expert Problem Construction and Combine Plan 
+
+This phase, depicted by the left box of our work in Figure 1, prepares the input data, the execution order, and the transfer metadata for the rank-wide persistent GEMM kernel. Each expert retains its own 
+
+𝐴 , 𝐵 , and 𝐶 matrices, the rank-wide nature is achieved through a unified tile worklist rather than from matrix concatenation. The following three coupled mechanisms enable this design. 
+
+3.2.1 Remote-owner-aligned Row Layout. Fine-grained overlap is effective only if each completed output tile maps to a single des-tination rank. This is not automatically true, because after the first all-to-all, each local expert’s input rows originate from mul-tiple peer ranks. Without explicit reordering, a single output tile may contain rows assigned to different ranks, breaking the single-destination property required for fine-grained overlap. We impose a remote-owner-aligned row layout on the GEMM input. As shown in Figure 2b, for each local expert, we group rows by their original owner rank and order them such that: (1) Rows destined for remote owner ranks appear first, grouped contiguously by owner rank; (2) Rows destined for the local rank (i.e., tokens that originate on this same rank) appear last; (3) At each owner-rank boundary, if the group’s row count is not a multiple of the tile dimension in 𝑀 (denoted 𝑡𝑏 𝑀 ), we pad the shortfall with zero-filled rows so that the next group starts at a tile-aligned offset. These padded rows participate ICPP ’26, September 28-October 01, 2026, Singapore, Singapore Minyu Cui, Anna Wingkvist, and Morgan Ericsson 
+
+> (a) 4 ranks (R), 2 experts (E) per rank
+> (b) Remote-owner-aligned row layout
+> (c) Rank-wide tile schedule
+> (d) Overlapped GEMM and second all-to-all
+
+Figure 2: Optimization strategies to hide communication. 
+
+in the GEMM computation for correctness but are excluded from the transfer. Figure 2b illustrates this with an example for the row group originally from rank 3, under a 4-rank, 2 experts-per-rank configuration. Padding only affects the trailing rows (those fewer than 𝑡𝑏 𝑀 rows) at each owner-rank boundary that would otherwise leave the next group misaligned. Full 𝑡𝑏 𝑀 -height rows (defined as a row band ,illustrated in Figure 3b) within a group require no padding, and the local row groups require none. With this layout in place, each remote tile carries a statically known destination (dest.) rank, and the lookup from tile index to destination becomes trivial. 
+
+3.2.2 Remote-first Tile Schedule. Given the aligned row layout, we construct a rank-wide tile schedule governed by two rules: (i) all re-mote tiles are produced before any local tiles, because only remote tiles require communication, and (ii) among experts, those with more remote rows are scheduled first, so that the largest transfers enter the communication stage earliest and expert transitions are minimized by completing each expert’s remote tiles contiguously before moving to the next. Figure 2c shows the resulting scheduling for rank 1: expert 3’s remote tiles run first (heavier remote load), followed by expert 2’s remote tiles, and finally all local tiles. This scheduling maximizes the time window between the first transfer-able data segment and the end of the GEMM, giving the consumer the longest possible overlap to drain remote transfers. Algorithm 1 summarizes the construction of the remote-owner-aligned row lay-out and the tile schedule on each rank. 
+
+Algorithm 1 Remote-owner-aligned Row Layout and Remote-first Tile Schedule Construction 
+
+Require: routing; local rank 𝑟 self ; rank count 𝑅 ; Experts per rank 
+
+𝐸 ; tile-M dimension 𝑡𝑏 𝑀 .
+
+Ensure: per-expert row layouts {𝑋 𝑒 , 𝑒 ∈ 𝐸 }; tile schedule 𝑆 .
+
+Remote-owner-aligned Row Layout:  
+
+> 1:
+
+for each local expert 𝑒 do  
+
+> 2:
+
+for each remote rank 𝑟 (𝑟 ∈ { 0, . . . , 𝑅 − 1}, 𝑟 ≠ 𝑟 self ) do  
+
+> 3:
+
+𝐺 𝑟 ← rows from rank 𝑟 routed to 𝑒 . 
+
+> 4:
+
+if (| 𝐺 𝑟 | mod 𝑡𝑏 𝑀 ) ≠ 0 then  
+
+> 5:
+
+pad 𝐺 𝑟 with zero rows up to the next 𝑡𝑏 𝑀 -multiple.  
+
+> 6:
+
+end if  
+
+> 7:
+
+end for  
+
+> 8:
+
+append 𝐺 0, 𝐺 1, . . . , 𝐺 𝑅 −1 (remote first, 𝐺 𝑟 self last) to 𝑋 𝑒 . 
+
+> 9:
+
+end for 
+
+Remote-first Tile Schedule:  
+
+> 10:
+
+sort local experts by remote row-band count in descending order. ⊲ rule (ii)  
+
+> 11:
+
+𝑆 ← [ ]  
+
+> 12:
+
+for each 𝑒 in sorted order do  
+
+> 13:
+
+for each row band 𝑏 in 𝑋 𝑒 with dest. ≠ 𝑟 self do  
+
+> 14:
+
+append tiles of 𝑏 to 𝑆 . ⊲ rule (i): all remote tiles first  
+
+> 15:
+
+end for  
+
+> 16:
+
+end for  
+
+> 17:
+
+for each local expert 𝑒 do  
+
+> 18:
+
+for each row band 𝑏 in 𝑋 𝑒 with dest. = 𝑟 self do  
+
+> 19:
+
+append tiles of 𝑏 to 𝑆 . 
+
+> 20:
+
+end for  
+
+> 21:
+
+end for  
+
+> 22:
+
+return {𝑋 𝑒 , 𝑒 ∈ 𝐸 }; 𝑆 .
+
+3.2.3 Combine Plan. To return each tile to its owner rank, the consumer must know three things: the destination rank, the write offset in the remote receive buffer, and the number of valid (non-padding) rows. Resolving these at transfer time would require the consumer to inspect each tile’s rows and look up their original owner ranks from the routing metadata produced in the gate stage, adding per-row overhead to every transfer. We avoid this cost with a combine plan that walks the row layout described earlier and constructs flat, per-tile device-resident arrays: destination rank, re-mote buffer offset, and valid row count. These arrays are indexed by tile identifier, reducing each tile’s transfer resolution to three array reads. Under the remote-owner-aligned layout, every tile’s valid rows share a single owner rank, so this plan classifies each tile as either remote-publishable (single remote owner rank) or local-only. For each remote-publishable row band, the plan assigns a global write offset in the destination rank’s receive buffer, coordinating placement across all local experts so that data from different ex-perts targeting the same peer rank lands at non-overlapping offsets. Local-only tiles require no remote transfer. 
+
+## 3.3 Overlapped Execution 
+
+This phase, depicted by the right box of our work in Figure 1, runs the producer and the consumer concurrently, as shown in Figure 2d. Fine-grained Computation-Communication Overlap for Mixture-of-Experts ICPP ’26, September 28-October 01, 2026, Singapore, Singapore  
+
+> (a) Bandwidth curve (b) Segment composition
+
+Figure 3: Communication Granularity. (a) Measured band-width varying with data size at two consumer SM budgets. Measurements are collected on the platform described in Section 4.1.1. (b) Segment composition: a transfer segment spans one or more 𝑡𝑏 𝑀 -height row bands across the full out-put width 𝑁 ; first and last segments have one band, middle segments have 𝑥 tunable bands. 
+
+3.3.1 Rank-Wide Persistent GEMM Kernel with Tile-Level Signaling. 
+
+Rather than launching one GEMM kernel per expert, the producer is a single persistent GEMM kernel per rank that processes all tiles following the rank-wide tile schedule (Section 3.2.2). Each scheduled item pairs an expert index with a tile coordinate, and a per-expert device view supplies the expert’s 𝐴 , 𝐵 , and 𝐶 pointers along with its problem dimensions. This lets one kernel cover multiple experts without concatenating their matrices, distinguishing our approach from classical grouped GEMM. The kernel is launched with multiple persistent CTAs, one per SM. Each CTA processes scheduled tiles in a strided pattern: CTA 𝑖 handles tiles 𝑖, 𝑖 +𝑔, 𝑖 +2𝑔, . . . , where 𝑔 is the grid size. For each tile, the CTA fetches the corresponding device view, copies the kernel’s base parameter block, and overwrites only the expert-varying fields (matrix pointers and problem size) before invoking the GEMM tile routine. Because the substitution is a register-level copy rather than a re-launch, transitioning between experts is negligible. Shared-memory staging buffers are likewise reused across tiles regardless of expert identity. Signaling is implemented inside the CUTLASS epilogue of the GEMM kernel, which runs after each tile’s main-loop multiply-accumulate finishes and does not interfere with the GEMM’s main loop. After a CTA finishes writing an output tile to global memory, it performs a thread-fence to ensure that the data is globally visible, then publishes a readiness flag for the completed tile. This signaling mechanism forms the interface between the concurrent executions of the GEMM producer and the communication consumer. 
+
+3.3.2 Communication Granularity. The signaling mechanism de-scribed above marks each completed tile as ready, but transferring data per tile would yield significant communication fragmentation: the latency of tile-by-tile transfers becomes a non-trivial bottle-neck [ 8]. The appropriate transfer granularity is determined by two factors: bandwidth utilization and the structure of the GEMM output under our row layout. Figure 3a shows this effect using bandwidth curves varying with data size for two example consumer budgets (8 and 4 SMs, one CTA per SM). The persistent consumer kernel occupies a fixed subset of SMs disjoint from the producer. A smaller consumer budget frees more SMs for the GEMM, while a larger budget achieves higher communication bandwidth up to a saturation point beyond which additional SMs usually offer no further bandwidth gain. At small data sizes, the curves sit in the low utilization regime, then band-width rises with data size, approaching the 87 GB/s peak at 8 SMs around 1 MiB and 67 GB/s at 4 SMs around 3 MiB. A single-tile transfer (usually 32 KiB or 64 KiB depending on the tile configu-ration used) lies far from saturation. This motivates transferring data at a granularity larger than a single tile. Under the aligned row layout of Section 3.2.1, all rows within one 𝑡𝑏 𝑀 -height row band return to the same destination rank, making the entire row band the natural unit of transfer. An individual tile, in contrast, covers only 𝑡𝑏 𝑁 of the 𝑁 columns. Although such a tile is owner-uniform, its payload occupies only a partial-width slice of the row band and therefore appears as a strided, non-contiguous memory region, requiring multiple copies to transfer. A row band, however, spans the entire width 𝑁 and is both owner-uniform and contiguous in memory, so it can be moved with a single remote write. For the above reasons, we transfer data at segment granularity rather than individual tiles. The segment size involves a trade-off: small segments can start transfer sooner but achieve lower bandwidth, while large segments achieve higher bandwidth but delay the start of each transfer. As shown in Figure 3b, we resolve it with an tunable segment partitioning strategy: the first segment is kept at a single row band so that the consumer can issue its first transfer as soon as the row band is ready. The last segment is also a single row band to reduce the risk of a long communication tail: a larger final segment would have to wait for more tiles to complete before it could be issued, and would then take longer to transfer, both of which push communication past the end of the GEMM. The middle transfer segments coalesce 𝑥 consecutive row bands, where 𝑥 is a tunable parameter so that each transfer’s payload falls on the saturated portion of the bandwidth curve in Figure 3a. The optimal 𝑥 is empirical and workload-dependent: our evaluation in Section 4 shows that neither 𝑥 = 1 (∼1–2 MiB) nor 𝑥 = 2 (∼2–4 MiB) is uniformly best, because merging more row bands into one interior segment pays off only when the resulting bandwidth gain exceeds the extra wait it imposes on the consumer. 
+
+3.3.3 Producer-Consumer Co-Scheduling. Sections 3.3.1 and 3.3.2 define what the producer publishes and at what granularity the con-sumer transfers data. What remains is how the two kernels share the GPU so that GEMM progress and data transfer genuinely run in parallel. We implement producer and consumer as two indepen-dent persistent kernels and rely on three techniques: stream-level priority, SM-level partitioning, and device-memory coordination. The two kernels run on separate non-blocking CUDA streams. We assign the communication kernel higher priority than the GEMM kernel since delaying a producer tile affects performance only at the GEMM tail, whereas delaying a consumer transfer pushes di-rectly onto the communication critical path and compounds across subsequent segments. The priority asymmetry also shapes how the SMs are shared between the two kernels. Because the consumer kernel runs at higher priority, the SMs it occupies are effectively reserved for communication, leaving the remaining SMs available to the GEMM computation. This removes SM-level interference from the hot path: the producer uses a stable SM budget throughout its execution, and the consumer has the SMs it needs to sustain ICPP ’26, September 28-October 01, 2026, Singapore, Singapore Minyu Cui, Anna Wingkvist, and Morgan Ericsson 
+
+the bandwidth plateau of Figure 3a. The consumer’s SM budget itself is a tunable, coupled with the interior segment size. If the consumer budget is too small, the transfer pipeline falls behind producer progress and communication spills past the GEMM tail. If it is too large, the producer loses too much compute capacity, which lengthens GEMM and can offset the benefit of overlap. Sec-tion 4 quantifies this tradeoff. Once both kernels are resident, they coordinate entirely through device-resident state, without host in-tervention on the critical path. Overall, our approach transforms the conventional serialized compute-then-communicate execution pattern into a continuously overlapped execution. Computation and communication progress concurrently, with the compute path driving communication through lightweight device-resident ready-state updates. 
+
+## 3.4 Implementation 
+
+We implement our design as a CUDA runtime exposed to PyTorch 2.6.0, built on CUDA 12.1, CUTLASS 3.9, and NVSHMEM 3.6.5. The persistent GEMM kernel is built on top of the CUTLASS tem-plated GEMMs [ 15 ]. It preserves CUTLASS’s optimized main-loop structure by selecting the optimal configuration for each target GEMM shape from a lookup table derived from CUTLASS profiler. Following EVT [ 3 ], the tile-level signaling is integrated into the GEMM epilogue, so that signaling is fused into the producer without perturbing the main-loop multiply-accumulate. The consumer is implemented as a separate persistent kernel whose communication is performed via NVSHMEM. 
+
+## 4 Experimental Results 4.1 Experimental Setup 
+
+4.1.1 Multi-GPU Platform and Software. We run all experiments on a single node with four NVIDIA A100 GPUs connected over intra-node NVLink. Each NVLink lane delivers 25 GB/s per direction, and a GPU-to-GPU pair is connected by 4 NVLink lanes, giving a one-way bandwidth ceiling of roughly 100 GB/s per peer. Each GPU has 108 SMs and 40 GB HBM. Each test uses one rank per GPU. The software environments include CUDA 12.1, NCCL 2.29.3, and PyTorch 2.6.0. NCCL carries the first all-to-all (dispatch) and the framework baseline’s communication path, while the NVSHMEM and CUTLASS roles are as described in Section 3.4. 
+
+4.1.2 Baselines. We compare our approach against four state-of-the-art (SoA) MoE systems: (a) FasterMoE [ 7] customizes the all-to-all primitive and pipelines it with expert communication, (b) Megatron-CUTLASS [ 16 , 23 ] implements expert computation with CUTLASS GroupGEMM kernel, (c) Megatron-TE [ 17 , 23 ] uses CUT-LASS NVIDIA’s Transformer Engine, and (d) Tutel [ 9 ] provides an adaptive MoE runtime with a tunable pipelining degree and a hierarchical 2D all-to-all. 
+
+4.1.3 Workloads and Evaluation Scenarios. Each test performs sev-eral warmup iterations (discarded in our evaluation) followed by measured iterations. We first evaluate our approach against the four SoA approaches using three MoE models. Table 1 summarizes the evaluated models derived from widely used transformer archi-tectures: M-GPT, M-BERT, and M-Trans-xl. Each model consists of 12 transformer blocks, where selected FFN layers are replaced 
+
+Table 1: MoE model configurations. The MoE Blk. column lists the transformer blocks where the FFN is replaced by an MoE layer. All configurations use 𝑡𝑜𝑝𝑘 = 2, 𝐸 𝑡𝑜𝑡𝑎𝑙 = 64 experts (𝐸 = 16 ), and 1 rank per GPU.                         
+
+> Model Batch Seq Tokens(B ×S) Dim. E_total MoE Blk. M-GPT 81024 8192 768 64 {11} M-BERT 32 512 16384 1024 64 {2,5,8,11} M-Trans-xl 16 512 8192 512 64 {all}
+
+Table 2: MoE workload shape sweep with 𝑡𝑜𝑝𝑘 = 2.                  
+
+> Problem-shape sweep
+> tokens per rank ( 𝑡𝑝𝑟 )8192, 16384
+> 𝑀 (= 2 ×tpr) 16384, 32768
+> 𝐾 (hidden) 2048
+> 𝑁 (out hidden) 4096, 8192
+> router mode balanced, moderate_skew, stress_skew experts per rank ( 𝐸 )4, 8, 16, 32, 64
+> Implementations
+> baseline (base) default SMs for GEMM and all-to-all kernels
+> 𝑐𝐶𝑇 𝐴 in ours 2, 4, 6, 8, 10, 12, 14 (default), 16, 18, 20, 22, 24
+> 𝑚𝑔𝑏 in ours 1, 2
+
+with MoE layers following the replacement setting in [ 25 ]. Specifi-cally, M-GPT replaces the FFN with an MoE layer in the 11th block, representing a sparse-replacement scenario. M-BERT uses MoE in the 2nd, 5th, 8th, and 11th blocks, following an evenly-spaced replacement pattern commonly adopted in MoE literature [ 6 , 12 ]. M-Trans-xl [ 5] uses MoE in all 12 blocks, representing the extreme of dense-replacement. All models use 𝑡𝑜𝑝𝑘 = 2 routing with 64 total experts distributed across 4 GPUs (16 experts per GPU). We also evaluate 𝐸 ∈ {4, 8, 16, 32, 64} to isolate how the MoE layer execution time scales with the number of experts per rank. We further study the effectiveness and scalability of our design by implementing our approach on top of a conventional PyTorch MoE implementation, and comparing it against a baseline that executes the expert compute and return communication sequentially with standard primitives by calling cuBLAS and NCCL APIs. The two systems are otherwise identical, so the measured speedup reflects the overlap mechanism alone. As listed in Table 2, we vary four parameters: the token count per rank, the GEMM shape (output hidden dimension), the router mode, and the SM partition between the producer kernel and the consumer kernel. We also tune the row bands (denoted as 𝑚𝑔𝑏 ) for the middle transfer segments. 
+
+## 4.2 Performance Evaluation in MoE Models 
+
+We report the proposed approach against four SoA MoE systems in two settings. Section 4.2.1 measures end-to-end forward latency and the MoE-layer latency on three production-style MoE models. Section 4.2.2 uses a single MoE-layer microbenchmark to study how performance scales as the number of experts per rank varies. Fine-grained Computation-Communication Overlap for Mixture-of-Experts ICPP ’26, September 28-October 01, 2026, Singapore, Singapore M-GPT M-BERT M-Trans-xl       
+
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Norm. Latency
+> (a) E2E Latency
+> M-GPT M-BERT M-Trans-xl
+> (b) MoE layer Latency
+> FasterMoE Tutel Megatron-CUTLASS Megatron-TE Ours
+
+Figure 4: End-to-End and MoE layer latency ( ↓ is better) in MoE models. 4 8 16 32 64 
+
+> Experts per Rank
+> 0
+> 20
+> 40
+> Time (ms)
+> FasterMoE
+> Tutel
+> Megatron-CUTLASS
+> Megatron-TE
+> Ours
+
+(a) Latency with varying E 4 8 16 32 64  
+
+> Experts per Rank
+> 0
+> 25
+> 50
+> 75
+> 100
+> Overlap ratio (%)
+
+(b) Overlap ratio with varying E 
+
+Figure 5: Single MoE-layer microbenchmark. 0.5           
+
+> 1.0
+> 1.5
+> 2.0
+> 2.5
+> 3.0
+> 3.5
+> Speedup
+> 4816 32 64
+> 16384×8192
+> 2048
+> E
+> M×N
+> K
+> 2.97
+> 4816 32 64
+> 32768×8192
+> 2048
+> 2.81
+> base ours(mgb=1) ours(mgb=2)
+
+(a) balanced 0.5           
+
+> 1.0
+> 1.5
+> 2.0
+> 2.5
+> 3.0
+> 3.5
+> Speedup
+> 4816 32 64
+> 16384×8192
+> 2048
+> E
+> M×N
+> K
+> 2.89
+> 4816 32 64
+> 32768×8192
+> 2048
+> 2.94
+> base ours(mgb=1) ours(mgb=2)
+
+(b) moderate_skew 0.5           
+
+> 1.0
+> 1.5
+> 2.0
+> 2.5
+> 3.0
+> 3.5
+> Speedup
+> 4816 32 64
+> 16384×8192
+> 2048
+> E
+> M×N
+> K
+> 2.95
+> 4816 32 64
+> 32768×8192
+> 2048
+> 3.01
+> base ours(mgb=1) ours(mgb=2)
+
+(c) stress_skew 
+
+Figure 6: Speedup at operator-level. 
+
+4.2.1 End-to-End and MoE Layer Evaluation in MoE Models. Fig-ure 4 depicts the end-to-end (E2E) and MoE-layer latency of Faster-MoE, Tutel, Megatron-CUTLASS, Megatron-TE, and ours on the three MoE models, normalized to fasterMoE. For end-to-end la-tency in the left sub-figure of Figure 4, our approach consistently outperforms all four baselines for both M-GPT and M-BERT, with 1.57x and 1.66x speedups over FasterMoE, 1.35x and 1.15x over Tutel, 1.15x and 1.04x over Megatron-CUTLASS, and 1.25x and 1.09x over Megatron-TE. For M-Trans-xl, our approach delivers a 2.64x speedup over FasterMoE, but slightly trails Tutel, Megatron-CUTLASS, and Megatron-TE. This is likely because M-Trans-xl has the smallest hidden dimension ( 𝐷𝑖𝑚. = 512 ) of the three models. Per-token all-to-all volume scales linearly with 𝐷𝑖𝑚. , so a smaller 
+
+𝐷𝑖𝑚. leaves less communication to hide. At the same time, per-tile useful work is also reduced, so the fixed overhead of fine-grained overlap becomes a larger fraction of layer time. For the MoE-layer latency in the right sub-figure of Figure 4, we observe similar trends: our approach delivers decisive gains over the overlap-attempting baselines, with 2.65x and 1.78x speedups over FasterMoE and 1.77x and 1.15x over Tutel, on M-GPT and M-BERT. For M-Trans-xl, our approach outperforms FasterMoE by 2.74x, while remaining com-parable, but does not surpass the performance of Tutel, Megatron-CUTLASS, and Megatron-TE. These results show that our proposed overlap mechanism re-mains effective after being integrated into full MoE model execution. The two subfigures in Figure 4 show that the end-to-end speedup latency is slightly lower than the corresponding MoE-layer speedup, especially for M-GPT and M-BERT. when comparing our approach with the other approaches. This is expected: our method reduces only the time spent in the MoE layers, while the non-MoE compo-nents incur the same cost. By Amdahl’s law, the end-to-end gain is therefore bounded by the MoE share of each model. Even un-der this bound, a substantial speedup is achieved, confirming that the MoE-layer improvement translates into practical end-to-end performance. 
+
+4.2.2 MoE Layer Performance Across Expert Counts. To character-ize how each system scales with the expert count 𝐸 , we vary 𝐸 
+
+from 4 to 64 on a single MoE-layer microbenchmark (1 MoE block, 
+
+𝐵 = 16 , 𝑆 = 512 , 𝑡𝑜𝑝𝑘 = 2, 𝐷𝑖𝑚 = 1024 from [ 25 ]). In Figure 5a, our approach achieves the lowest layer latency across the full range and outperforms all four baselines, with 1.30x to 5.33x speedups over FasterMoE, 1.77x to 2.16x over Tutel, 1.23x to 1.45x over Megatron-CUTLASS, and 1.35x to 1.76x over Megatron-TE. This scaling trend shows that the benefit of our overlap increases with expert par-allelism. With more experts per rank, both expert compute and return communication become heavier. In conventional designs, the added communication appears as a longer post-GEMM tail. Our producer-consumer co-design instead overlaps these trans-fers with ongoing GEMM execution, thereby reducing the exposed communication cost. Figure 5b further supports this interpretation through the overlap ratio (the fraction of the second all-to-all hid-den behind the expert compute) of our approach. The overlap ratio stays consistently high throughout the full 𝐸 sweep, ranging from 71.9% to 99.9%, with several configurations approaching full hiding. This confirms that tile-level signaling exposes communication work early enough for the consumer to keep pace with the producer. In contrast to the production models in Section 4.2.1, our ap-proach now also achieves lower MoE-layer latency than Megatron-CUTLASS and Megatron-TE. This is potentially because the larger ICPP ’26, September 28-October 01, 2026, Singapore, Singapore Minyu Cui, Anna Wingkvist, and Morgan Ericsson 0.8           
+
+> 1.0
+> 1.2
+> 1.4
+> 1.6
+> 1.8
+> 2.0
+> Speedup
+> 4816 32 64
+> 16384×8192
+> 2048
+> E
+> M×N
+> K
+> 1.78
+> 4816 32 64
+> 32768×8192
+> 2048
+> 1.61
+> base ours(mgb=1) ours(mgb=2)
+
+(a) balanced 0.8           
+
+> 1.0
+> 1.2
+> 1.4
+> 1.6
+> 1.8
+> 2.0
+> Speedup
+> 4816 32 64
+> 16384×8192
+> 2048
+> E
+> M×N
+> K
+> 1.73
+> 4816 32 64
+> 32768×8192
+> 2048
+> 1.66
+> base ours(mgb=1) ours(mgb=2)
+
+(b) moderate_skew 0.8           
+
+> 1.0
+> 1.2
+> 1.4
+> 1.6
+> 1.8
+> 2.0
+> Speedup
+> 4816 32 64
+> 16384×8192
+> 2048
+> E
+> M×N
+> K
+> 1.77
+> 4816 32 64
+> 32768×8192
+> 2048
+> 1.71
+> base ours(mgb=1) ours(mgb=2)
+
+(c) stress_skew 
+
+Figure 7: Speedup of the MoE layer. 
+
+hidden dimension ( 𝐷𝑖𝑚. = 1024 ) provides enough per-tile useful work to amortize the fixed overhead of fine-grained overlap. 
+
+## 4.3 Scalability Analysis 
+
+We have demonstrated both the MoE layer and the end-to-end effectiveness of our approach in Section 4.2. This section further an-alyzes its scalability under the configurations listed in Table 2. Due to page limitation, we report only the configurations highlighted in bold in Table 2 ( 𝑁 = 8192 ). Similar trends hold for the remain-ing configurations unless explicitly noted. We adopt 𝑐𝐶𝑇 𝐴 = 14 
+
+by default, the other SM partitions are used only in our targeted resource contention experiments in Section 4.3.4. 
+
+4.3.1 Operator-Level Performance. Figure 6 presents the operator-level speedup (only considering expert GEMM plus second all-to-all) of our approach over the baseline. Our method achieves higher speedup on all tests, reaching peak values of 2.97x under 
+
+balanced routing, 2.94x under moderate_skew , and 3.01x under 
+
+stress_skew . The speedup generally grows with 𝐸 : larger 𝐸 ampli-fies the return communication, leaving more slack for the overlap mechanism to absorb. 
+
+4.3.2 MoE Layer Performance. Figure 7 reports layer-level speedup over the baseline. Our approach delivers consistent gains across all router modes. The peak speedups are 1.78x for balanced , 1.73x for moderate_skew , and 1.77x for stress_skew . The trend with 
+
+𝐸 stays similar to the operator-level observation. Similarly, the MoE-layer speedups are smaller than the operator-level speedups because the non-operator stages contribute an unchanged cost and bound the layer-level gain. 
+
+4.3.3 Throughput. Figure 8 shows the throughput of our approach (measured in millions of tokens per second, MTokens/sec), normal-ized to the baseline. Our approach achieves peak throughput gains: 1.78x ( balanced ), 1.73x ( moderate_skew ), and 1.77x ( stress_skew ). We note similar trends for the MoE-layer speedups above, since throughput is inversely related to latency. In practice, this means our latency savings translate directly into throughput gains, which is the metric that matters most in throughput-oriented MoE serving. 
+
+4.3.4 Resource Contention. Resource contention is a common con-cern in GPU-based computation-communication overlap, where the computation and communication kernels share the same GPU resources, most notably the SM pool [ 8, 10 , 27 , 29 ]. A common intu-ition is to reserve as many SMs as possible for the compute-intensive GEMM and only a small number for communication kernels, since they are relatively compute-lightweight. In practice, end-to-end performance is highly sensitive to the exact partition chosen. We analyze this sensitivity for our design in this section. To expose the contention regime, we tune the number of consumer CTA ( 𝑐𝐶𝑇 𝐴 ,one CTA per SM) from 2 to 24 with a stride of 2, as shown in Table 2. The remaining SMs run the GEMM kernel. Figure 9 illustrates the MoE-layer latency of each configuration at 𝑚𝑔𝑏 = 1, normalized to the baseline. Bars below 1.0 indicate that our overlap is faster than the baseline; bars above 1.0 indicate that it is slower. Over-constraining the consumer degrades performance sharply. The narrowest allocation at 𝑐𝐶𝑇 𝐴 = 2 is slower than the baseline at every shape and router, reaching 1.91x the baseline under stress_skew routing at 𝑀 = 32768 , 𝐸 = 4. Two consumer SMs cannot drain completed tiles fast enough, and the resulting back-pressure collapses the overlap. 𝑐𝐶𝑇 𝐴 = 4 occasionally rises above 1.00 , especially under heavy load at 𝑀 = 32768 , 𝐸 = 4 and 
+
+𝐸 = 8. The lowest latency is usually achieved when the consumer gets a moderate share of the SMs, with 𝑐𝐶𝑇 𝐴 in the range [10, 20]. We observe the similar trends for 𝑚𝑔𝑏 = 2.Router skew amplifies the contention penalty. The slowdown at 𝑐𝐶𝑇 𝐴 = 2 is smallest under balanced routing, increases under 
+
+moderate_skew , and peaks under stress_skew . As skew increases, a small subset of experts attracts most of the tokens, concentrat-ing expert output production on the ranks that host them. The consumers on these heavily-loaded ranks face a sustained high-rate stream of ready tiles. With too few resources dedicated to communication, tiles cannot be issued fast enough, leaving a long communication tail after GEMM finishes. This demonstrates that an effective overlap method must be resource-aware, balancing compute throughput with communication progress rather than maximizing either side in isolation. Production systems could bene-fit from an runtime-adaptive SM partition selector, which we leave to future work. 
+
+## 4.4 Correctness Analysis 
+
+We validate correctness of our approach by comparing the final per-token output of our implementation against the baseline on every configuration in Table 2, with identical seeds, weights, and routing decisions on both sides. The two paths share routing, first all-to-all, and scale in Figure 1, and differ only in the overlapped expert compute and second all-to-all where our path drives a persistent GEMM co-scheduled with a segment-granular all-to-all, while the Fine-grained Computation-Communication Overlap for Mixture-of-Experts ICPP ’26, September 28-October 01, 2026, Singapore, Singapore 1.0                         
+
+> 1.2
+> 1.4
+> 1.6
+> 1.8
+> 2.0
+> Norm. Throughput
+> 4816 32 64
+> 16384×8192
+> 2048
+> E
+> M×N
+> K
+> 1.78
+> 4816 32 64
+> 32768×8192
+> 2048
+> 1.61
+> 4816 32 64
+> 16384×8192
+> 2048
+> 1.73
+> 4816 32 64
+> 32768×8192
+> 2048
+> 1.66
+> 4816 32 64
+> 16384×8192
+> 2048
+> 1.77
+> 4816 32 64
+> 32768×8192
+> 2048
+> 1.71
+
+(a) balanced (b) moderate_skew (c) stress_skew  
+
+> ours(mgb=1) ours(mgb=2)
+
+Figure 8: Normalized throughput (MTokens/sec). 0.25                         
+
+> 0.50
+> 0.75
+> 1.00
+> 1.25
+> 1.50
+> 1.75
+> 2.00
+> 2.25
+> Norm. Latency
+> 4816 32 64
+> 16384×8192
+> 2048
+> E
+> M×N
+> K
+> 4816 32 64
+> 32768×8192
+> 2048
+> 4816 32 64
+> 16384×8192
+> 2048
+> 4816 32 64
+> 32768×8192
+> 2048
+> 4816 32 64
+> 16384×8192
+> 2048
+> 4816 32 64
+> 32768×8192
+> 2048
+
+(a) balanced (b) moderate_skew (c) stress_skew            
+
+> cCTA=24 cCTA=22 cCTA=20 cCTA=18 cCTA=16 cCTA=14 cCTA=12 cCTA=10 cCTA=8 cCTA=6 cCTA=4 cCTA=2
+
+Figure 9: Normalized latency ( ↓ is better) of the MoE layer across all evaluated SM partitions. The dashed line denotes the baseline. 
+
+baseline runs a per-expert GEMM followed by a bulk all-to-all. Any difference in the final per-token output comes solely from rounding noise inherent to using two different FP16 GEMM implementations on identical inputs. On every rank and every iteration, a check is considered as pass when the relative distance between the two final per-token outputs falls within a tolerance of 8×10 −3. This tolerance sits several times above the FP16 rounding noise regime established for tensor-core dot-products [ 14 ] and far below what any struc-tural correctness bug would produce. Table 3 summarizes 1440 independent correctness checks, covering 3 router distributions, 12 producer/consumer SM partitions, and 2 𝑚𝑔𝑏 granularities across the shape grid in Table 2. All checks pass except for one iteration on a single rank under stress_skew that initially exceeded the tol-erance. We repeated the identical configuration multiple times with the same inputs, and all reruns passed. Thus, the outlier was not reproduced in our following testing. So we conservatively treat it as a transient nondeterministic anomaly. The largest relative distance is 1.913 × 10 −3 under stress_skew , roughly an order of magnitude below the tolerance and within expected FP16 rounding noise. 
+
+## 4.5 Overhead Analysis 
+
+The remote-owner-aligned row layout introduced in Section 3.2.1 in-serts zero-filled rows at each owner-rank boundary so that the next group begins at a tile-aligned offset. These padded rows participate in GEMM computation but are excluded from the return transfer, so 
+
+Table 3: Correctness of ours vs base output over configura-tions (#Cfgs) in Table 2. Tolerance: 𝜏 = 8 × 10 −3.
+
+Router #Cfgs Max |𝜀 |rel Pass balanced 480 1.875 × 10 −3 480/480 moderate_skew 480 1.884 × 10 −3 480/480 stress_skew 480 1.913 × 10 −3 (480)/480 Total 1440 1.913 × 10 −3 1440/1440 
+
+they impose a small compute overhead on the producer. The maxi-mum number of padded rows per rank is (𝑊 −1)( 𝑡𝑏 𝑀 −1), where 𝑊 
+
+is the number of ranks. For our 4-rank evaluation with tile heights up to 256 , this can potentially cause 765 padding rows at most per rank, a few percent of the per-rank row count at problem sizes in Table 2. This overhead is theoretically smallest under balanced 
+
+routing, where most owner-rank boundaries already land near 𝑡𝑏 𝑀 
+
+multiples, and largest under stress_skew , where one owner-rank group may shrink and magnify its relative padding ratio. Despite this overhead, the benefits of our overlap outweigh this cost. ICPP ’26, September 28-October 01, 2026, Singapore, Singapore Minyu Cui, Anna Wingkvist, and Morgan Ericsson 
+
+## 5 Related work 
+
+This section surveys prior works on overlap techniques to mitigate communication bottlenecks in multi-GPU systems. Decomposition-based methods split the GEMM and its collective into smaller chunks, and then pipeline the chunks on separate streams. Co-CoNet [ 10 ] and Wang et al. [ 26 ] cast scheduling as a compiler problem and generate the kernel sequence automatically. Chen et al. [ 2 ] build a hierarchical partition space with operator-, layer-, and model-level scheduling to maximize overlap efficiency in LLM training. The technique has also been applied to LLM training in production [ 11 , 20 , 24 ]. Coarse-grained MoE pipelining meth-ods [ 7 , 9, 21 , 22 , 28 ] apply a similar chunking idea to MoE workloads by chunking the token dimension and pipelining expert compute with all-to-all communication. FasterMoE [ 7 ] pipelines at a pipeline degree of two, and Tutel [ 9 ] adds heuristic search over pipeline degrees. PipeMoE [ 21 ] and ScheMoE [ 22 ] adapt the pipeline degree to the workload, with ScheMoE further scheduling MoE operators against intra- and inter-node bandwidth. MPipeMoE [ 28 ] targets memory efficiency through adaptive pipeline parallelism. Several studies have investigated fusion techniques that fuse computation and communication into a single kernel [ 1, 19 , 25 , 27 ]. These works aim to fuse or tightly integrate communication opera-tions with computation phases to mitigate communication latency, improve data locality, and reduce synchronization costs. Punniya-murthy et al. [ 19 ] study three operator-level fusion paradigms on AMD GPUs: embedding + all-to-all, GEMV + all-reduce, and GEMM + all-to-all. For MoE specifically, Comet [ 27 ] restructures the shared tensor along the consumer-independent dimension, reschedules the GroupGEMM tile order, and fuses communication with computa-tion in a thread-block-specialized kernel that adaptively partitions thread blocks between compute and communication. CCFuser [ 25 ]replaces all-to-all operations with one-sided reads and writes us-ing NVSHMEM, overlapping remote-data access with local-data compute through inter- and intra-thread-block scheduling inside fused kernels. FlashMoE [ 1 ] packages the entire distributed MoE layer (token dispatch, expert GEMM, and combine) into a single CUDA kernel, taking the single-kernel philosophy further than the per-phase fusion of COMET and CCFuser. These fusion-based MoE systems achieve fine-grained overlap, but at the cost of intrusive software complexity and substantial per-target optimization. 
+
+## 6 Conclusion 
+
+We presented a fine-grained computation-communication overlap design for MoE that hides the second all-to-all return transfer be-hind expert compute through tile-level signaling and scheduling. Our approach relies on three co-design components: a remote-owner-aligned row layout that maps every tile to a single peer rank; a communication-aware tile schedule on a persistent rank-wide producer that emits remote-bound tiles first; and a consumer kernel that forwards completed tile segments to their owner ranks as soon as they are ready. Evaluated across three MoE models, mul-tiple problem sizes, router distributions, and producer/consumer SM partitions, our design delivers substantial end-to-end speedup over both SoA MoE frameworks and conventional sequential imple-mentations, with final per-token outputs that match the baseline up to FP16 rounding. Future work includes extension to the back-ward pass for training, adaptive SM partition selection, support for additional parallelism regimes, and deployment on larger machines. 
+
+## References 
+
+[1] Osayamen Jonathan Aimuyo, Byungsoo Oh, and Rachee Singh. 2025. FlashMoE: Fast Distributed MoE in a Single Kernel. In Advances in Neural Information Processing Systems (NeurIPS ’25) . arXiv:2506.04667. [2] Chang Chen, Xiuhong Li, Qianchao Zhu, Jiangfei Duan, Peng Sun, Xingcheng Zhang, and Chao Yang. 2024. Centauri: Enabling Efficient Scheduling for Communication-Computation Overlap in Large Model Training via Communi-cation Partitioning. In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3 (La Jolla, CA, USA) (ASPLOS ’24) . 178–191. [3] Zhaodong Chen, Andrew Kerr, Richard Cai, Jack Kosaian, Haicheng Wu, Yufei Ding, and Yuan Xie. 2024. EVT: Accelerating Deep Learning Training with Epilogue Visitor Tree. In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3 (La Jolla, CA, USA) (ASPLOS ’24) . Association for Computing Machinery, New York, NY, USA, 301–316. doi:10.1145/3620666.3651369 [4] Jiang Chenyu, Tian Ye, Jia Zhen, Zheng Shuai, Wu Chuan, and Wang Yida. 2024. Lancet: Accelerating Mixture-of-Experts Training via Whole Graph Computation-Communication Overlapping. In Proceedings of Machine Learning and Systems ,Vol. 6. 74–86. [5] Zihang Dai, Zhilin Yang, Yiming Yang, Jaime Carbonell, Quoc V. Le, and Ruslan Salakhutdinov. 2019. Transformer-XL: Attentive Language Models Beyond a Fixed-Length Context. In Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics (ACL) . Association for Computational Linguistics, 2978–2988. [6] William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity. Journal of Machine Learning Research 23, 120 (2022), 1–39. [7] Jiaao He, Jidong Zhai, Tiago Antunes, Haojie Wang, Fuwen Luo, Shangfeng Shi, and Qin Li. 2022. FasterMoE: Modeling and Optimizing Training of Large-Scale Dynamic Pre-Trained Models. In Proceedings of the ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming (PPoPP) .[8] Ke Hong, Xiuhong Li, Minxu Liu, Qiuli Mao, Tianqi Wu, Zixiao Huang, Lufang Chen, Zhong Wang, Yichong Zhang, Zhenhua Zhu, Guohao Dai, and Yu Wang. 2026. Efficient and Adaptable Overlapping for Computation and Communica-tion via Signaling and Reordering. In European Conference on Computer Systems (EuroSys ’26) . arXiv:2504.19519. [9] Changho Hwang, Wei Cui, Yifan Xiong, Ziyue Yang, Ze Liu, Han Hu, Zilong Wang, Rafael Salas, Jithin Jose, Prabhat Ram, HoYuen Chau, Peng Cheng, Fan Yang, Mao Yang, and Yongqiang Xiong. 2023. Tutel: Adaptive Mixture-of-Experts at Scale. In Proceedings of Machine Learning and Systems (MLSys) , Vol. 5. 269–287. [10] Abhinav Jangda, Jun Huang, Guodong Liu, Amir Hossein Nodehi Sabet, Saeed Maleki, Youshan Miao, Madanlal Musuvathi, Todd Mytkowicz, and Olli Saarikivi. 2022. Breaking the Computation and Communication Abstraction Barrier in Distributed Machine Learning Workloads. In Proceedings of the International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS) .[11] Ziheng Jiang, Haibin Lin, Yinmin Zhong, Qi Huang, Yangrui Chen, Zhi Zhang, Yanghua Peng, Xiang Li, Cong Xie, Shibiao Nong, Yulu Jia, Sun He, Hongmin Chen, Zhihao Bai, Qi Hou, Shipeng Yan, Ding Zhou, Yiyao Sheng, Zhuo Jiang, Haohan Xu, Haoran Wei, Zhang Zhang, Pengfei Nie, Leqi Zou, Sida Zhao, Liang Xiang, Zherui Liu, Zhe Li, Xiaoying Jia, Jianxi Ye, Xin Jin, and Xin Liu. 2024. MegaScale: scaling large language model training to more than 10,000 GPUs. In Proceedings of the 21st USENIX Symposium on Networked Systems Design and Implementation (NSDI’24) . Article 41, 16 pages. [12] Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu, Dehao Chen, Orhan Firat, Yanping Huang, Maxim Krikun, Noam Shazeer, and Zhifeng Chen. 2021. GShard: Scaling Giant Models with Conditional Computation and Automatic Sharding. In International Conference on Learning Representations (ICLR) .[13] AI @ Meta Llama Team. 2025. The Llama 4 herd: The beginning of a new era of natively multimodal AI innovation. https://ai.meta.com/blog/llama-4-multimodal-intelligence/ Accessed: 2025-12-12. [14] Paulius Micikevicius, Sharan Narang, Jonah Alben, Gregory Diamos, Erich Elsen, David Garcia, Boris Ginsburg, Michael Houston, Oleksii Kuchaiev, Ganesh Venkatesh, and Hao Wu. 2018. Mixed Precision Training. In International Confer-ence on Learning Representations (ICLR) . https://arxiv.org/abs/1710.03740 [15] NVIDIA. 2023. CUTLASS: CUDA Templates for Linear Algebra Subroutines . https: //github.com/NVIDIA/cutlass [16] NVIDIA. 2024. Grouped GEMM for MoE. https://github.com/fanshiqing/grouped_ gemm. [17] NVIDIA. 2024. Transformer Engine. https://github.com/NVIDIA/ TransformerEngine. Fine-grained Computation-Communication Overlap for Mixture-of-Experts ICPP ’26, September 28-October 01, 2026, Singapore, Singapore 
+
+[18] Suchita Pati, Shaizeen Aga, Mahzabeen Islam, Nuwan Jayasena, and Matthew D. Sinclair. 2024. T3: Transparent Tracking & Triggering for Fine-grained Overlap of Compute & Collectives. In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS), Volume 2 . 1146–1164. doi:10.1145/3620665.3640410 [19] Kishore Punniyamurthy, Khaled Hamidouche, and Bradford M. Beckmann. 2024. Optimizing Distributed ML Communication with Fused Computation-Collective Operations. In SC24: International Conference for High Performance Computing, Networking, Storage and Analysis . 1–17. doi:10.1109/SC41406.2024.00094 [20] PyTorch. 2024. Introducing Async Tensor Parallelism in PyTorch. https://discuss.pytorch.org/t/distributed-w-torchtitan-introducing-async-tensor-parallelism-in-pytorch/209487 [21] Shaohuai Shi, Xinglin Pan, Xiaowen Chu, and Bo Li. 2023. PipeMoE: Accelerating Mixture-of-Experts through Adaptive Pipelining. In IEEE INFOCOM 2023 - IEEE Conference on Computer Communications . 1–10. doi:10.1109/INFOCOM53939. 2023.10228874 [22] Shaohuai Shi, Xinglin Pan, Qiang Wang, Chengjian Liu, Xiaozhe Ren, Zhongzhe Hu, Yu Yang, Bo Li, and Xiaowen Chu. 2024. ScheMoE: An Extensible Mixture-of-Experts Distributed Training System with Tasks Scheduling. In Proceedings of the Nineteenth European Conference on Computer Systems (EuroSys ’24) . 236–249. https://doi.org/10.1145/3627703.3650083 [23] Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Bryan Catanzaro. 2019. Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism. arXiv:1909.08053 (2019). [24] Guanhua Wang, Chengming Zhang, Zheyu Shen, Ang Li, and Olatunji Ruwase. 2024. Domino: Eliminating Communication in LLM Training via Generic Tensor Slicing and Overlapping. (2024). arXiv:arXiv:2409.15241 [25] Hulin Wang, Yaqi Xia, Donglin Yang, Xiaobo Zhou, and Dazhao Cheng. 2025. Harnessing Inter-GPU Shared Memory for Seamless MoE Communication-Computation Fusion. In Proceedings of the 30th ACM SIGPLAN Annual Symposium on Principles and Practice of Parallel Programming (PPoPP ’25) . 170–182. [26] Shibo Wang, Jinliang Wei, Amit Sabne, Andy Davis, Berkin Ilbeyi, Blake Hecht-man, Dehao Chen, Karthik Srinivasa Murthy, Marcello Maggioni, Qiao Zhang, Sameer Kumar, Tongfei Guo, Yuanzhong Xu, and Zongwei Zhou. 2022. Overlap Communication with Dependent Computation via Decomposition in Large Deep Learning Models. In Proceedings of the 28th ACM International Conference on Ar-chitectural Support for Programming Languages and Operating Systems (ASPLOS) .93–106. [27] Shulai Zhang, Ningxin Zheng, Haibin Lin, Ziheng Jiang, Wenlei Bao, Chengquan Jiang, Qi Hou, Weihao Cui, Size Zheng, Li-Wen Chang, Quan Chen, and Xin Liu. 2025. COMET: Fine-grained Computation-communication Overlapping for Mixture-of-Experts. In Eighth Conference on Machine Learning and Systems (MLSys) .[28] Zheng Zhang, Donglin Yang, Yaqi Xia, Liang Ding, Dacheng Tao, Xiaobo Zhou, and Dazhao Cheng. 2023. MPipeMoE: Memory Efficient MoE for Pre-trained Models with Adaptive Pipeline Parallelism. In 2023 IEEE International Parallel and Distributed Processing Symposium (IPDPS) . 167–177. [29] Size Zheng, Jin Fang, Xuegui Zheng, Qi Hou, Wenlei Bao, Ningxin Zheng, Ziheng Jiang, Dongyang Wang, Jianxi Ye, Haibin Lin, Li-Wen Chang, and Xin Liu. 2025. TileLink: Generating Efficient Compute-Communication Overlapping Kernels using Tile-Centric Primitives. In Eighth Conference on Machine Learning and Systems (MLSys) .

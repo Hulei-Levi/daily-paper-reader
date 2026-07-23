@@ -1,0 +1,381 @@
+Title: MoX: Efficient MoE Routing on Direct-Connect Topologies
+
+URL Source: https://arxiv.org/pdf/2607.20220v1
+
+Published Time: Thu, 23 Jul 2026 01:01:38 GMT
+
+Number of Pages: 8
+
+Markdown Content:
+# MoX: Efficient MoE Routing on Direct-Connect Topologies 
+
+# Ori Cohen 
+
+Technion and NVIDIA Israel ori.cohen@campus.technion.ac.il 
+
+# Jakob Krebs 
+
+Technion Israel jakob.krebs@campus.technion.ac.il 
+
+# Daniel Amir 
+
+Technion Israel daniel.amir@campus.technion.ac.il 
+
+# Mark Silberstein 
+
+Technion and NVIDIA Israel mark@ee.technion.ac.il 
+
+## ABSTRACT 
+
+Optically switched networks suit the regular communication of dense ML models, but MoE introduces sparse, runtime-dependent traffic. We show that efficient offline-optimized routing enables efficient MoE training and inference on direct-connect topologies without the need for MoE traffic matrix or dynamic topology reconfiguration. MoX constructs token-aware multicast trees to reduce bandwidth tax, then uses static, precomputed link weights to balance traffic by solving a restricted multicast tree-packing problem. Using recorded traffic from large MoE models, token-level traces, and ASTRA-sim, we find that MoX accelerates the full MoE block—dispatch, expert computation, and combine—by up to 
+
+1.8× over min-hop routing. Moreover, it attains nearly ideal packet-switched network performance in random expander topologies. On a 1,024-TPU model of Google’s Boardfly topol-ogy, MoX reduces the dispatch bottleneck link load by up to 47% . These results show that high-performance MoE on static direct-connect fabrics can be achieved via optimized load-oblivious routing without demand-driven reconfigura-tion. 
+
+## 1 INTRODUCTION 
+
+The performance of large machine-learning systems increas-ingly depends on their networks. High-bandwidth domains (HBDs) such as NVLink provide abundant bandwidth, but are expensive and difficult to scale. Once a job extends be-yond the HBD, communication over the scale-out network often becomes a bottleneck. Optical networks offer a way to expand HBDs with signif-icantly lower power and cost than a conventional packet switch at every tier. Direct-connect and optical circuit-switched (OCS) networks are already used inside production training and inference systems [ 20 , 24 ], and recent propos-als demonstrate the benefits of reconfiguring the scale-out fabric for individual collectives [ 17 ] or interconnecting mul-tiple smaller HBDs [ 27 ]. Because optical networks directly connect nodes to each other, they are particularly attrac-tive when the communication pattern is static and regular, as is the case for data-, tensor-, and pipeline-parallel train-ing. A direct-connect fabric can be structured to match this stable collective structure, providing strong performance at production scale in industry today [1, 4, 20, 24, 29]. Mixture-of-Experts (MoE) models break this regularity. In every MoE layer, a gate selects, independently for each to-ken, its top 𝐾 experts out of 𝐸 . When experts are distributed across accelerators, the resulting expert-parallel (EP) commu-nications are sparse AllToAll-V: each accelerator dispatches tokens to a data-dependent subset of peers and later collects the expert results. The demand changes with every batch, can span the full EP group, and is skewed because some experts receive more tokens than others. Unlike a ring or an AllReduce, this traffic does not lend itself to one stable, structured topology. Expert domains are rapidly outgrowing commodity HBDs: Mixtral has eight experts per layer [ 23 ], Qwen3 and LLaMA 4 have 128 [ 2, 30 ], DeepSeek-V3 and Pangu use 256 [ 16 , 34 ], Qwen3.5 reaches 512 [ 31 ], and Kimi K3 uses 896 [ 28 ]. The number of active experts (top-k) is also increasing, with DeepSeek-V3 using 𝑘 = 8, Qwen3.5 using 𝑘 = 10 , and Kimi K3 using 𝑘 = 16 [16 , 28 , 31 ], as are EP group sizes, with DeepSeek-V3 already being trained using 64-way EP [ 16 , 30 ]. A low-degree direct-connect fabric cannot provide single-hop connectivity to all such destinations. At the same time, OCSes reconfigure too slowly to be operated during a col-lective [ 17 , 27 ]. While MixNet [ 27 ] has combined runtime-optimized direct optical links with packet switches for traffic lacking a direct circuit, this strategy greatly limits the utility of the optical network when system scale exceeds the degree at each node. Efficient optical MoE therefore requires indirect routing , even with topology specialization. 
+
+> 1arXiv:2607.20220v1 [cs.NI] 22 Jul 2026 Cohen et al.
+
+Indirect routing creates two problems. First, every relay hop consumes bandwidth without delivering data locally, resulting in bandwidth tax . Second, relay traffic may be dis-tributed unevenly across links, resulting in load imbalance .This occurs in irregular topologies such as random expanders and in nominally regular topologies whose physical connec-tivity is asymmetric, such as TPU 8i Boardfly. Skewed MoE demand further amplifies these structural hotspots. Their effect is significant because collective completion time is determined by the most loaded link: in our evaluation on a DeepSeek-V3 MoE traffic, the busiest link carries up to 1.35 ×
+
+the average link load within Boardfly’s network. These two problems expose a topology tradeoff. Common structured topologies, such as 3D-torus, use symmetry to distribute relay traffic evenly, but at fixed node degree their relatively high radius requires more relay hops and there-fore a larger bandwidth tax. Low-radius irregular topologies remedy the first problem. Random expanders connect dis-tant endpoints in few hops at low degree and can scale to large systems [ 9]; however, their irregular paths make some links more likely to relay traffic, worsening the second prob-lem. We use expanders to develop this intuition, but our techniques apply to any topology. We present MoX 1, a static, demand-oblivious MoE rout-ing system that uses EP semantics and precomputed top-K-specific per-link weights instead of predicting traffic matrices or reconfiguring the network. Its two techniques address in-direct routing’s costs: 
+
+Token-aware multicast and reduction trees. MoE dis-patch is a collection of per-token multicasts: the same token must reach the 𝐾 accelerators hosting its selected experts. MoX performs indirect routing of a token via nodes which also receive that token, forming a multicast tree. During combine, it reverses these trees and partially reduces ex-pert outputs at intermediate accelerators. Similar techniques were applied in prior work on efficient collectives in direct-connect topologies [ 10 , 38 ], but MoX is the first to show that applying them to MoE in this way is highly effective for reducing the bandwidth tax. 
+
+Precomputed skew-oblivious load-balanced routing. 
+
+MoX formulates relay selection as a compact surrogate for the fractional multicast-tree packing problem studied in traf-fic engineering [ 6, 12 ]. Each source and top-𝐾 expert selec-tion defines a multicast demand class; the selected experts are mapped to their hosting accelerators, inducing a set of candi-date multicast trees. Rather than predict the deployed traffic matrix, MoX assigns equal likelihood to all top-𝐾 expert com-binations and computes link routing weights, one weight per link, that minimize the maximum expected physical-link load over the resulting tree distribution. Enumerating all 
+
+> 1Pronounced “Mo-X”.
+
+destination sets and trees is combinatorial, so MoX com-putes the weights offline from a small sample of multicast workloads. The resulting policy remains effective on real, non-uniform MoE traffic for the given choice of 𝐾 , with-out runtime demand prediction or per-iteration topology adaptation. Expert popularity is often skewed [ 26 , 27 ], and both load and its variation differ across MoE layers [ 14 ]. Neverthe-less, modern MoE training encourages balanced marginal utilization through auxiliary losses [ 18 ] or load-dependent routing biases [ 16 , 36 ]. Moreover, experts from different lay-ers are randomly mapped to accelerators, so a hot expert in one layer need not create a hotspot at the same physical endpoint in another. Thus, after aggregating layers under a randomized mapping, we expect a uniform prior to provide a useful topology-level center for offline optimization. We evaluate MoX using token-level Chakra traces in ASTRA-sim 2 [ 32 , 39 ], with DeepSeek-V3 and Qwen-3 MoE layers and traffic distributions recorded on a real GPU cluster. We make three observations: 
+
+Near-switch performance. For recorded traces, on 16-, 32-, and 64-node degree-8 expanders, top-12 training is within 0.5%, 0.6%, and 7% of an ideal switch, while min-hop routing is 42%, 69%, and 96% slower. With 256 inference tokens per GPU, MoX is within 2.1%, 3.1%, and 13.6%, while min-hop is 42–98% slower. 
+
+Better than topology adaptation. On recorded traffic, static MoX routing achieves 27% lower completion time than a demand-optimized topology with min-hop routing and nearly attains the perfect switch performance across evalu-ated skews. 
+
+Boardfly load balancing. On a regular 1,024-TPU hierarchy constructed from Google’s published TPU 8i Boardfly param-eters, where connectivity constraints introduce endpoint-level asymmetries, MoX reduces bottleneck cable load by up to 47%. 
+
+Bottom line. MoX shows that high-performance MoE com-munication is achievable without continuously adapting the physical network to runtime demand: a static direct-connect topology can approach switched-network performance when routing is designed around MoE’s multicast semantics and load-balanced offline. 
+
+## 2 ROUTING ALGORITHM 
+
+MoX routes MoE token embeddings over a fixed, known network topology. For every token, it first constructs a mul-ticast tree that minimizes redundant forwarding and then selects among equivalent relays using offline-computed link weights. During combine, it reverses the tree and partially reduces expert outputs at intermediate nodes. Fig. 1 shows a      
+
+> 2MoX : Efficient MoE Routing on Direct-Connect Topologies w1
+> w2
+> weighted choice
+> tax
+> round-robin over tax paths
+> source reached destination node link token send
+> S
+> d0
+> d1
+> d2
+> d3
+
+Figure 1: Routing an embedding whose expert desti-nations are 𝑑 0–𝑑 3. Once 𝑑 0 and 𝑑 1 hold the embedding, either can relay it to adjacent destination 𝑑 2; MoX se-lects between them using link weights. No reached destination neighbors 𝑑 3, so reaching it requires a non-destination relay and incurs a bandwidth-tax hop. 
+
+simple example of the routing process. Throughout this sec-tion, dispatching a token means transmitting its MoE-layer embedding (activation vector). 
+
+## 2.1 Building the Multicast Tree 
+
+For a token generated at source 𝑠 , let 𝐷 denote the acceler-ators hosting its top-𝐾 experts. MoX constructs a directed multicast tree rooted at 𝑠 and spanning 𝐷 . It maintains a holder set 𝐻 , containing the nodes that already have the embedding, and initializes 𝐻 = {𝑠 }.At each step, MoX selects an unreached destination 𝑑 ∈
+
+𝐷 \ 𝐻 and a path from a node in 𝐻 to 𝑑 . It prefers a path whose intermediate nodes are themselves members of 𝐷 :those nodes require the embedding and can subsequently relay it to another destination. More generally, it selects paths that minimize the number of intermediate nodes outside 𝐷 .The selected path is added to the multicast tree and its nodes are added to 𝐻 . This process continues until all destinations have been reached. The two-hop case illustrates the rule. If a selected expert 𝑟 
+
+lies on a path from 𝑠 to another selected expert 𝑑 , MoX sends one copy along 𝑠 → 𝑟 → 𝑑 . Because 𝑟 consumes the em-bedding as well as forwarding it, both hops perform useful delivery. If no such destination relay exists, MoX uses a non-destination relay and incurs one bandwidth-tax hop. Ties among paths with the same tax are resolved by the load-balancing policy in §2.2. The source controls the tree and encodes the remain-ing destinations as a bitmap in the packet header, similarly to stateless multicast mechanisms such as Xcast [ 10 ] and BIER [ 38 ]. A relay forwards one copy along each outgoing tree edge. At 64 endpoints, the bitmap occupies 8 bytes, com-pared with a 14 KB token embedding. 
+
+## 2.2 Load Balancing with Per-Link Weights 
+
+Tree construction often exposes several relay choices with the same bandwidth tax. Consider an unreached destina-tion 𝑑 and let 𝐶 = 𝐻 ∩ 𝑁 (𝑑 ) be the current holders adjacent to 𝑑 . Every 𝑟 ∈ 𝐶 can deliver the embedding to 𝑑 in one hop. MoX associates a positive weight 𝑤 (𝑟,𝑑 ) with every directed physical link and assigns the relay share 
+
+𝑝 (𝑟 | 𝐶, 𝑑 ) = 𝑤 (𝑟,𝑑 )
+
+Í𝑟 ′ ∈𝐶 𝑤 (𝑟 ′,𝑑 )
+
+. (1) The weights are shared across all tokens and candidate sets; MoX does not store a separate policy for each 𝐶 .At runtime, MoX realizes these shares with weighted round robin (WRR). Each source maintains per-link counters for the duration of one MoE collective. For candidate set 𝐶 ,it selects the relay minimizing 
+
+counter (𝑟, 𝑑 )
+
+𝑤 (𝑟,𝑑 )
+
+𝑟 ∈ 𝐶, (2) and then increments the selected link’s counter. The coun-ters are reset at the start of the next collective. Over many tokens, this deterministic policy approaches the shares in (1) . A single weight per directed link keeps the policy state proportional to the physical topology; for example, a 64-node degree-8 topology requires 512 weights. When no destination relay is available, MoX selects among equal-tax first hops using round robin. We treat the load produced by these unavoidable paths as background load when computing the WRR weights. Paths with multiple non-destination relays are handled analogously. 
+
+## 2.3 Fractional Multicast-Tree Packing 
+
+The ideal load-balancing problem is a fractional multicast-tree packing problem [ 6 , 12 ]. Let 𝑄 denote the set of multicast demand classes. A class 𝑞 ∈ 𝑄 specifies a source, a top-𝐾 
+
+destination set, and expected demand 𝑎 𝑞 . Let T𝑞 be the set of minimum-tax multicast trees admitted by the forwarding algorithm for 𝑞 . For each 𝑇 ∈ T 𝑞 , variable 𝑥 𝑞𝑇 ≥ 0 is the fraction of class-𝑞 demand routed on tree 𝑇 . With directed-link capacity 𝑐 𝑒 , the minimum-congestion packing is the linear program 
+
+min 
+
+> 𝑥,𝐿 max
+
+𝐿 max (3) s.t. ∑︁  
+
+> 𝑇 ∈ T 𝑞
+
+𝑥 𝑞𝑇 = 𝑎 𝑞 ∀𝑞 ∈ 𝑄, (4) ∑︁  
+
+> 𝑞 ∈𝑄
+
+∑︁ 𝑇 ∈ T 𝑞 :𝑒 ∈𝑇 
+
+𝑥 𝑞𝑇 ≤ 𝑐 𝑒 𝐿 max ∀𝑒 ∈ 𝐸. (5) 
+
+> 3Cohen et al.
+
+The first constraint routes all expected demand; the second bounds every physical link’s utilization. The objective mini-mizes the utilization of the busiest link. This formulation is closely related to classical multicast packing and minimum multicast-congestion formulations, which likewise assign concurrent multicast demands to Steiner trees while mini-mizing their maximum edge congestion [6, 12]. The LP is not practical to materialize: T𝑞 is exponential, and the number of top-𝐾 destination sets is combinatorial. It would also require candidate-set- or tree-specific routing state at runtime. MoX therefore optimizes a compact surro-gate: the tree shares are not independent variables, but are induced by the per-link weights through (1) . The surrogate retains the LP’s min-max link-load objective while reducing the runtime policy to one value per directed link. 
+
+## 2.4 Iterative Weight Computation 
+
+MoX computes the weights offline using Monte Carlo work-loads. It starts with uniform weights, 𝑤 𝑒 = 1, routes ev-ery sampled token using the complete tree-construction and WRR policy, and measures the resulting directed-link loads 𝐿 𝑒 . This simulation includes the fixed round-robin traf-fic from paths that require non-destination relays, so the measured load combines useful forwarding and bandwidth-tax traffic. After a replay, MoX updates every weight using 
+
+log 𝑤 𝑒 ← log 𝑤 𝑒 − 𝜂 
+
+ 𝐿 𝑒 
+
+¯𝐿 − 1
+
+
+
+, 𝜂 = 0.05 , (6) where ¯𝐿 is the mean directed-link load. An overloaded link loses weight and is selected less frequently in subsequent replays; an underloaded link gains weight. The update is a multiplicative min-max controller for the compact weight policy: it seeks the same low-congestion outcome as Eq. (3) and (5), but does not enumerate or explicitly solve for the LP’s tree variables. We retain the weight vector from the replay with the lowest observed maximum link load. 
+
+Sampling configuration. MoX samples 1,000 tokens per source accelerator; for each, it draws a top-𝐾 expert com-bination from the assumed uniform workload distribution and applies the expert-to-accelerator mapping to obtain its destination set. This same sample is replayed across all six iterations—one with uniform weights followed by three weight updates using (6) . We validate that at small sizes with 𝑛 = 16 , where full enumeration is feasible, the sampled solution matches the enumerated solution. In terms of the runtime, at 𝑛 = 64 , the offline computation completes in seconds on one CPU core. 
+
+## 2.5 Partial Reduction on Combine 
+
+After expert computation, the combine phase returns the expert outputs to the token’s source. Semantically, this op-eration is a reduction: the outputs of the top-𝐾 experts are combined into one activation vector for the next layer. MoX traverses the dispatch multicast tree in reverse. Whenever an intermediate node has results from multiple child branches, it partially reduces them before forwarding one vector to-ward the source. This avoids sending every expert output independently across shared links. 
+
+## 3 EVALUATION 
+
+We evaluate MoX with ASTRA-sim 2 [ 39 ] using token-level EP Chakra traces [ 32 ], representing each routing decision as per-link transfers. We record all layers in three late-training DeepSeek-V3 runs [ 16 ] on 16, 32, and 64 GPUs with 256 experts. In addition, we record the expert popularity for the Qwen-3 225B with 128 experts. Expert popularity is sta-ble over the sampled iterations and is similar across layers, consistent with prior observations [ 14 , 27 ]; we evaluate a randomly selected layer. In all the experiments the experts are randomly and evenly placed across GPUs. Training dispatches 5,120 BF16 embeddings of width 7,168 per GPU; inference uses the same expert distribution with be-tween 64 and 256 tokens. We compare MoX and pairwise min-hop routing on bandwidth-equivalent direct-connect fabrics against an ideal full-connectivity packet switch. Unless noted, each endpoint’s 800 Gbps is split into eight 100 Gbps links on a randomly generated degree-8 expander selected for low radius. We also evaluate the performance of MoX on the TPUv8i Boardfly topology. 
+
+## 3.1 MoE end-to-end performance 
+
+Fig. 2 reports full MoE-block (dispatch–compute–combine) time for DeepSeek MoE. MoX improves over min-hop by up to 1.8×. Training overhead grows with topology size as paths lengthen, but decreases with higher top-𝑘 because more destinations can serve as useful relays. MoX is within 
+
+0.6% , 3.0% , and 15 .1% of an ideal switch for 16, 32, and 64 GPUs at top-8, shrinking to 0.5% , 0.6% , and 7.3% at top-12 .Inference follows the same trend but small batches expose fixed transfer costs and offer less traffic to balance. At 256 tokens per GPU, MoX is within 2.1–3.6% of the switch on 16 GPUs and 3.1–6.4% on 32, whereas min-hop is 42–70% slower (Fig. 2b). 
+
+Analytical proxy. We divide the expander’s analytically computed maximum normalized link load (bytes/capacity) by the switch’s one obtained in simulation, and compare it with the ASTRA-sim-reported end-to-end slowdown which simulates the collective on the topology. The close match 
+
+> 4
+
+MoX : Efficient MoE Routing on Direct-Connect Topologies k= 8 10     
+
+> 16 GPUs
+> 12 k= 8 10
+> 32 GPUs
+> 12 k= 8 10
+> 64 GPUs
+> 12
+
+0.00 
+
+1.00 
+
+2.00 
+
+> Normalized MoE Block
+> Wall Time
+> +0.01
+> 0.00
+> +0.01
+> +0.03
+> +0.01
+> +0.01
+> +0.15
+> +0.11
+> +0.07
+> Switch
+> Dispatch
+> MoX
+> Compute
+> Min-Hop
+> Combine
+
+(a) Training 1.00         
+
+> 2.00
+> +0.09
+> +0.06
+> +0.05
+> +0.18
+> +0.11
+> +0.10
+> +0.34
+> +0.26
+> +0.23 64 Tokens/GPU
+> 1.00
+> 2.00
+> +0.05
+> +0.03
+> +0.03
+> +0.09
+> +0.07
+> +0.04
+> +0.27
+> +0.21
+> +0.18 128 Tokens/GPU
+> k=8 10
+> 16 GPUs
+> 12 k=8 10
+> 32 GPUs
+> 12 k=8 10
+> 64 GPUs
+> 12
+> 0.00
+> 1.00
+> 2.00
+> +0.04
+> +0.03
+> +0.02
+> +0.06
+> +0.05
+> +0.03
+> +0.24
+> +0.20
+> +0.14 256 Tokens/GPU
+> Normalized MoE Block
+> Wall Time
+> Switch MoX Min-Hop
+
+(b) Inference 
+
+Figure 2: MoE-block wall time normalized to an ideal switch, for the MoE load distribution of DeepSeek-V3. MoX has low overhead in 16- and 32-node expanders, and closes the gap at higher Top-k in the 64-node expander. 16×8 16×10 16×12 32×8 32×10 32×12 64×8 64×10 64×12 
+
+> GPUs × Top-k
+> 0
+> 100
+> MoE Block Wall Time
+> Overhead [%]
+> Min-Hop Routing
+> ASTRA-Sim
+> MoX
+> Analytical
+> 0
+> 100
+> Analytical MoE Block
+> Time Overhead [%]
+
+Figure 3: Analytical maximum-link-load overhead and ASTRA-sim end-to-end slowdown relative to the switch; the two correlate closely, overlapping in many points. 
+
+in Fig. 3 validates maximum link load as a proxy for these bandwidth-bound configurations, which is expected since the maximum loaded link determines the total collective completion time. 
+
+## 3.2 Sensitivity to load skew and topology optimizations 
+
+We compare MoX against the demand-adaptive topology tun-ing approach inspired by MixNet [ 27 ] on a 16-node expander and top-8 experts. This approach assumes full knowledge of the traffic matrix: it reconfigures the topology prior to the execution, maximizing the amount of direct traffic thus reducing the bandwidth tax. The tokens are routed via min-hop routing. Note, however, that the number of experts is larger than the node degree, therefore some traffic remains indirect. Last, we combine the topology tuning with the MoX routing approach. Fig. 4 presents the results. Across all skews MoX stays within 1.8% of the switch, significantly outperforming both min-hop routing ( 34 –42% slower) and topology optimization (24 –37% slower). MoX’s routing also rescues the optimized 0.06 0.16 0.24 0.27 0.29 0.36 
+
+Endpoint Traffic Coefficient of Variation ( / )
+
+> 15
+> 20
+> 25
+> MoE Block Wall Time
+> (ms)
+> Switch
+> MoX
+> Min-Hop
+> Topology Optimized
+> Topology Optimized, MoX
+> DSv3
+> Qwen3
+
+Figure 4: Performance vs. ideal switch for the synthetic Zipf load distribution, and two real MoE traffic distri-butions – DeepSeek-V3 and Qwen 3-225B on a 16-node expander and 𝐾 = 8
+
+topology, cutting its overhead to 2–5% ; even so, combining the two does not improve on MoX over the plain expander. MoX’s overhead over the switch stays roughly flat across the skew range. The real MoE traffic we recorded for two large-scale models stays well balanced, so MoX remains within 0.8% of the switch. 
+
+## 3.3 Google TPUv8i Boardfly 
+
+MoX’s applicability goes beyond irregular asymmetric topologies. Here we show that topologies based on more reg-ular graphs are often structured in a way that can create load imbalances when using min-hop routing. As a representative example, Google’s Boardfly topology used in TPUv8i [ 20 ] is regular, but doubles the capacity of certain links in order to fully utilize the available bandwidth at each node. Min-hop routing may lead to underutilization of the capacity of these parallel links, resulting in bottlenecks on the remaining links. Boardfly uses 400GB/s links [35]. 
+
+5Cohen et al. Top-k: 8 10 12      
+
+> Training
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> Min-Hop Routing BW-Tax MoX
+> Inference
+> Min-Hop Routing BW-Tax MoX
+> 1.00 1.00 1.00 0.72 0.69 0.67 0.59 0.54 0.53 1.00 1.00 1.00 0.68 0.67 0.67 0.65 0.61 0.58
+> Normalized Maximum Physical-Link Load
+
+Figure 5: Boardfly dispatch bottleneck: maximum physical-cable load, normalized per top-𝑘 to shortest-path routing, for training and inference. The bottle-neck is an inter-group cable in every case. 16 32 64 
+
+> Expander Size (GPUs)
+> 0
+> 50
+> 100
+> MoE Block Wall Time Overhead [%]
+> MoX
+> Min-Hop
+> Bandwidth Tax
+
+(a) Contribution of routing and bandwidth tax for top-8 under different topology sizes 8 10 12  
+
+> Top-k Experts
+> 0
+> 10
+> 20
+> MoE Block Wall Time Overhead [%]
+> Switch MoX, Degree 8
+> MoX, Degree 16
+
+(b) Performance impact of the node degree 
+
+Figure 6: Overhead analysis for different system pa-rameters vs. an ideal switch 
+
+We resample the DeepSeek trace to a projected 4K-expert model, placing four experts on each of 1K TPUs. Because we do not simulate this full topology end to end, we report the validated maximum-link-load proxy for dispatch. Fig. 5 shows that MoX reduces the bottleneck link by up to 47% (33% by relaying tokens and 14% by weighted routing) for training batch sizes and 41 .7% (32 .9% by relaying and 9% 
+
+by weighted routing) for inference batches. 
+
+## 3.4 Analysis 
+
+We analyze MoX across expander sizes and top-𝑘 values. Fig. 6(a) shows that the multicast tree alone reduces most of the bandwidth overhead of the min-hop routing down to 8% ,
+
+11% , and 31% for 16, 32, and 64 nodes respectively, but MoX improves further by mitigating the load imbalance. With larger topologies, a higher degree expander and higher values of top-𝑘 achieve much better results (Fig. 6(b)). This suggests that one should maintain degree 𝑑 that is high enough for the expander topology size 𝑁 , ensuring that the fraction of nodes reachable with a single relay remains con-stant, e.g. 𝑑 2 
+
+> 𝑁
+
+= 2.
+
+## 4 DISCUSSION 
+
+Implementation. MoX requires per-token forwarding rather than today’s aggregated sends. We believe that this can be implemented with low overhead due to the large size of each individual token. Per-token multicast forwarding is accomplished using a destination matrix stored in each packet, allowing it to be handled by either the GPU or NIC. During combine, reduction must be handled by the GPU, which already stores one of the inputs to the reduction. Line rate AllReduce has been demonstrated in GPUs [15, 22]. 
+
+Practicality of high-degree random expander topologies. 
+
+When scaling up to high node counts, it is essential for each node to have a high degree as shown in Fig. 6a. Cabling has commonly been considered the main barrier to high-degree random topologies. However, Amazon has recently shown that it has solved this problem in its RNG infrastructure us-ing shuffle boxes [ 9]. Further, we expect that the effective number of links per NIC will grow as well, due to increasing adoption of multi-plane topologies [5]. Another approach is to consider each NVLink domain as a single routing endpoint, as suggested in [ 27 ], using NVLink to share all the NICs in each server. Splitting each of the server’s 8 scale-out links into 8 lanes results in a degree of 64, allowing scaling up to 2,048 servers (16k total GPUs) while maintaining 𝑑 2 
+
+> 𝑁
+
+≥ 2.
+
+## 5 RELATED WORK 
+
+Multicast Tree and Traffic Engineering. Multicast routing combines NP-hard tree construction [ 25 ] with traffic engi-neering that minimizes maximum link utilization [ 8 , 21 ]. Protocols build shortest-path trees [ 19 ], stateless BIER-TE steers static replication paths [ 38 ], and controllers adapt routes to group demand [ 13 ]. MoE changes too quickly for per-iteration weight optimization. 
+
+Collectives on Direct-Connect Topologies. Topology-specific collective algorithms provide near-optimal schedules on sym-metric direct-connect fabrics [ 3, 7, 11 , 33 ], but assume reg-ular, predictable traffic rather than dynamic, skewed MoE demand. 
+
+Direct-Connect Topologies for ML Training. TopoOpt [ 37 ]co-optimizes topology and parallelization. Google’s optically reconfigurable TPU v4 [ 24 ] targets structured traffic, whereas TPUv8i adopts the more general Boardfly topology, better suited to dynamic MoE inference [ 20 ]. Photonic Rails [ 17 ]time-multiplexes links across training phases; MixNet [ 27 ]predicts demand to reconfigure a hybrid optical-electrical fabric at runtime. 
+
+6MoX : Efficient MoE Routing on Direct-Connect Topologies 
+
+## 6 CONCLUSION 
+
+MoX demonstrates that routing optimizations which are lightweight, computed offline, and load-oblivious provide a significant performance boost for MoE communication on direct-connect topologies, without the need for costly dynamic topology adoption or continuous adjustment of routing weights. We show that MoX significantly reduces the overheads of the MoE phase for both inference and training, achieving performance close to an ideal packet switch, and demonstrates significant potential for optimizing Google’s recent Boardfly direct-connect network. 
+
+## REFERENCES 
+
+[1] Dennis Abts, Garrin Kimmell, Andrew Ling, John Kim, Matt Boyd, Andrew Bitar, Sahil Parmar, Ibrahim Ahmed, Roberto DiCecco, David Han, John Thompson, Michael Bye, Jennifer Hwang, Jeremy Fow-ers, Peter Lillian, Ashwin Murthy, Elyas Mehtabuddin, Chetan Tekur, Thomas Sohmers, Kris Kang, Stephen Maresh, and Jonathan Ross. 2022. A software-defined tensor streaming multiprocessor for large-scale machine learning. In Proceedings of the 49th Annual International Symposium on Computer Architecture (New York, New York) (ISCA ’22) .Association for Computing Machinery, New York, NY, USA, 567–580. [2] Aaron Adcock, Aayushi Srivastava, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pande, Abhinav Pandey, Abhinav Sharma, Abhishek Kadian, Abhishek Kumawat, Adam Kelsey, et al . 2026. The Llama 4 Herd: Architecture, Training, Evaluation, and Deployment Notes. 
+
+arXiv preprint arXiv:2601.11659 (2026). [3] George Almási, Philip Heidelberger, Charles J Archer, Xavier Martorell, C Chris Erway, José E Moreira, Burkhard Steinmacher-Burow, and Yili Zheng. 2005. Optimization of MPI collective communication on BlueGene/L systems. In Proceedings of the 19th annual international conference on Supercomputing . 253–262. [4] Amazon Web Services. 2023. Amazon EC2 Inf2 Architec-ture. https://awsdocs-neuron.readthedocs-hosted.com/en/latest/ about-neuron/arch/neuron-hardware/inf2-arch.html. [5] Joao Araujo, Alex Chow, Mark Handley, Ryder Lewis, Christoph Paasch, Jitendra Padhye, Michael Papamichael, Greg Steinbrecher, Amin Tootoonchian, Lihua Yuan, S. Anantharamu, Abhishek Dosi, Mohit Garg, Mahdieh Ghazi, Torsten Hoefler, Deepal Jayasinghe, Jithin Jose, Abdul Kabbani, Guohan Lu, Yang Wang, K. Doddapaneni, Mu-rali Garimella, Vipin Jain, Yanfang Le, H. Nagulapalli, S. Narayanan, Rong Pan, Rathina Sabesan, Raghava Sivaramu, Rip Sohan, Eric Davis, Dragos Dumitrescu, Mohan Kalkunte, Bhaswar Mitra, Guglielmo Morandin, Adrian Popa, Costin Raiciu, Eric Spada, John Spillane, Ni-ranjan Vaidya, Aviv Barnea, Idan Burstein, Elazar Cohen, Yamin Fried-man, Noam Katz, Masoud Moshref, Yuval Shpigelman, Shahaf Shuler, Shy Shyman, and Sayantan Sur. 2026. Resilient AI Supercomputer Networking using MRC and SRv6. arXiv preprint arXiv:2605.04333 
+
+(2026). [6] Andreas Baltz and Anand Srivastav. 2004. Fast Approximation of Min-imum Multicast Congestion—Implementation versus Theory. RAIRO Operations Research 38, 4 (2004), 319–344. https://doi.org/10.1051/ro: 2004028 [7] Prithwish Basu, Liangyu Zhao, Jason Fantl, Siddharth Pal, Arvind Krishnamurthy, and Joud Khoury. 2024. Efficient all-to-all Collective Communication Schedules for Direct-connect Topologies. In Proceed-ings of the 33rd International Symposium on High-Performance Parallel and Distributed Computing (Pisa, Italy) (HPDC ’24) . Association for Computing Machinery, New York, NY, USA, 28–41. [8] Theophilus Benson, Ashok Anand, Aditya Akella, and Ming Zhang. 2011. MicroTE: Fine grained traffic engineering for data centers. In Pro-ceedings of the seventh conference on emerging networking experiments and technologies . 1–12. [9] Giacomo Bernardi, Ratul Mahajan, C Seshadhri, Enrico Carlesso, Chinchu Merine Joseph, Saurabh Kumar, Pavan Manikonda, Luiza Popa, Randy Ram, Steven Robinson, et al . 2026. RNG: Flat Datacenter Networks at Scale. arXiv preprint arXiv:2604.15261 (2026). [10] Rick Boivie, Nancy Feldman, Yuji Imai, Wim Livens, and Dirk Ooms. 2007. Explicit Multicast (Xcast) Concepts and Options. IETF RFC 5058. [11] Zixian Cai, Zhengyang Liu, Saeed Maleki, Madanlal Musuvathi, Todd Mytkowicz, Jacob Nelson, and Olli Saarikivi. 2021. Synthesizing opti-mal collective algorithms. In Proceedings of the 26th ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming . 62–75. [12] Shiwen Chen, Oktay Gunluk, and Bulent Yener. 2000. The Multicast Packing Problem. IEEE/ACM Transactions on Networking 8, 3 (2000), 311–318. https://doi.org/10.1109/90.851977 [13] Sheng-Hao Chiang, Jian-Jhih Kuo, Shan-Hsiang Shen, De-Nian Yang, and Wen-Tsuen Chen. 2018. Online multicast traffic engineering for software-defined networks. In IEEE INFOCOM 2018-IEEE Conference on Computer Communications . IEEE, 414–422. [14] Peizhuang Cong, Aomufei Yuan, Shimao Chen, Yuxuan Tian, Bowen Ye, and Tong Yang. 2024. Prediction Is All MoE Needs: Expert Load Distribution Goes from Fluctuating to Stabilizing. arXiv preprint arXiv:2404.16914 (2024). [15] NVIDIA Corporation. 2025. Validate the cluster level NCCL test with 4 nodes and 32 GPUs. https://docs.nvidia.com/dgx-basepod/deployment-guide-dgx-basepod/latest/mn-nccl.html. https://docs.nvidia.com/dgx-basepod/deployment-guide-dgx-basepod/latest/mn-nccl.html [16] DeepSeek-AI. 2024. DeepSeek-V3 Technical Report. arXiv preprint arXiv:2412.19437 (2024). [17] Eric Ding, Chuhan Ouyang, and Rachee Singh. 2025. Photonic rails in ML datacenters. In Proceedings of the 24th ACM Workshop on Hot Topics in Networks . 149–159. [18] William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch Trans-formers: Scaling to Trillion Parameter Models with Simple and Effi-cient Sparsity. Journal of Machine Learning Research 23, 120 (2022), 1–39. https://www.jmlr.org/papers/v23/21-0998.html [19] Bill Fenner, Mark J. Handley, Hugh Holbrook, Isidor Kouvelas, Rishabh Parekh, Zhaohui (Jeffrey) Zhang, and Lianshu Zheng. 2016. Protocol Independent Multicast - Sparse Mode (PIM-SM): Protocol Specification (Revised). RFC 7761. [20] Google Cloud. 2026. Google TPU 8i (Boardfly) architecture overview. https://cloud.google.com/blog/products/compute/tpu-8t-and-tpu-8i-technical-deep-dive. [21] Chi-Yao Hong, Srikanth Kandula, Ratul Mahajan, Ming Zhang, Vijay Gill, Mohan Nanduri, and Roger Wattenhofer. 2013. Achieving high utilization with software-driven WAN. In Proceedings of the ACM SIGCOMM 2013 . 15–26. [22] Zhiyi Hu, Siyuan Shen, Tommaso Bonato, Sylvain Jeaugey, Cedell Alexander, Eric Spada, James Dinan, Jeff Hammond, and Torsten Hoe-fler. 2025. Demystifying NCCL: An in-depth analysis of GPU com-munication protocols and algorithms. In 2025 IEEE Symposium on High-Performance Interconnects (HOTI) . IEEE, 48–59. [23] Albert Q Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch, Blanche Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Emma Bou Hanna, Florian Bressand, et al . 2024. Mixtral of experts. arXiv preprint arXiv:2401.04088 (2024). [24] Norm Jouppi, George Kurian, Sheng Li, Peter Ma, Rahul Nagarajan, Lifeng Nai, Nishant Patil, Suvinay Subramanian, Andy Swing, Brian 7Cohen et al. 
+
+Towles, Clifford Young, Xiang Zhou, Zongwei Zhou, and David A Patterson. 2023. TPU v4: An Optically Reconfigurable Supercomputer for Machine Learning with Hardware Support for Embeddings. In 
+
+Proceedings of the 50th Annual International Symposium on Computer Architecture (Orlando, FL, USA) (ISCA ’23) . Association for Computing Machinery, New York, NY, USA, Article 82, 14 pages. [25] Dan Li, Yuanjie Li, Jianping Wu, Sen Su, and Jiangwei Yu. 2011. ESM: Efficient and scalable data center multicast routing. IEEE/ACM Trans-actions on Networking 20, 3 (2011), 944–955. [26] Jiamin Li, Yimin Jiang, Yibo Zhu, Cong Wang, and Hong Xu. 2023. Accelerating Distributed MoE Training and Inference with Lina. In 
+
+2023 USENIX Annual Technical Conference (USENIX ATC 23) . USENIX Association, 945–959. [27] Xudong Liao, Yijun Sun, Han Tian, Xinchen Wan, Yilun Jin, Zilong Wang, Zhenghang Ren, Xinyang Huang, Wenxue Li, Kin Fai Tse, et al .2025. Mixnet: A runtime reconfigurable optical-electrical fabric for distributed mixture-of-experts training. In Proceedings of the ACM SIGCOMM 2025 Conference . 554–574. [28] Moonshot AI. 2026. Kimi K3: Open Frontier Intelligence. https://www. kimi.com/blog/kimi-k3. [29] Reiner Pope, Sholto Douglas, Aakanksha Chowdhery, Jacob Devlin, James Bradbury, Anselm Levskaya, Jonathan Heek, Kefan Xiao, Shiv-ani Agrawal, and Jeff Dean. 2023. Efficiently Scaling Transformer Inference. In Proceedings of Machine Learning and Systems (MLSys) .[30] Qwen Team. 2025. Qwen3 Technical Report. arXiv preprint arXiv:2505.09388 (2025). [31] Qwen Team. 2026. Qwen3.5-397B-A17B model card. https:// huggingface.co/Qwen/Qwen3.5-397B-A17B. [32] Srinivas Sridharan, Taekyung Heo, Louis Feng, Zhaodong Wang, Matt Bergeron, Wenyin Fu, Shengbao Zheng, Brian Coutinho, Saeed Rashidi, Changhai Man, and Tushar Krishna. 2023. Chakra: Advancing Perfor-mance Benchmarking and Co-design using Standardized Execution Traces. arXiv preprint arXiv:2305.14516 (2023). [33] Young-Joo Suh and S Valamanchili. 1998. All-to-all communication with minimum start-up costs in 2D/3D tori and meshes. IEEE Trans-actions on Parallel and Distributed Systems 9, 5 (1998), 442–458. [34] Yehui Tang, Yichun Yin, Yaoyuan Wang, Hang Zhou, Yu Pan, Wei Guo, Ziyang Zhang, Miao Rang, Fangcheng Liu, Naifu Zhang, Binghan Li, Yonghan Dong, Xiaojun Meng, Yasheng Wang, Dong Li, Yin Li, Dandan Tu, Can Chen, Youliang Yan, Fisher Yu, Ruiming Tang, Yunhe Wang, Botian Huang, Bo Wang, Boxiao Liu, Changzheng Zhang, Da Kuang, Fei Liu, Gang Huang, Jiansheng Wei, Jiarui Qin, Jie Ran, Jinpeng Li, Jun Zhao, Liang Dai, Lin Li, Liqun Deng, Peifeng Qin, Pengyuan Zeng, Qiang Gu, Shaohua Tang, Shengjun Cheng, Tao Gao, Tao Yu, Tianshu Li, Tianyu Bi, Wei He, Weikai Mao, Wenyong Huang, Wulong Liu, Xiabing Li, Xianzhi Yu, Xueyu Wu, Xu He, Yangkai Du, Yan Xu, Ye Tian, Yimeng Wu, Yongbing Huang, Yong Tian, Yong Zhu, Yue Li, Yufei Wang, Yuhang Gai, Yujun Li, Yu Luo, Yunsheng Ni, Yusen Sun, Zelin Chen, Zhe Liu, Zhicheng Liu, Zhipeng Tu, Zilin Ding, and Zongyuan Zhan. 2025. Pangu ultra MoE: How to train your big MoE on ASCEND NPUS. arXiv preprint arXiv:2505.04519 (2025). [35] Amin Vahdat. 2026. Our eighth generation TPUs: two chips for the agentic era. https://blog.google/innovation-and-ai/infrastructure-and-cloud/google-cloud/eighth-generation-tpu-agentic-era/. https://blog.google/innovation-and-ai/infrastructure-and-cloud/google-cloud/eighth-generation-tpu-agentic-era/ [36] Lean Wang, Huazuo Gao, Chenggang Zhao, Xu Sun, and Damai Dai. 2024. Auxiliary-loss-free load balancing strategy for mixture-of-experts. arXiv preprint arXiv:2408.15664 (2024). [37] Weiyang Wang, Moein Khazraee, Zhizhen Zhong, Manya Ghobadi, Zhihao Jia, Dheevatsa Mudigere, Ying Zhang, and Anthony Kewitsch. 2023. {TopoOpt }: Co-optimizing network topology and parallelization strategy for distributed training jobs. In 20th USENIX Symposium on Networked Systems Design and Implementation (NSDI 23) . 739–767. [38] IJsbrand Wijnands, Eric C. Rosen, Andrew Dolganow, Tony Przy-gienda, and Sam Aldrin. 2017. Multicast Using Bit Index Explicit Replication (BIER). IETF RFC 8279. [39] William Won, Taekyung Heo, Saeed Rashidi, Srinivas Sridharan, Sudar-shan Srinivasan, and Tushar Krishna. 2023. ASTRA-sim2.0: Modeling Hierarchical Networks and Disaggregated Systems for Large-model Training at Scale. In IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS) .8
