@@ -1,0 +1,756 @@
+Title: Sparse by Command: Task-Conditional Compute Skipping for Multi-Task Inference Accelerators
+
+URL Source: https://arxiv.org/pdf/2607.22038v1
+
+Published Time: Mon, 27 Jul 2026 00:28:02 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+# Sparse by Command: Task-Conditional Compute Skipping for Multi-Task Inference Accelerators 
+
+# Afzal Ahmad 
+
+eeafzal@ust.hk The Hong Kong University of Science and Technology Hong Kong 
+
+# Gaoyu Mao 
+
+maogaoyu1@huawei.com Huawei Noah’s Ark Lab Hong Kong 
+
+# Shoubo Hu 
+
+hushoubo@huawei.com Huawei Noah’s Ark Lab Hong Kong 
+
+# Hui-Ling Zhen 
+
+zhenhuiling2@huawei.com Huawei Noah’s Ark Lab Hong Kong 
+
+# Mingxuan Yuan 
+
+yuan.mingxuan@huawei.com Huawei Noah’s Ark Lab Hong Kong 
+
+# Xinyu Chen 
+
+xinyuchen@hkust-gz.edu.cn The Hong Kong University of Science and Technology (Guangzhou) Guangzhou, China 
+
+# Wei Zhang 
+
+eeweiz@ust.hk The Hong Kong University of Science and Technology Hong Kong 
+
+## Abstract 
+
+Multi-task inference models share a single backbone across diverse tasks, yet execute identical computation regardless of which task is active — wasting energy and cycles on task-irrelevant opera-tions. We observe that the task command, typically available before inference begins, provides a free signal that can be exploited to skip unnecessary computation at the hardware level. We present a HW/SW co-designed approach in which a lightweight gating network, trained jointly with the backbone, predicts per-tile binary execution masks conditioned on the task input. Each tile corre-sponds to a fixed group of output channels (the native scheduling granularity of the accelerator), enabling masked tiles to be skipped with zero overhead. This yields a task-dependent reduction in com-pute, where each command activates only the subset of the network it requires, without changes to the model architecture or inference pipeline. We co-design the full system stack: a command-conditioned training procedure that learns hardware-aligned tile masks under a sparsity objective; an instruction set architecture whose instruc-tions carry per-tile bitmask fields, allowing the hardware to skip masked tiles without software intervention; and a tiled inference accelerator with configurable parallelism, double-buffered memory, and INT8 datapath that natively supports sparse tile execution. We prototype on an AMD/Xilinx Alveo U50 FPGA and evaluate on a closed-loop visuomotor driving task in CARLA autonomous driving simulator. Task-conditional sparsity reduces FLOPs by 66– 76% while maintaining driving quality. On-device latency decreases by 51–59%, from 9.12 ms to 3.74–4.44 ms (2.1–2.4 × speedup), with energy per inference dropping from 263 to 108–128 mJ. 
+
+> MICRO 2026, Athens, Greece
+> 2026. ACM ISBN 978-X-XXXX-XXXX-X/XX/XX https://doi.org/10.1145/nnnnnnn.nnnnnnn
+
+## CCS Concepts 
+
+• Hardware → Hardware accelerators ; Hardware-software codesign .
+
+## Keywords 
+
+task-conditional sparsity, hardware-software co-design 
+
+This is the accepted version of the paper that will appear in the Proceedings of the 59th IEEE/ACM International Symposium on Microarchitecture (MICRO 2026). 
+
+## 1 Introduction 
+
+Multi-task inference workloads are increasingly common in real-time autonomous systems [ 4, 5 ], where a single neural network backbone must serve multiple operating modes (lane following, turning, braking in navigation) under strict latency and power constraints [29]. These models share the same convolutional or transformer back-bone across all tasks, yet the hardware executes identical computa-tion regardless of which task is active. A lane-following command, for instance, may not require the same feature channels as an inter-section turn, yet every output channel tile is computed and every weight tile is fetched from memory. This uniform execution wastes both compute cycles and memory bandwidth, resources that are particularly scarce on edge accelerators backed by high-bandwidth memory (HBM). A natural solution is to exploit sparsity: skip computation that does not contribute to the active task. Prior work on sparse accel-erators has made significant progress in this direction. SCNN [ 26 ]and SparTen [ 15 ] exploit unstructured weight and activation spar-sity through compressed encodings and index-matching hardware, while Cambricon-S [ 39 ] co-designs coarse-grained pruning with a dedicated index decoder. Eyeriss v2 [ 7 ] introduces a flexible dataflow that adapts to varying layer shapes. However, these designs treat  
+
+> 1arXiv:2607.22038v1 [cs.AR] 24 Jul 2026 MICRO 2026, October 31–November 04, 2026, Athens, Greece Afzal Ahmad, Gaoyu Mao, Shoubo Hu, Hui-Ling Zhen, Mingxuan Yuan, Xinyu Chen, and Wei Zhang
+
+sparsity as a static property: the sparse pattern is determined at training or compile time and does not change based on what the model is being asked to do at runtime. A parallel line of work on dynamic neural networks has explored input-conditional computation. SkipNet [ 32 ] and BlockDrop [ 34 ]learn per-input gating policies that skip entire residual blocks, while FBS [ 13 ] dynamically suppresses uninformative channels based on intermediate activations. Mixture-of-Experts architectures route to-kens to specialized subnetworks. These approaches achieve impres-sive FLOP reductions, but are designed for GPU or CPU execution where “skipping” a block means zeroing its output; the hardware still fetches weights, allocates registers, and occupies memory band-width. Without structured alignment to the hardware’s tiling granularity, dynamic sparsity does not translate to propor-tional speedup on real accelerators [24] .Meanwhile, accelerator ISA design has matured around fixed computation graphs. Gemmini [ 14 ] exposes matrix-multiply primi-tives through a RISC-V-integrated instruction set, and NVDLA [ 25 ]uses per-layer descriptors to configure convolution, pooling, and activation operations. These ISAs efficiently schedule dense work-loads but lack any mechanism to express conditional tile execution; they have no opcode field that tells the hardware which output channel groups to skip based on a runtime signal. We observe that multi-task models carry a signal that none of these prior approaches exploit: the task command itself . In a visuomotor driving controller, the high-level command (follow lane, turn left, brake) is known before inference begins and remains fixed for the duration of that inference. This command is a free input that can be used to predict, at zero runtime cost , which tiles of the backbone are unnecessary , enabling structured sparsity that adapts per task without any per-input overhead. We present a full-stack co-designed system that bridges the gap between dynamic neural networks and sparse hardware accelera-tors. Our contributions are: 
+
+• A task-conditional gating mechanism that predicts per-tile binary execution masks from a task command vector. A light-weight MLP ( <0.12% of backbone parameters) is trained jointly with the model through a three-phase pipeline transitioning from soft to hard binary masks. 
+
+• An instruction set architecture with native tile mask support. Each instruction carries per-tile bitmask fields; the hardware skips masked tiles entirely (no weight fetch, no activation load, no compute) at zero control overhead. 
+
+• A tiled inference accelerator with INT8 datapath, config-urable parallelism, and double-buffered memory, instrumented with cycle-accurate performance counters. Sparsity is controlled entirely through instruction-level masks with no datapath changes. 
+
+• End-to-end closed-loop evaluation on an AMD/Xilinx Alveo U50 FPGA integrated with the CARLA driving simulator. Task-conditional sparsity reduces FLOPs by 66–76% across six driving commands while maintaining 100% route completion. Figure 1 illustrates the approach end-to-end: per-task tile activa-tion masks (a) reveal that each driving command activates a distinct subset of the backbone’s output channel tiles; a lightweight gating MLP produces these masks from the driving command (b); and on-device FPGA execution with task-conditional masking reduces deeper layers pruned more 
+
+(a) Tile activation across tasks 
+
+(b) Task command drives tile selection 
+
+CARLA Camera Image 
+
+CARLA cmd: 
+
+"Follow lane" 
+
+> Tile Gating
+> MLP
+
+Tile mask: 10111110... 
+
+49/182 tiles active 
+
+(c) FPGA inference latency (AMD/Xilinx Alveo U50) 
+
+> 54.4% reduction
+> Task
+
+Figure 1: Task-conditional tile sparsity. (a) Per-task tile ac-tivation masks (orange = active, each column = 16 output channels). (b) Driving command produces a binary tile mask via a gating MLP. (c) FPGA inference latency: 54.4% reduction. 
+
+inference latency by 54.4% for lane following compared to dense execution (c). To support reproducibility and future research, we release the full co-design stack (RTL, host runtime, training pipeline, and eval-uation scripts) as open source 1.
+
+## 2 Background and Motivation 2.1 Multi-Task Visiomotor Control 
+
+Visuomotor controllers for autonomous systems map sensor ob-servations directly to continuous control outputs (steering angle, throttle, and braking) conditioned on a high-level navigation com-mand. Unlike modular perception-planning-control pipelines, these end-to-end models [ 4 , 8 ] use a single neural network (Figure. 2) that receives a camera image i and a discrete command c such as "turn left at the next intersection" and regresses the appropriate control action. The command selects one of several parallel output heads, each specialized for a driving behavior, while the backbone is shared across all commands. This architecture is efficient in parameters but wasteful in com-pute: the full backbone executes regardless of which command is active. Intuitively, the features required for lane following (road curvature, lane markings) differ from those required for braking (proximity to obstacles, traffic light state). Yet every output feature group in every layer is computed for every inference, even when the active command only requires a subset.      
+
+> 1https://github.com/afzalxo/sparse-by-command 2Sparse by Command: Task-Conditional Compute Skipping for Multi-Task Inference Accelerators MICRO 2026, October 31–November 04, 2026, Athens, Greece Image i
+> measurements m
+> command c
+> head 0
+> predictions head 1
+> predictions head 2
+> predictions
+> ConvNet backbone Branched
+> Heads
+> Fusion
+> Layers
+
+Figure 2: Visiomotor Controller: a shared convolutional back-bone processes the camera image i, and the driving command c selects one of several branched heads to produce steering and acceleration outputs [ 8]. All backbone layers execute fully regardless of the active command. 
+
+The key insight is that the command is known before inference begins and typically persists for hundreds of consecutive frames. A "turn left" command, for example, remains active throughout the entire turn maneuver. This temporal stability means that a per-command execution mask can be computed once and reused across many inferences, amortizing any gating overhead to near zero. 
+
+## 2.2 Tiled Execution on Hardware Accelerators 
+
+Modern inference accelerators decompose layer computation into tiles, fixed-size blocks that match the hardware’s parallelism di-mensions [ 6, 29 ]. Whether the operation is a convolution or a fully-connected (linear) projection, the accelerator processes the output in groups of output features (output channels in CNNs, columns of the weight matrix in transformers’ linear layers), input features, and, for convolutional layers, spatial rows. Each tile execution involves three phases: (1) loading the input activation tile from external mem-ory into an on-chip buffer, (2) loading the corresponding weight tile, and (3) performing the multiply-accumulate computation. We define a tile as one group of OC_PAR contiguous output chan-nels, spanning all input channels and spatial positions within a horizontal strip. A tile is the atomic unit of scheduling: the ac-celerator either executes it in full (loading its weights, streaming activations, accumulating results) or skips it entirely. Skipping an output feature tile eliminates all three phases for every input feature tile that would have contributed to it: no weight fetch, no activation load, and no computation. Crucially, this skipping propagates across layers. An output feature group that is masked in layer L does not need to be computed, and consequently does not need to be loaded as an input feature group in layer L+1. The mask on output features thus simultaneously reduces both the output-side and input-side computation of adjacent layers. This structured approach stands in contrast to fine-grained spar-sity based on individual zero weights or activations, which requires index-matching logic and irregular memory access patterns that complicate the datapath [ 15 , 26 ]. Tile-level sparsity aligns with the accelerator’s parallelism boundaries by construction, enabling simple control flow through a bitmask check rather than complex sparse encoding hardware. While we describe and evaluate our approach using convolu-tional layers, the same tiling strategy applies directly to the linear measurements  m       
+
+> command c
+> Tile Gating
+> Network
+> command c
+> Image i
+> {101101...}
+> 101110
+> 1
+> 0
+> = active
+> = inactive
+
+Figure 3: Task-conditional model: the command is addition-ally passed through a tile gating network that produces a bi-nary mask over the backbone’s output feature tiles. Masked tiles (inactive) are skipped during execution, reducing both compute and memory traffic. 
+
+projections in transformer architectures, where the output and in-put embedding dimensions play the same role as output and input feature groups. The tile mask mechanism is agnostic to the opera-tion type: it controls which groups of output features are computed, regardless of whether the underlying operation is a convolution or matrix multiplication. Existing tiled accelerators, however, execute all tiles uncondi-tionally. The tile iteration loop is controlled by the layer dimensions encoded in the instruction stream, with no mechanism to selectively skip tiles based on runtime information. 
+
+## 2.3 The Opportunity: Command-Conditional Tile Masks 
+
+We identify a gap at the intersection of dynamic neural networks and tiled hardware accelerators. Dynamic networks (Section 1) demonstrate that computation can be safely skipped based on run-time signals, but they operate at granularities (individual weights, attention heads, residual blocks) that do not map to hardware tile boundaries. Tiled accelerators provide the execution mechanism for structured skipping, but lack the runtime signal to decide what to skip. The task command bridges this gap. It is available before in-ference begins, imposing no runtime overhead . It is discrete and 
+
+low-dimensional : a one-hot vector over a small set of commands (six in our driving application). It is temporally stable , persisting across many consecutive inferences. And it is semantically mean-ingful , as different commands genuinely require different features. While we demonstrate this approach primarily on a CNN-based driving controller, the mechanism extends to command-conditioned multi-task models with a discrete task selector. We confirm this on a ViT-Base backbone (Section 4.8): the same gating and bitmask mechanism masks the MLP linear-layer tiles of a transformer, and masking attention head-groups is a complementary extension. In robotic manipulation, grasp-type commands (pinch, scoop, push) could serve as the task signal. The key requirements are: (1) a discrete, low-dimensional task descriptor known before inference, and (2) an accelerator that schedules computation in fixed-size output channel groups. A lightweight gating network can map the command vector to a binary tile mask in a single forward pass  
+
+> 3MICRO 2026, October 31–November 04, 2026, Athens, Greece Afzal Ahmad, Gaoyu Mao, Shoubo Hu, Hui-Ling Zhen, Mingxuan Yuan, Xinyu Chen, and Wei Zhang
+
+HBM 
+
+> Instruction
+> Mem (64KB)
+> Input
+> Features
+> Temp
+> Buffer A
+> Temp
+> Buffer B
+> Weights
+> Mem
+> HBM[0] HBM[1] HBM[2] HBM[3]
+
+FPGA 
+
+Instruction Scheduler  
+
+> (64B Instruction from HBM)
+> opcodes, dimensions, tile masks
+
+Tile Manager 
+
+> Input DMA
+> (HBM to URAM)
+> Weight DMA
+> (HBM to BRAM)
+> Output DMA
+> (URAM to HBM)
+
+Convolution Accelerator  
+
+> Vector Compute Unit (VCU)
+> PP_PAR
+> OC_PAR
+> Pixel
+> PE
+> Pixel
+> PE
+> Pixel
+> PE +
+> a0
+> w0
+> a1
+> w1
+> a2
+> w2
+> a3
+> w3
+> aIC_PAR-2
+> wIC_PAR-2
+> aIC_PAR-1
+> wIC_PAR-1
+> IC_PAR
+> MAC
+> Lane
+> MAC
+> Lane
+> MAC
+> Lane
+> AXI-Interconnect
+
+PCIe Gen 3 x16 
+
+Host Program (OpenCL)   
+
+> Bank A Bank B
+> URAM
+> Ping-Pong Buffers
+> BRAM
+> Ping-Pong Buffers
+> Bank A Bank B
+> 28-bit partial
+> sum
+> INT8 x INT8 -> INT28
+> x
+> x
+> x
+> x
+> x
+> x
+> +
+> +
+> +
+> row0
+> row1
+> row2
+> Line Buffer
+> Window Seq.
+> k_y
+> k_x
+> Conv
+> Controller
+
+Figure 4: Accelerator architecture. The instruction scheduler fetches 64-byte instructions (including tile masks) from HBM. The tile manager orchestrates DMA engines and the compute pipeline. Activations and weights are double-buffered. 
+
+through a small MLP (Figure. 1 (b), Figure. 3), a computation that takes nanoseconds on any processor and produces a mask that remains valid for the duration of the command. The mask is then encoded into the instruction stream as a bitmask field, requiring no changes to the accelerator datapath. For a backbone with 𝐿 layers and 𝑇 𝑙 output feature tiles per layer, the gating network produces a binary vector of length sum( 𝑇 𝑙 − 1), one bit per tile, excluding tile 0 of each layer which is always active. This first tile serves as a shared "polysemantic core" that preserves cross-task representations. The total number of predictable tiles in our 8-layer convnet backbone is 182, and the gating MLP has fewer than 13k parameters, less than 0.12% of the backbone. 
+
+## 3 System Design 
+
+Our system co-designs three layers: a software gating mechanism 
+
+that produces per-tile binary masks from the task command, an in-struction set architecture that encodes these masks into the hardware instruction stream, and a tiled inference accelerator that executes or skips tiles based on the mask bits. We describe each component in turn. 
+
+## 3.1 Task-Conditional Gating Network 
+
+The gating network is a lightweight MLP that maps a task descrip-tor to a binary execution mask over the accelerator’s tile space (Figure. 3). The command c input is a one-hot vector over the set of supported commands (six in our driving application: follow lane, turn left, turn right, change lane left, change lane right, and brake). The output is a sigmoid-activated vector of length 182, cor-responding to one predictable tile per output feature group across the backbone’s eight layers. 
+
+Tile structure. The accelerator groups output features into fixed-size tiles of 16 features each ( OC_PAR ). An 8-layer backbone with output feature counts [32, 64, 128, 256, 512, 512, 512, 1024] yields [2, 4, 8, 16, 32, 32, 32, 64] tiles per layer, totaling 190 tiles. Tile 0 of each layer is designated as always-on, serving as a shared representational core across all tasks. The remaining 182 tiles are predictable by the gating network. 
+
+Training pipeline. We train the model in three phases: 
+
+Phase 1 (Dense). The backbone and output heads are trained from scratch without the gating network (Figure. 2), using standard supervised learning on the driving dataset. This produces a fully capable dense model. We train for 200 epochs. 
+
+Phase 2 (Soft masks). The gating network is attached and trained jointly with the backbone (Figure. 3). The Phase 2 objective aug-ments the task loss with a sparsity penalty on the continuous mask activations: 
+
+𝐿 soft = 𝐿 task ( ˆ𝑦, 𝑦 ) + 𝜆 · 1
+
+𝑇 
+
+> 𝑇
+
+∑︁ 
+
+> 𝑖 =1
+
+𝜎 (𝑔 𝑖 ) (1) where 𝑔 𝑖 are the gating network’s logits for each of the 𝑇 = 182 
+
+predictable tiles, 𝜎 is the sigmoid function, and 𝜆 ramps linearly from 0 to 0.002 over the 50 finetuning epochs. This sparsity penalty is analogous to group regularization methods for structured prun-ing [ 33 ], applied here at tile granularity. The masks remain con-tinuous, allowing gradient flow through the gating network. The backbone is initialized from the Phase 1 checkpoint; the gating parameters are initialized randomly. This phase learns which tiles are dispensable for each task while the backbone adapts to operate with reduced capacity. 
+
+Phase 3 (Hard masks). The masks are binarized via a hard thresh-old: 
+
+𝑚 𝑖 = 1[𝜎 (𝑔 𝑖 ) > 0.5] (2) and the Phase 3 objective becomes: 
+
+𝐿 hard = 𝐿 task ( ˆ𝑦 masked , 𝑦 ) + 𝜆 · 1
+
+𝑇 
+
+> 𝑇
+
+∑︁ 
+
+> 𝑖 =1
+
+𝑚 𝑖 (3) where ˆ𝑦 masked is the model output with binary masks applied. Since 𝑚 𝑖 is non-differentiable, we use the straight-through estima-tor [ 2] to approximate the gradient: 𝜕𝑚 𝑖 /𝜕𝑔 𝑖 ≈ 𝜕𝜎 (𝑔 𝑖 )/ 𝜕𝑔 𝑖 . Training  
+
+> 4Sparse by Command: Task-Conditional Compute Skipping for Multi-Task Inference Accelerators MICRO 2026, October 31–November 04, 2026, Athens, Greece
+
+continues for 50 epochs, hardening the mask decisions and fine-tuning the backbone to perform well under discrete tile execution. 
+
+Sparsity control. The hyperparameter 𝜆 controls the sparsity level. Higher values push more tiles toward zero, increasing the compute reduction at the cost of task accuracy. In our experiments, 
+
+𝜆 = 0.002 produces an average of 28% active tiles ( ∼72% pruned) across tasks while maintaining driving fidelity in CARLA. The sparsity is not uniform across tasks: the gating network learns that left turns require more representational capacity (28.9% of FLOPs active) than braking (23.9%), reflecting the inherent complexity of each maneuver in right-hand traffic. 
+
+## 3.2 Accelerator Architecture 
+
+The accelerator is a tiled inference engine (Figure 4) that processes layers by iterating over output feature tiles, input feature tiles, and spatial tile strips. It connects to HBM through three AXI4 master ports: one for reading input activations, one for reading weights and biases, and one for writing output activations. All data uses INT8 representation with 28-bit internal accumulators to preserve precision across partial sum accumulation. The accelerator is param-eterized by three parallelism factors: OC_PAR (output channels per tile, determining tile width), IC_PAR (input channels processed per PE in one MAC operation), and PP_PAR (pixel positions processed in parallel across the Vector Compute Unit (VCU) array). Our imple-mentation uses OC_PAR =IC_PAR =16 and PP_PAR =8, yielding 2,048 INT8 MACs per cycle, albeit these parameters are configurable. 
+
+Tile Manager. The tile manager is the central orchestrator. For each layer, it iterates over the spatial dimension in strips of config-urable height ( H_TILE =8 rows in our implementation), then over output feature tiles, then over input feature tiles. For each (output tile, input tile) pair, it coordinates three operations: loading the input activation strip from HBM into an on-chip buffer, loading the corresponding weight tile, and dispatching the data to the compute pipeline. The tile manager implements a double-buffered pipeline: while the compute engine processes one tile from buffer bank A, the DMA engines load the next tile into bank B. When both complete, the banks swap and the cycle repeats. Figure. 5 shows a psuedocode of the tile manager’s execution loops. 
+
+DMA Engines. Four DMA engines move data between HBM and on-chip memory: an input DMA loads activation strips into URAM (burst AXI read, up to 8 outstanding transactions, with zero-padding for halo rows), a weight DMA and bias DMA share a second AXI port to load kernel tiles into BRAM and bias vectors into registers, and an output DMA reads accumulated results, applies quantization (bias addition, ReLU, right-shift, INT8 clamping), and writes the result to HBM. The bias and input DMA operate in parallel on separate AXI ports, hiding bias load latency behind the input transfer. 
+
+On-Chip Buffers. The accelerator uses four on-chip storage structures, all double-buffered to support pipeline overlap: acti-vation buffers in URAM (one spatial strip of tile height + 2 halo rows (padding) per bank), weight buffers in BRAM (one 3 ×3 kernel tile per bank), bias registers (one OC_PAR -wide vector), and result accumulators (28-bit partial sums across one spatial strip). Partial sums accumulate across input feature tiles; the result accumulator 
+
+Table 1: NISA instruction format (64 bytes = 512 bits).                                 
+
+> Field Bits Description
+> Memory offsets 256 input, output, weight, bias (64b each) Spatial dims 32 width, height (16b each) Feature dims 32 in_channels, out_channels (16b each) Opcode 8CONV ,GEMM ,MEMCPY ,GAP ,HALT
+> Quant shift 8Post-accumulation right-shift Bank select 8Ping-pong buffer (Heap/BufA/BufB) Stride 8Convolution stride Log 2tile height 8Spatial tile height parameter Aux flags 8ReLU, flatten, sparse_en ,bias_en
+> Reserved 16 Alignment padding
+> Tile masks 𝑀 𝑜𝑐 128 Two 64-bit OC tile bitmasks (lo/hi)
+
+adds to the existing value when processing subsequent input tiles for the same output tile. 
+
+Compute Pipeline. The convolution accelerator processes data through a multi-stage pipeline. A line buffer stores the most recent 3 rows of the activation strip, feeding a window sequencer that extracts overlapping 3x3 windows as the data streams through. Each window is broadcast to an array of VCUs, one per pixel position in the parallelism group. Each VCU contains an array of processing elements (PEs), one per output feature in the tile. Each PE performs a multiply-accumulate operation across all input features using a dedicated MAC lane: it multiplies the input feature vector element-wise with the corresponding weight vector and reduces the products through an adder tree to produce a single 28-bit partial sum per cycle. The total parallelism is PP_PAR × IC_PAR × OC_PAR MAC opera-tions per cycle. In our configuration (8 pixels, 16 output features, 16 input features), this yields 2,048 INT8 MAC operations per cycle. 
+
+Performance Counters. The accelerator is instrumented with cycle-accurate performance counters that decompose execution time into compute cycles (convolution pipeline active), memory cycles (any AXI transfer active), overlap cycles (both compute and memory active simultaneously, indicating effective double buffer-ing), and stall cycles (neither active, indicating pipeline bubbles). The stall cycles are further broken down by tile manager state: prologue stalls (initial tile loading), barrier stalls (compute waiting for DMA or vice versa), and output stalls (waiting for the output write to complete). These counters are written to a reserved HBM location at the end of execution and read by the host for analysis. 
+
+## 3.3 Neural Instruction Set Architecture 
+
+The host communicates with the accelerator through a stream of fixed-width instructions stored in HBM. Each instruction is 64 bytes (512 bits), aligned to the HBM word width, and fully describes the execution of one layer. The instruction scheduler fetches instruc-tions sequentially from a reserved HBM region and configures the tile manager for each layer. 
+
+Instruction format. Each instruction encodes the layer’s oper-ation type, dimensions, quantization parameters, memory offsets, and tile execution masks (Table. 1): 
+
+Tile mask encoding. The two 64-bit mask fields provide 128 mask bits, supporting up to 128 output feature tiles per layer. Bit k corresponds to output feature tile k: if the bit is 1, the tile manager executes that tile; if 0, it skips the tile entirely. For dense execution,                                                                                                    
+
+> 5MICRO 2026, October 31–November 04, 2026, Athens, Greece Afzal Ahmad, Gaoyu Mao, Shoubo Hu, Hui-Ling Zhen, Mingxuan Yuan, Xinyu Chen, and Wei Zhang
+> Require: Layer config (𝐻,𝑊 , 𝐼𝐶, 𝑂𝐶, 𝑠𝑡𝑟𝑖𝑑𝑒, 𝑠ℎ𝑖 𝑓 𝑡 )
+> 1: 𝑁 𝑜𝑐 ← ⌈ 𝑂𝐶 /OC_PAR ⌉{number of output tiles}
+> 2: 𝑁 𝑖𝑐 ← ⌈ 𝐼𝐶 /IC_PAR ⌉{number of input tiles}
+> Require: Output tile mask 𝑀 𝑜𝑐 [0..𝑁 𝑜𝑐 −1]from NISA instruction
+> Require: Input tile mask 𝑀 𝑖𝑐 [0..𝑁 𝑖𝑐 −1] ← previous layer’s 𝑀 𝑜𝑐
+> 3: for each spatial strip 𝑦 in ⌈𝐻 /TILE_H ⌉do
+> 4: DMA: load input activation strip (HBM →URAM)
+> 5: for each output tile 𝑡 𝑜𝑐 =0to 𝑁 𝑜𝑐 −1do
+> 6: if sparse_en && 𝑀 𝑜𝑐 [𝑡 𝑜𝑐 ]=0then
+> 7: skip : no DMA, no compute, 1-cycle advance
+> 8: else
+> 9: DMA: load bias vector (HBM →register file)
+> 10: for each input tile 𝑡 𝑖𝑐 =0to 𝑁 𝑖𝑐 −1do
+> 11: if sparse_en && 𝑀 𝑖𝑐 [𝑡 𝑖𝑐 ]=0then
+> 12: skip : input masked from prev layer
+> 13: else
+> 14: DMA: load weight tile (HBM →BRAM)
+> 15: Stream activation window through conv pipeline
+> 16: if 𝑡 𝑖𝑐 =first active then
+> 17: Initialize partial sums in result buffer
+> 18: else
+> 19: Accumulate into existing partial sums
+> 20: end if
+> 21: end if
+> 22: end for
+> 23: Add bias, right-shift by 𝑠ℎ𝑖 𝑓 𝑡 , clamp to INT8, ReLU
+> 24: DMA: write output tile (URAM →HBM)
+> 25: end if
+> 26: end for
+> 27: end for
+
+Figure 5: Tile manager execution loops. Teal highlights the sparsity mechanism. 𝑀 𝑜𝑐 is from the NISA bitmask field; 𝑀 𝑖𝑐 
+
+is set to the previous layer’s 𝑀 𝑜𝑐 by the instruction sched-uler, propagating sparsity across layers. Masked tiles cost one cycle (shift register advance); this two-level skipping compounds across adjacent layers. 
+
+all bits are set. For task-conditional sparse execution, the host eval-uates the gating network for the active command and writes the resulting binary mask into the instruction fields before launching the accelerator. This design requires no runtime mask computation on the accel-erator. As the command set is bounded (six here), we precompute the masks on the host and the gating MLP never runs at inference; the deployed table is a 128-byte mask per command (a 128-bit lo/hi field per backbone layer). On a command change the host rewrites the mask field in each layer’s 512-bit instruction, a 512 byte host-to-HBM transfer measured as 13.4 𝜇 s on the U50 against a 3.74–4.44 ms inference—under a percent of one frame, and amortized to near zero over the hundreds of frames a command persists. An unbounded command set (e.g. language-conditioned VLAs) would run the MLP once per change, but its forward pass is negligible against a back-bone inference. 
+
+Instruction stream generation. The host runtime parses a model specification that lists each layer’s dimensions, quantization parameters, weight and bias file locations, and tile masks. It packs one instruction per layer into a contiguous buffer and writes the buffer to HBM. Execution begins when the host writes a start signal to an AXI4-Lite control register, and completes when the accelerator writes performance counters to a reserved HBM location. 
+
+Generality. The ISA is not specific to any model architecture. The same instruction format handles convolutions, fully-connected layers, pooling, and data movement through the opcode field. Adding a new operation type requires defining a new opcode and imple-menting the corresponding datapath in the tile manager, without changes to the instruction format or mask encoding. The tile mask fields are opcode-independent and apply uniformly to any opera-tion that iterates over output feature tiles. 
+
+## 3.4 Tile Skipping 
+
+The tile manager’s iteration loop checks the mask before process-ing each output feature tile (Figure. 5, line 6). When the sparse execution flag is set in the instruction’s auxiliary fields (Table. 1 
+
+sparse_en ), the tile manager maintains a shift register initialized with the tile mask 𝑀 𝑜𝑐 . At each output tile iteration, it inspects the least-significant bit: if the bit is 1, the tile proceeds through the normal execution pipeline (DMA load, compute, accumulate). If the bit is 0, the tile manager advances to the next output tile without issuing any DMA requests or starting the compute engine. The shift register advances by one bit per iteration, requiring no address decoding or lookup table. 
+
+Propagation across layers. When an output feature tile is masked in layer L, the corresponding features are never written to HBM. In layer L+1, these features appear as input feature tiles. The tile manager for layer L+1 checks the input feature mask 𝑀 𝑖𝑐 
+
+(derived from layer L’s output mask) and skips the corresponding input tile iterations (Figure. 5, lines 11-12). This means that a single masked output tile in layer L eliminates both the output-side com-putation in layer L and the input-side computation in layer L+1, compounding the savings. 
+
+Zero overhead. Skipping a tile costs one cycle for the mask bit check and shift register advance. No DMA transactions are initiated, no compute resources are occupied, and no on-chip buffer space is consumed. The skipped tile is invisible to the rest of the pipeline. The double-buffered execution continues seamlessly: after skipping one or more masked tiles, the tile manager proceeds to the next active tile and resumes the normal DMA-compute overlap. 
+
+Interaction with double buffering. The tile manager searches ahead for the next active tile before entering the pipeline stage. If the next tile is masked, the search advances past it in a single cycle per skipped tile. Once an active tile is found, the pipeline resumes with the standard bank-swap protocol. This lookahead ensures that the double-buffered pipeline does not stall due to skipped tiles; the DMA for the next active tile begins as soon as the current active tile’s compute starts. 
+
+## 3.5 Deployment Pipeline 
+
+Deploying a trained PyTorch model on the accelerator requires bridging the gap between floating-point software representations and the accelerator’s INT8 tiled datapath. We implement this as a four-stage offline compiler. 
+
+Quantization. A calibration pass runs 300 training samples through the model, recording the maximum absolute activation at each layer output. Per-layer quantization shifts are computed as 
+
+𝑠ℎ𝑖 𝑓 𝑡 = ⌈log 2 (𝑎𝑐𝑡 _𝑚𝑎𝑥 ×𝑐𝑢𝑚𝑢𝑙𝑎𝑡𝑖𝑣𝑒 _𝑠𝑐𝑎𝑙𝑒 / 𝑄 max )⌉ , where 𝑄 max =
+
+127 and the cumulative scale tracks the product of input and weight  
+
+> 6Sparse by Command: Task-Conditional Compute Skipping for Multi-Task Inference Accelerators MICRO 2026, October 31–November 04, 2026, Athens, Greece
+
+Figure 6: Street-level view of an intersection in CARLA 
+
+Town10HD_Opt . Multi-lane roads, traffic signals, and urban geometry representative of real-world driving conditions. 
+
+scales through the network. Weights are quantized to INT8 via per-tensor symmetric scaling [ 19 ]; biases are quantized to INT32 and clamped to the 28-bit accumulator range. 
+
+Data packing and memory layout. Feature maps are repacked from PyTorch’s planar [C, H, W] to a tiled layout [H_tiles, C_slots, H_local, W, C_local] where each innermost group of IC_PAR =16 channels aligns with the PE array. Weights are similarly repacked to [OC_tiles, IC_tiles, K 𝑦 , K 𝑥 , OC_par, IC_par]. The compiler lays out all data in a contiguous HBM region: 64 KB for instructions, followed by the packed input image, then all layers’ weights and biases. Per-layer byte offsets are recorded in each NISA instruction. 
+
+Instruction generation. For each layer, the compiler emits one 64-byte NISA instruction, populating all fields described in Sec-tion 3.3. Bank selection alternates the output buffer between BufA and BufB across layers (ping-pong). For task-conditional models, the per-layer binary masks produced by the gating network are encoded into the instruction’s tile mask fields. A final HALT in-struction terminates the stream. The host program is written in C++ using OpenCL 1.2 bindings linked against AMD/Xilinx’s XRT runtime. It transfers the packed input image, weights, biases, and instruction stream to HBM over PCIe Gen3 x16, issues a start signal via an AXI4-Lite control register write, and polls for completion. After execution, the host reads back the output activations and hardware performance counters from reserved HBM locations. 
+
+## 4 Evaluation 4.1 Experimental Setup 
+
+Driving task and dataset. We evaluate on a closed-loop visuomo-tor driving task in the CARLA autonomous driving simulator [ 10 ], specifically in Town10HD_Opt , an urban environment with inter-sections, multi-lane roads, and traffic signals (Fig. 6). For dataset collection, an expert rule-based controller drives the ego vehicle at 15 km/h while a front-facing RGB camera (110 ◦ FOV, rendered at 1920 ×1080) records frames at 20 FPS, which are subsequently downsampled to 256 ×256 for training. Each frame is paired with the expert’s control labels: steering ∈ [− 1, +1] (where −1 corre-sponds to full left lock and +1 to full right lock), throttle ∈ [ 0, 1],brake ∈ [ 0, 1], and the vehicle’s current speed. To address covariate shift in imitation learning, data collection includes DAgger-style perturbations [ 27 ]: the vehicle is periodically steered off-centre (±0.20 steering for 15–25 frames) and only the subsequent recovery frames are recorded, teaching corrective behaviour from off-centre states. Since the vast majority of raw frames correspond to the vehicle driving straight, leading to a severely imbalanced command distribution that causes the model to collapse onto a “drive straight” policy. To correct this, we drop 90% of straight-driving frames dur-ing dataset curation. The resulting dataset contains 302K training frames across six commands: follow lane / go straight, turn left, turn right, change lane left, change lane right, and brake. 
+
+Metrics. We evaluate closed-loop driving using two metrics. 
+
+Route completion (%) measures the fraction of planned route way-points reached before episode termination. Cross-track error (CTE, metres) measures the average lateral distance from the vehicle cen-tre to the nearest route waypoint across all simulation frames of an episode. Episodes terminate on collision, sidewalk departure, CTE exceeding 20m, or vehicle standstill for more than 5s without a traffic hazard. 
+
+Model. The backbone (Figure. 2) is an 8-layer stride-2 CNN reducing 256 ×256 ×3 input to a 1024-dim feature vector. A mea-surement encoder projects the previous control state (steering, ac-celeration, speed) to a 128-dim embedding fused with the visual embedding (1152 →512, ReLU, 50% dropout). Six parallel branch heads (512 →256 →256 →2, Tanh) output steering and acceleration, each ∈ [− 1, +1] (acceleration <0 denotes braking, acceleration >0denotes throttle); the active command selects the branch at runtime. The tile gating MLP (6 →64 →182, sigmoid) adds <13k parameters. Total: 11.01 M parameters and 1.07 GFLOPs per inference. 
+
+Training. We follow the three-phase pipeline described in Sec-tion 3.1. Phase 1 trains the dense model (Figure. 2) for 200 epochs (AdamW, lr =2×10 −4, BS =256) with a branched L1 loss in which, for each sample, only the branch head corresponding to the ground-truth command contributes to the gradient. The steering component is weighted 25 × more heavily than acceleration and is further mul-tiplied by a quadratic magnitude factor (1 + 10 |𝑠 |2), where 𝑠 is the ground-truth steering target. This factor is essential because the dataset is dominated by low-steering frames (straight segments even after the 90% downsampling); without it, the model minimises loss by predicting near-zero steering uniformly and fails to exe-cute turns. The quadratic weighting penalises large-steering errors much more than straight-driving errors, forcing the model to fit the long tail of the steering distribution. Active braking/throttle frames are additionally up-weighted 5 × relative to coasting frames. 
+
+Phase 2 attaches the gating network (Figure. 3) and fine-tunes for 50 epochs with soft masks under a sparsity penalty ( 𝜆 =0.002, linearly ramped), reducing active tiles from 93% to ∼80% of the 182 prunable tiles. Phase 3 binarises masks at threshold 0.5 using the straight-through estimator [ 2] and fine-tunes for a further 50 epochs. The best Phase 3 checkpoint achieves 100% route comple-tion and 0.950m average CTE on dynamic hard evaluation routes, with ∼72% of tiles masked across the eight convolutional layers. 
+
+FPGA platform. The accelerator is written in SystemVerilog RTL and implemented using AMD/Xilinx’s Vitis design flow tar-geting 300 MHz on a Xilinx Alveo U50 with HBM2; after place-and-route, the final design closes timing at 287 MHz. The datapath parallelism parameters (Section 3.2) yield 2,048 INT8 MACs/cycle peak throughput. The deployment pipeline (Section 3.5) quantizes the model to INT8 using per-layer calibration over 300 frames,  
+
+> 7MICRO 2026, October 31–November 04, 2026, Athens, Greece Afzal Ahmad, Gaoyu Mao, Shoubo Hu, Hui-Ling Zhen, Mingxuan Yuan, Xinyu Chen, and Wei Zhang
+
+Table 2: Per-task sparsity profile and FPGA on-device performance at 287 MHz. Active Tiles: number of the 182 prunable conv tiles executed for this command (out of 190 total including 8 always-on tiles). FLOP/Param Act.: fraction of dense FLOPs/parameters actually computed. Cycle columns in units of 10 6 cycles (M); latency derived at 287 MHz. Command Active Tiles FLOP Act. Param Act. Total Cyc. (M) Compute (M) Stall (M) Lat. (ms) 
+
+Dense (all tiles) 182/182 (100%) 100.0% 100.0% 2.62 1.65 0.77 9.12 Follow Lane / Straight 49/182 (26.9%) 30.2% 26.9% 1.19 0.54 0.58 4.16 Turn Left 57/182 (31.3%) 28.9% 31.3% 1.20 0.53 0.58 4.19 Turn Right 55/182 (30.2%) 33.7% 30.2% 1.27 0.61 0.58 4.44 Ch. Lane Left 54/182 (29.7%) 29.9% 29.7% 1.20 0.54 0.58 4.19 Ch. Lane Right 53/182 (29.1%) 27.6% 29.1% 1.17 0.51 0.58 4.08 Brake 34/182 (18.7%) 23.9% 18.7% 1.07 0.43 0.57 3.74 
+
+Figure 7: Bird’s-eye view of the three hard evaluation routes in Town10HD_Opt . Squares mark spawn and destination points. 
+
+packs data into tiled layouts, and generates the NISA instruction stream with per-layer tile masks encoded as 128-bit bitmasks. 
+
+GPU baseline. Inference latency is measured on an NVIDIA RTX 4090 D (1,321 INT8 TOPS) running the same model in PyTorch. 
+
+Evaluation protocol. We structure evaluation around four ex-periments: 
+
+E1. Driving quality — static 3-way comparison (Section 4.7). We compare three configurations end-to-end in CARLA: (i) dense baseline (GPU, float32), (ii) task-sparse model (GPU, float32 with hard tile masks applied), and (iii) task-sparse model deployed on-device on the Alveo U50 (INT8). All three run the same three hard routes under static conditions (0 NPC vehicles). Static evaluation eliminates the confound of CARLA’s non-deterministic Traffic Man-ager, making a single run per configuration sufficient and exactly repeatable. Research question: does task-conditional sparsity preserve driving quality, and does INT8 on-device execution preserve the sparse model’s behaviour? 
+
+E2. Driving quality — dynamic traffic robustness (Section 4.7). We evaluate the task-sparse GPU model with 40 NPC vehicles over three independent runs and report mean and standard deviation. 
+
+Research question: does the task-sparse model generalize to realistic dynamic traffic? 
+
+E3. Task-conditional vs. static pruning (Section 4.3). We compare task-conditional masking against task-agnostic structured pruning at matched sparsity levels and equal fine-tuning budgets. 
+
+Research question: is the quality benefit due to the conditional struc-ture of the mask, or would any pruned model achieve the same result? 
+
+E4. FPGA on-device latency and efficiency (Section 4.4). Per-task latency and cycle decomposition are measured on the Alveo U50 via hardware performance counters embedded in the RTL, and compared against GPU inference to demonstrate that tile-level sparsity requires custom hardware to translate into actual speedup. 
+
+Research question: what is the latency and energy benefit of task-conditional sparsity on the FPGA, and why does the same mask fail to help on a GPU? 
+
+Routes. All closed-loop experiments use three hard routes in CARLA Town10HD_Opt shown in Figure 7: Hard 1, a long multi-lane corridor with several intersections requiring lane changes and turns (206 waypoints); Hard 2, a dense commercial district with tight turns (129 waypoints); and Hard 3, a mixed residential–commercial path with multi-lane merges (269 waypoints). 
+
+## 4.2 Task-Conditional Sparsity Analysis 
+
+The learned tile masks (Figure. 1 (a)) exhibit clear task-dependent structure. Table 2 reports per-task sparsity and on-device FPGA performance for the final Phase 3 model. Task-conditional sparsity reduces FLOPs by 66.3–76.1% depend-ing on the command. The masks reflect task complexity: Turn Left, which requires crossing oncoming traffic and navigating wider arcs, retains the most tiles (57/182). Brake, which relies primarily on proximity detection and requires minimal spatial processing, is pruned most aggressively (34/182). The remaining commands cluster tightly between 49 and 55 active tiles (26.9–30.2%). 
+
+Tile overlap. 19 tiles (10.4%) are active in all tasks—a shared representational core. The union of all task masks covers 87 tiles (47.8%), leaving 95 tiles (52.2%) that are never activated by any com-mand. The 68 task-differentiating tiles (active for some commands but not others) constitute the space where task-conditional sparsity provides its benefit over static pruning. This decomposes the savings into a static and a conditional part. Statically removing the 95 never-active tiles and keeping the union of the rest is a 52% tile reduction, the same for every com-mand and exactly what a task-agnostic structured prune achieves; task-conditional masking of the 68 then cuts a further 17–29% depending on the command, reaching 69–81% per command. To verify the two are separable, we removed the 95 never-active tiles       
+
+> 8Sparse by Command: Task-Conditional Compute Skipping for Multi-Task Inference Accelerators MICRO 2026, October 31–November 04, 2026, Athens, Greece 020 40 60 80
+> Tile Sparsity (%)
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> Route Completion (%)
+> Task-Cond.
+> (Ours)
+> Static pruning
+> collapses
+> Dense
+> baseline
+> Completion (static pruning)
+> CTE (static pruning)
+> Completion (task-cond.)
+> CTE (task-cond.) 0.0
+> 0.5
+> 1.0
+> 1.5
+> 2.0
+> 2.5
+> 3.0
+> 3.5
+> 4.0
+> Cross-Track Error (m)
+
+Figure 8: Static pruning vs. task-conditional sparsity. Route completion (left, blue) and CTE (right, red) for static pruning at 0–70% tile sparsity. Our task-conditional results (green band, 69–81%) achieve 100% completion with CTE 0.526–0.813 m, beyond the cliff where static pruning collapses 
+
+from the architecture, producing a backbone with half the tiles (95 of 190), and retrained task-conditional masking on it from a freshly initialised gating network. Removing the 95 is lossless by construction—the full model under the union mask is bit-identical to the pruned model—and after retraining the smaller backbone the gating re-learns task-conditional masks with the same coarse ordering (braking pruned most, turns and lane changes least)—not the identical tiles, since a freshly initialised gater on the restruc-tured backbone finds its own, sparser per-command solution, but the same qualitative structure—at preserved fidelity: open-loop con-trol error 0.0267 matches the dense model, and the pruned model completes Hard 2 and Hard 3 at 100%. The static removal and the task-conditional masking are therefore separable and additive: the 95 tiles are pure static redundancy, and the per-command benefit lives entirely in the surviving tiles. 
+
+FLOP vs. tile sparsity. FLOP reduction exceeds tile reduction for most commands because the gating network prunes more ag-gressively in early high-FLOP layers (large spatial dimensions) than in later low-FLOP layers, producing FLOP-aware masks despite training with a uniform tile-count penalty. 
+
+Latency breakdown. Compute cycles (Table 2) decrease with active tile count, confirming that masked tiles incur zero compute cost; the reduction is not strictly linear across commands because early-layer tiles (larger spatial maps) contribute disproportionately more compute per tile than later-layer tiles. Stall cycles, by contrast, decrease by only 24–26% across all sparse tasks relative to the dense baseline. This asymmetry arises because stall is dominated by fixed per-layer costs—instruction fetch, DMA setup, and HBM access latency—that are independent of tile count. The dominant stall component is the pipeline barrier (compute idle while the next tile’s DMA completes), which accounts for 84.7% of stall in the dense baseline. Task-conditional sparsity reduces end-to-end latency by 51–59%, from 9.12 ms to 3.74–4.44 ms. 
+
+## 4.3 Static Pruning Comparison 
+
+To isolate the benefit of task-conditional masks over task-agnostic pruning, we compare against static structured pruning at the same 
+
+Table 3: FPGA resource utilization (Alveo U50, 287 MHz). Resource Used Available Util.% 
+
+CLB LUTs 235,048 870,720 27.0% CLB Registers 389,479 1,743,360 22.3% BRAM36 238.5 1,344 17.8% URAM288 60 640 9.4% DSP48E2 2,082 5,952 35.0% sparsity levels with equal fine-tuning budgets. For each target spar-sity, we rank all 182 prunable tiles by weight L1 magnitude across the dense baseline, zero out the weakest tiles, and fine-tune for 20 epochs with pruned tiles held at zero. The results in Figure. 8 show that static pruning maintains full route completion up to 40% tile sparsity but collapses at 50% (91 tiles), dropping to 16.9% completion and remaining there through 70% sparsity. The 16.9% completion corresponds to the vehicle reach-ing the first required turn on each evaluation route and failing to execute it: at 50%+ uniform sparsity, the statically pruned model loses turn-specific feature tiles and can only drive straight, termi-nating when CTE exceeds the 20m threshold. Our task-conditional approach operates at 69–81% sparsity (34–57 active tiles per com-mand), well beyond the static pruning cliff, while achieving 100% completion on Hard 2 and Hard 3 with CTE of 0.526–0.813 m (static evaluation, E1). The failure mode is instructive. Static pruning must retain tiles that are important for any command, while tiles that are important for some commands but not others face an irresolvable trade-off. At 50% sparsity the fixed mask inevitably removes tiles critical for specific commands (e.g., spatial-processing tiles needed for turns), collapsing performance on those tasks. Task-conditional masking avoids this by activating different tile subsets per command: the 68 task-differentiating tiles are retained when needed and skipped when not, enabling higher effective sparsity without sacrificing any individual command. The 19-tile shared core (Section 4.2) is structurally analogous to what static pruning would retain at high sparsity, but 19 tiles alone cannot drive the vehicle. The remaining capacity must come from task-specific tiles, which only the conditional mechanism can selectively enable. 
+
+## 4.4 On-Device Latency 
+
+Table 2 shows the per-task latency and cycle decomposition. Task-conditional sparsity reduces latency by 51–59%, from 9.12 ms (dense) to 3.74–4.44 ms. Turn Right (55 prunable tiles) is the slowest sparse task at 4.44 ms despite having fewer tiles than Turn Left, because it activates more tiles in high-FLOP early layers (larger spatial feature maps); Brake (34 tiles) is fastest at 3.74 ms. 
+
+## 4.5 GPU Comparison 
+
+On the RTX 4090 D, dense inference takes 0.44 ms. Sparse inference with tile masking takes 0.54 ms—22% slower . The mask multiplies activations by zero after the convolution is already computed; the GPU still fetches all weights and occupies all CUDA cores. Naive masking is not the only option, so we measured the best case for a custom kernel that truly skips the masked tiles: for each command    
+
+> 9MICRO 2026, October 31–November 04, 2026, Athens, Greece Afzal Ahmad, Gaoyu Mao, Shoubo Hu, Hui-Ling Zhen, Mingxuan Yuan, Xinyu Chen, and Wei Zhang Hard 1 Hard 2 Hard 3
+> 0
+> 1
+> 2
+> 3
+> 2.38
+> 1.98
+> 0.67
+> 2.94
+> 0.81
+> 0.53
+> 1.00
+> 0.78
+> 0.56
+> 88% Completion
+> Average CTE (m)  Lower is better
+> Task-Sparse (GPU) on Hard 1 terminated at CTE > 20 m threshold; value shown is CTE averaged over the
+> 88% of route completed.
+> Dense (GPU)
+> Task-Sparse (GPU)
+> Task-Sparse (FPGA)
+
+Figure 9: Average CTE across three hard routes (E1: static, 0 NPC vehicles, single deterministic run). Task-Sparse (FPGA): INT8 on-device, verified against GPU float32 (max deviation 0.0129). Hatched bar: Task-Sparse (GPU) terminated early on Hard 1 (87.6% completion, CTE averaged to termination). Task-Sparse models reduce CTE by 21–59% vs. dense. 
+
+we built a smaller dense network keeping only the active channels for that command (no masking, no gather, contiguous weights), which upper-bounds any sparse kernel, and timed it at batch one. Even after removing ∼75% of the convolution , it runs within a few percent of the dense model—a mean 1.03 × speedup, against the 2.1– 2.4 × the FPGA gets from the same masks. The limit is architectural: at batch one the network runs at well under 1% of the GPU’s peak, so latency is set by kernel launch and memory traffic across the 13 layers rather than arithmetic, and the pruned tiles sit mostly in deep, low-spatial layers that are already cheap on a GPU. On the FPGA, masked tiles are skipped before any DMA or compute is initiated, and its latency scales with the number of tile iterations, so the same mask that adds pure overhead on the GPU yields proportional cycle savings: tile-level sparsity needs hardware that drops fetch and compute together. The 21 × absolute latency gap (0.44 vs. 9.12 ms) reflects the through-put difference (1,321 vs. ∼1.2 INT8 TOPS). The FPGA targets de-ployments where a discrete GPU is unavailable or where power is constrained, as analyzed next. 
+
+## 4.6 Resource Utilization and Power 
+
+All resource types (Table 3) are at or below 35%, leaving headroom for scaling parallelism. The tile-level sparsity mechanism adds no additional datapath hardware; the same design executes both dense and sparse workloads (controlled through sparse_en ). 
+
+Power. Vivado estimates 28.8 W total on-chip power (22.6 W dynamic, 6.1 W static), well within the U50’s 75 W board budget. The kernel dynamic power (excluding the platform shell) is 17.7 W. At 9.12 ms per dense inference, energy is 263 mJ. Task-conditional sparsity reduces this to 108–128 mJ (51–59% savings), driven primar-ily by faster completion rather than reduced instantaneous power. For comparison, the RTX 4090 D at 425 W TDP consumes up to 
+
+∼187 mJ per inference—46–73% more than the FPGA under sparse execution, despite being 21 × faster in wall-clock time. 
+
+## 4.7 Driving Quality 
+
+Evaluation design. We evaluate under static conditions (E1: 0 NPC vehicles) to isolate the effect of sparsity and INT8 quantisation 1 2 3 4 5 6 7 8 9 10 11 12       
+
+> Transformer block (MLP hidden tiles, 192 per block)
+> Follow lane (38%)
+> Turn left (29%)
+> Turn right (35%)
+> Ch. lane left (28%)
+> Ch. lane right (33%)
+> Brake (4%)
+
+Figure 10: Learned per-command tile activation on the ViT-Base backbone (orange = active; one column per MLP-hidden tile, grouped by transformer block). The gating network re-produces the CNN’s structure: braking is pruned most, turns and lane-following least, and deeper blocks are pruned more. 
+
+from traffic stochasticity, and complement this with dynamic-traffic results for the sparse GPU model (E2) to confirm robustness under realistic conditions. 
+
+FPGA deployment fidelity. We verified on-device INT8 output against the GPU float32 model over 300 calibration frames; the maximum absolute difference across all six branch heads is 0.0129 (on a [− 1, +1] scale), confirming negligible quantization error. 
+
+Results. Figure 9 reports route completion and CTE across all three hard routes. On Hard 2 and Hard 3, all models achieve 100% completion. The task-sparse models achieve substantially lower CTE than the dense baseline (59% lower on Hard 2; 21% lower on Hard 3). The FPGA on-device model matches the sparse GPU model within 3.9% on Hard 2 and 5.9% on Hard 3. On Hard 1, the longest route with several complex merges, the dense and FPGA models complete the route, while the sparse GPU model terminates early when lateral error exceeds 20 m (87.6% completion), indicat-ing a localised failure at a specific merge geometry that the INT8 quantization noise incidentally avoids. This is not a property of the task-conditional masking: the same mask, executed in INT8 on the FPGA, completes the route, so the early termination reflects a localised FP32-versus-INT8 numerical difference at one merge geometry, not the sparsity mechanism or data imbalance. 
+
+Effect of task-conditional masking. The CTE improvement of the sparse model is consistent with a task-specialization effect [ 28 ]: masking irrelevant tiles reduces cross-command interference, sharp-ening per-command trajectory output. The sparse model also under-goes additional Phase 2–3 fine-tuning, so to separate the conditional-architecture benefit from continued training we trained the dense baseline for the same extra budget and evaluated both over five runs on the three hard routes. The equal-budget dense model completes 75% ± 13% of routes (CTE 1.70 ± 0.74 m), whereas the task-sparse model completes 98% ± 2% (CTE 0.96 ± 0.18 m): continued training of a unified backbone does not reach the sparse model’s driving quality and is markedly less stable run-to-run. The improvement is therefore attributable to conditional masking removing cross-command interference, not to the additional training. 
+
+Dynamic traffic. Under dynamic conditions (E2: 40 NPC vehi-cles, three independent runs), the task-sparse GPU model achieves 100% completion on Hard 2 and Hard 3 in all runs, with CTE of 
+
+0.710 ± 0.014 m and 0.520 ± 0.014 m respectively—consistent with static results and confirming robustness to moderate traffic den-sity. Hard 1 exhibits run-to-run completion variance (61.7–65.0%) attributable to the combination of the model’s Hard 1 instability and stochastic traffic divergence over the long route.  
+
+> 10 Sparse by Command: Task-Conditional Compute Skipping for Multi-Task Inference Accelerators MICRO 2026, October 31–November 04, 2026, Athens, Greece
+
+Table 4: Sparsity mechanism comparison. Our approach is the only design that conditions sparsity on a runtime task signal with zero datapath modification. †Compressed format with index matching. Design Venue Sparsity Type Granularity Pattern Source Runtime Adaptive? HW Overhead Datapath Change?                                           
+
+> Eyeriss [6] ISCA’16 Activation zeros Element Input data Per-input Gating logic No SCNN [26] ISCA’17 Weight + activation Element Training No Index match †Yes Cambricon-S [39] MICRO’18 Weight (coarse) Filter Training No Index decoder Yes SNAP [36] JSSC’21 Weight + activation Element Training No Bitmap index match †Yes HPIPE [16] FPGA’20 Weight sparsity Element Pruning No Skip logic Yes
+> Ours —Task-cond. tile 16-ch tile Task command Per-task 1-bit check No
+
+Table 5: Per-command sparsity and FLOP reduction on the ViT-Base backbone. Active tiles are of the MLP hidden di-mension; attention is left dense.               
+
+> Command Active tiles FLOP reduction
+> Follow lane 37.9% 39.7% Turn left 29.0% 45.4% Turn right 34.9% 41.6% Ch. lane left 28.2% 45.9% Ch. lane right 33.2% 42.7% Brake 3.6% 61.6%
+
+## 4.8 Generality to Transformer Backbones 
+
+To test whether the mechanism generalises beyond convolutions, we built a second visuomotor controller on the same CARLA task with a ViT-Base/16 backbone in place of the CNN, keeping the gating network, the three-phase training, and the tile-level sparsity penalty unchanged. The masking target is the MLP, the high-FLOP part of a transformer block ( fc1 and fc2 are 64% of a block’s FLOPs, attention the other 36%): we place the tiles on the MLP hidden channels—the output channels of fc1 , which are the input channels of fc2 —so masking a tile removes work from both linear layers, the same output-side and input-side skip the CNN gets across adjacent convolutional layers. Figure 10 shows the learned masks. The gating network re-produces the CNN’s ordering: braking, the simplest command, is pruned most (3.6% of tiles active), while turns and lane-following keep the most (28–38%), with ∼28% active overall, and deeper blocks pruned more heavily as in the CNN. Open-loop fidelity matches the dense ViT: the mean absolute error over predicted steering and acceleration is 0.030 versus 0.028. Because we mask only the MLP and leave attention dense, the per-command FLOP reduction is 40–62% (Table 5), below the CNN’s 66–76%; attention is a floor we do not touch, and masking attention head-groups (standard head pruning [ 23 ]) would lift this further. The result needs no new accel-erator: the engine already executes GEMM—the linear layers are 96% of a ViT block’s FLOPs (the MLP alone is 64%)—and a GEMM is a 1 ×1 convolution on this engine, so the same instruction-level masks apply. 
+
+## 4.9 Comparison with Prior Work 
+
+Sparsity mechanism comparison. Table 4 compares our spar-sity mechanism against prior accelerators along three dimensions: what determines the sparse pattern, at what granularity skipping occurs, and what hardware overhead the mechanism requires. Our approach is unique in conditioning the pattern on a task command with zero datapath overhead. 
+
+FPGA accelerator comparison. Table 6 compares our design against recent FPGA-based inference accelerators. The designs span different platforms, architectures, and compute paradigms; we re-port numbers directly from the respective publications. Several observations contextualize these numbers. The AMD DPU achieves higher peak GOPS by packing multiple INT8 MACs per DSP48E2 [ 1 ]; our design uses one MAC per DSP, a conservative choice upgradeable orthogonally to tile masking. DNNExplorer generates per-model customized accelerators with 87–90% DSP effi-ciency on the larger U250 FPGA [ 37 ]. HPIPE targets Intel Stratix 10 FPGAs with INT16 precision and supports static weight sparsity through channel-level skipping [ 16 ]. CHARM leverages Versal AI Engine cores at 1.25 GHz—a fundamentally different compute fab-ric than programmable logic DSPs [ 40 ]. FINN-R generates fully-pipelined streaming architectures using LUTs rather than DSPs, optimized for sub-INT8 quantization and achieving high through-put at extremely low power [3]. Our design occupies a distinct point in this space: a general-purpose tiled accelerator with runtime-adaptive sparsity controlled through the instruction stream, deployed on a mid-range FPGA. No other design supports task-conditional execution masks. The closest is HPIPE’s static weight sparsity [ 16 ], which is fixed at compile time and cannot adapt per task. On our hardware, task-conditional masking reduces latency by 51–59% (9.12 ms → 3.74– 4.44 ms), yielding 226–267 inferences per second. At 28.8 W board power, sparse inference consumes 108–128 mJ, a 51–59% energy reduction from the dense baseline. A GPU runs the same model in 0.44 ms dense, but the sparse variant is 22% slower (Section 4.5), confirming that tile-level sparsity requires hardware support. Please note that our throughput can be improved by design scaling, DSP-packing, and various other optimizations orthogonal to our work. 
+
+## 5 Related Work 
+
+Sparse accelerators. Prior work exploits weight and activation sparsity through compressed encodings and index-matching hard-ware (SCNN [ 26 ], SparTen [ 15 ]), coarse-grained filter pruning with dedicated index decoders (Cambricon-S [ 39 ]), flexible dataflows adapting to varying sparsity patterns (Eyeriss v2 [ 7]), unstructured sparsity (SNAP [ 36 ]), and irregular sparsity mapping via flexible interconnects (SpArch [ 38 ]). A complementary line schedules tile-level sparsity across heterogeneous cores rather than encoding it: DeSpa [ 20 ] pairs dense and sparse cores with a tile-stealing sched-uler that adapts to the sparsity already present in the data. Such heterogeneity-aware scheduling accelerates sparse tiles but cannot skip task-irrelevant ones, because it has no task signal and sees only the tensor; our command-conditioned masks instead tell the  
+
+> 11 MICRO 2026, October 31–November 04, 2026, Athens, Greece Afzal Ahmad, Gaoyu Mao, Shoubo Hu, Hui-Ling Zhen, Mingxuan Yuan, Xinyu Chen, and Wei Zhang
+
+Table 6: Comparison with FPGA-based inference accelerators. Our contribution is not peak throughput but the 2.1–2.4 × latency reduction from task-conditional sparsity—a capability absent from all other designs. Design Venue Platform Freq. Dtype DSPs Peak (GOPS) Open Focus                                                                                
+
+> Vitis AI DPU [1] –Alveo U280 300 MHz INT8 2,452 4,800 No Commercial DPU IP (multi-MAC/DSP packing) DNNExplorer [37] ICCAD’20 Xilinx KU115 200 MHz INT8/16 4,686 1,702 No Hybrid pipeline+generic accelerator with automated DSE HPIPE [16] FPGA’20 Stratix 10 580 MHz INT16 5,022 —No Layer-pipelined sparse-aware CNN inference H2PIPE [11] FPL’24 Stratix 10 NX 300 MHz INT8 3,960 7,731 No Layer-pipelined CNN with HBM weight offloading CHARM [40] FPGA’23 VCK190 1 GHz FP32 AIE 2,936 Yes Heterogeneous AIE+PL GEMM composition FINN-R [3] TRETS’18 AWS F1 (VU9P) 250 MHz INT1–3 —†—Yes Streaming dataflow for quantised NNs Sparse DLA [21] FCCM’21 Stratix 10 MX 257 MHz FP16 1,442 —No Sparse matrix packing for systolic array with HBM2 HASS [35] FPL’24 Alveo U250 250 MHz INT16 7,434 —No HW-aware sparsity search for dataflow accelerators
+> Ours —Alveo U50 287 MHz INT8 2,082 1,176 Yes Task-conditional tile sparsity
+> †FINN-R uses LUT-based compute rather than DSPs for sub-INT8 quantisation. Ours: 9.12 ms dense →3.74–4.44 ms sparse (2.1–2.4 ×speedup); 263 mJ →108–128 mJ energy/inference; 110 →226–267 inf/s.
+
+hardware, before any fetch, which tiles not to execute at all, and the two are composable—one could schedule the surviving unmasked tiles across DeSpa-style cores. All of these designs treat sparsity as a static property determined at training or pruning time. The sparse pattern does not change based on what the model is being asked to do at runtime. Our work differs in that the sparsity pattern is task-conditional : different tasks activate different tiles, and the mask is resolved at no runtime cost. 
+
+Dynamic and conditional computation. A parallel line of work explores input-dependent computation on standard proces-sors. SkipNet [ 32 ] and BlockDrop [ 34 ] learn per-input policies that skip entire residual blocks, achieving FLOP reductions of 30–40% on ImageNet. FBS [ 13 ] dynamically prunes channels based on in-termediate activations, and early-exit networks [ 30 ] terminate in-ference at an intermediate layer when confidence is high. Mixture-of-Experts (MoE) architectures [ 12 , 28 ] route tokens to specialized subnetworks, activating only a subset of parameters per input. These approaches demonstrate that computation can be safely skipped based on runtime signals, but they are designed for GPU/CPU execution where “skipping” means zeroing outputs or branching around computation—the hardware still fetches weights, allocates registers, and occupies memory bandwidth. Without alignment to the accelerator’s tiling granularity, the FLOP reduction does not translate to proportional speedup. Our gating mechanism differs in two respects: (1) it conditions on the task command rather than on input features, avoiding any per-input overhead; and (2) it pro-duces masks at the exact granularity of the hardware’s tile iteration, enabling zero-cost skipping on the accelerator. 
+
+Structured pruning. Static structured pruning removes entire filters [ 22 ], channels, or blocks at training time to reduce model size and compute [ 17 , 18 , 33 ]. These techniques produce a single pruned model that is deployed uniformly for all inputs. Our approach can be viewed as a form of conditional structured pruning, where the pruning pattern varies per task. The 68 task-differentiating tiles reveal that a single static pruning pattern cannot capture the task-dependent structure that the gating network learns. 
+
+End-to-end autonomous driving. Conditional imitation learn-ing [ 8 ] introduced the branched architecture we build upon, where a high-level command selects among specialized output heads shar-ing a common backbone. Subsequent work has explored richer com-mand representations [ 9 ], attention mechanisms, and transformer-based architectures for driving. The DAgger algorithm [ 27 ] ad-dresses covariate shift in imitation learning by iteratively collecting data under the learned policy’s state distribution. CARLA [ 10 ]provides the simulation environment for training and evaluating driving controllers in diverse traffic scenarios. Our work applies these driving models as an evaluation vehicle for the co-designed sparsity mechanism, demonstrating that task-conditional sparsity is not just a theoretical construct but produces measurable latency and energy savings on real hardware executing a real control task. 
+
+## 6 Conclusion 
+
+We presented a HW/SW co-designed system that exploits the task command in multi-task inference models to achieve structured sparsity with zero runtime overhead. A lightweight gating net-work ( <0.12% of backbone parameters) maps a one-hot task vector to per-tile binary execution masks aligned with the accelerator’s scheduling granularity. The masks are encoded into the instruction stream as bitmask fields, enabling the tile manager to skip masked tiles entirely—no weight fetch, no activation load, no compute—at the cost of a single bit check per tile. We prototyped the system on a Xilinx Alveo U50 FPGA with HBM, deploying an 8-layer CNN backbone with six branched heads for closed-loop visuomotor driving in the CARLA simulator. Task-conditional sparsity reduces FLOPs by 66–76% and on-device la-tency by 51–59% across six driving commands, while the task-sparse model maintains 100% route completion. The learned masks reflect task semantics: left turns retain the most computation; braking is pruned most aggressively. On the same model, a GPU executes the sparse variant 22% slower than dense, validating that tile-level sparsity requires hardware support to yield actual speedup. The approach generalizes beyond the specific model and task evaluated here. Command-conditioned multi-task models with a discrete task selector—robotic manipulation with grasp-type com-mands, multi-language speech recognition, or multi-objective opti-mization — can leverage the same mechanism. The ISA’s tile mask fields are opcode-agnostic and apply to convolutions and the linear layers of transformers, which we confirm on a ViT-Base backbone. Future work includes extending the gating mechanism to support 
+
+input-conditional sparsity [ 31 ] (where the mask depends on both the task and the input image), exploring hierarchical masking at multiple granularities (block, layer, tile, channel), and scaling the accelerator to larger models and higher parallelism configurations on multi-SLR FPGA platforms. 
+
+> 12
+
+Sparse by Command: Task-Conditional Compute Skipping for Multi-Task Inference Accelerators MICRO 2026, October 31–November 04, 2026, Athens, Greece 
+
+## References 
+
+[1] AMD Xilinx. 2022. Vitis AI DPU for Alveo Product Guide (PG338). https: //docs.xilinx.com/r/en-US/pg338-dpu. [2] Yoshua Bengio, Nicholas Léonard, and Aaron Courville. 2013. Estimating or Propagating Gradients Through Stochastic Neurons for Conditional Computation. 
+
+arXiv preprint arXiv:1308.3432 (2013). [3] Michaela Blott, Thomas B. Preusser, Nicholas J. Fraser, Giulio Gambardella, Ken-neth O’Brien, Yaman Umuroglu, Miriam Leeser, and Kees Vissers. 2018. FINN-R: An End-to-End Deep-Learning Framework for Fast Exploration of Quantized Neural Networks. ACM Transactions on Reconfigurable Technology and Systems (TRETS) 11, 3 (2018), 1–23. [4] Mariusz Bojarski, Davide Del Testa, Daniel Dworakowski, Bernhard Firner, Beat Flepp, Prasoon Goyal, Lawrence D. Jackel, Mathew Monfort, Urs Muller, Jiakai Zhang, Xin Zhang, Jake Zhao, and Karol Zieba. 2016. End to End Learning for Self-Driving Cars. arXiv preprint arXiv:1604.07316 (2016). [5] Rich Caruana. 1997. Multitask learning. Machine learning 28, 1 (1997), 41–75. [6] Yu-Hsin Chen, Joel Emer, and Vivienne Sze. 2016. Eyeriss: A Spatial Architecture for Energy-Efficient Dataflow for Convolutional Neural Networks. In Proceedings of the 43rd Annual International Symposium on Computer Architecture (ISCA) .IEEE, 367–379. https://doi.org/10.1109/ISCA.2016.40 [7] Yu-Hsin Chen, Tien-Ju Yang, Joel Emer, and Vivienne Sze. 2019. Eyeriss v2: A Flexible Accelerator for Emerging Deep Neural Networks on Mobile Devices. 
+
+IEEE Journal on Emerging and Selected Topics in Circuits and Systems 9, 2 (2019), 292–308. [8] Felipe Codevilla, Matthias Müller, Antonio López, Vladlen Koltun, and Alexey Dosovitskiy. 2018. End-to-End Driving via Conditional Imitation Learning. In 
+
+Proceedings of the IEEE International Conference on Robotics and Automation (ICRA) . IEEE, 4693–4700. [9] Felipe Codevilla, Eder Santana, Antonio M. López, and Adrien Gaidon. 2019. Exploring the Limitations of Behavior Cloning for Autonomous Driving. In 
+
+Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) .9329–9338. [10] Alexey Dosovitskiy, German Ros, Felipe Codevilla, Antonio López, and Vladlen Koltun. 2017. CARLA: An Open Urban Driving Simulator. In Proceedings of the 1st Conference on Robot Learning (CoRL) . 1–16. [11] Mario Doumet, Marius Stan, Mathew Hall, and Vaughn Betz. 2024. H2PIPE: High throughput CNN Inference on FPGAs with High-Bandwidth Memory. arXiv:2408.09209 [cs.AR] https://arxiv.org/abs/2408.09209 [12] William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity. Journal of Machine Learning Research 23, 120 (2022), 1–39. [13] Xitong Gao, Yiren Zhao, Łukasz Dudziak, Robert Mullins, and Cheng zhong Xu. 2019. Dynamic Channel Pruning: Feature Boosting and Suppression. arXiv:1810.05331 [cs.CV] https://arxiv.org/abs/1810.05331 [14] Hasan Genc, Seah Kim, Alon Amid, Ameer Haj-Ali, Vighnesh Iber, Aditya Prakash, Jerry Enber, Daniel Mao, Colin Keller, Shahar Kvatinsky, Vivienne Sze, Borivoje Nikolic, Yakun Sophia Shao, and Krste Asanovic. 2021. Gemmini: Enabling Systematic Deep-Learning Architecture Evaluation via Full-Stack Integration. In Proceedings of the 58th Annual Design Automation Conference (DAC) . IEEE, 769–774. [15] Ashish Gondimalla, Noah Chesnut, Mithuna Thottethodi, and T. N. Vijaykumar. 2019. SparTen: A Sparse Tensor Accelerator for Convolutional Neural Networks. In Proceedings of the 52nd Annual IEEE/ACM International Symposium on Microar-chitecture (MICRO) . ACM, 151–165. [16] Mathew Hall and Vaughn Betz. 2020. HPIPE: Heterogeneous Layer-Pipelined and Sparse-Aware CNN Inference for FPGAs. In Proceedings of the 2020 ACM/SIGDA International Symposium on Field-Programmable Gate Arrays (Seaside, CA, USA) 
+
+(FPGA ’20) . Association for Computing Machinery, New York, NY, USA, 320. https://doi.org/10.1145/3373087.3375380 [17] Song Han, Huizi Mao, and William J. Dally. 2016. Deep Compression: Compress-ing Deep Neural Networks with Pruning, Trained Quantization and Huffman Coding. arXiv:1510.00149 [cs.CV] https://arxiv.org/abs/1510.00149 [18] Song Han, Jeff Pool, John Tran, and William J. Dally. 2015. Learning both Weights and Connections for Efficient Neural Networks. In Advances in Neural Information Processing Systems (NeurIPS) . 1135–1143. [19] Benoit Jacob, Skirmantas Kligys, Bo Chen, Menglong Zhu, Matthew Tang, Andrew Howard, Hartwig Adam, and Dmitry Kalenichenko. 2018. Quantization and Training of Neural Networks for Efficient Integer-Arithmetic-Only Inference. In 
+
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) . 2704–2713. [20] Hyungjun Jang, Dongho Ha, Hyunwuk Lee, and Won Woo Ro. 2025. DeSpa: Heterogeneous multi-core accelerators for energy-efficient dense and sparse computation at the tile level in Deep Neural Networks. Journal of Systems Architecture (2025), 103650. [21] Chao Jiang, David Ojika, Bhavesh Patel, and Herman Lam. 2021. Optimized FPGA-based Deep Learning Accelerator for Sparse CNN using High Bandwidth Memory. In 2021 IEEE 29th Annual International Symposium on Field-Programmable Custom Computing Machines (FCCM) . 157–164. https://doi.org/10.1109/FCCM51124.2021. 00026 [22] Hao Li, Asit Kadav, Igor Durdanovic, Hanan Samet, and Hans Peter Graf. 2017. Pruning Filters for Efficient ConvNets. In Proceedings of the International Confer-ence on Learning Representations (ICLR) .[23] Paul Michel, Omer Levy, and Graham Neubig. 2019. Are sixteen heads really better than one? Advances in neural information processing systems 32 (2019). [24] Asit Mishra, Jorge Albericio Latorre, Jeff Pool, Darko Stosic, Dusan Stosic, Ganesh Venkatesh, Chong Yu, and Paulius Micikevicius. 2021. Accelerating Sparse Deep Neural Networks. (2021). arXiv:2104.08378 [cs.LG] https://arxiv.org/abs/2104. 08378 [25] NVIDIA. 2017. NVDLA: The NVIDIA Deep Learning Accelerator. Hot Chips 29. [26] Angshuman Parashar, Minsoo Rhu, Anurag Mukkara, Antonio Puglielli, Rang-harajan Venkatesan, Brucek Khailany, Joel Emer, Stephen W. Keckler, and William J. Dally. 2017. SCNN: An Accelerator for Compressed-sparse Con-volutional Neural Networks. In Proceedings of the 44th Annual International Symposium on Computer Architecture (ISCA) . ACM, 27–40. [27] Stéphane Ross, Geoffrey J. Gordon, and J. Andrew Bagnell. 2011. A Reduction of Imitation Learning and Structured Prediction to No-Regret Online Learning. In Proceedings of the 14th International Conference on Artificial Intelligence and Statistics (AISTATS) . 627–635. [28] Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. 2017. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. arXiv preprint arXiv:1701.06538 (2017). [29] Vivienne Sze, Yu-Hsin Chen, Tien-Ju Yang, and Joel S. Emer. 2017. Efficient Processing of Deep Neural Networks: A Tutorial and Survey. Proc. IEEE 105, 12 (2017), 2295–2329. https://doi.org/10.1109/JPROC.2017.2761740 [30] Surat Teerapittayanon, Bradley McDanel, and H. T. Kung. 2016. BranchyNet: Fast Inference via Early Exiting from Deep Neural Networks. In Proceedings of the 23rd International Conference on Pattern Recognition (ICPR) . IEEE, 2464–2469. [31] Thomas Verelst and Tinne Tuytelaars. 2020. Dynamic Convolutions: Exploiting Spatial Sparsity for Faster Inference. In 2020 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) . IEEE, 2317–2326. https://doi.org/10.1109/ cvpr42600.2020.00239 [32] Xin Wang, Fisher Yu, Zi-Yi Dou, Trevor Darrell, and Joseph E. Gonzalez. 2018. SkipNet: Learning Dynamic Routing in Convolutional Networks. In Proceedings of the European Conference on Computer Vision (ECCV) . Springer, 409–424. [33] Wei Wen, Chunpeng Wu, Yandan Wang, Yiran Chen, and Hai Li. 2016. Learning structured sparsity in deep neural networks. In Proceedings of the 30th Interna-tional Conference on Neural Information Processing Systems (Barcelona, Spain) 
+
+(NIPS’16) . Curran Associates Inc., Red Hook, NY, USA, 2082–2090. [34] Zuxuan Wu, Tushar Nagarajan, Abhishek Kumar, Steven Renber, Larry S. Davis, Kristen Grauman, and Rogerio Feris. 2018. BlockDrop: Dynamic Inference Paths in Residual Networks. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) . 8817–8826. [35] Zhewen Yu, Sudarshan Sreeram, Krish Agrawal, Junyi Wu, Alexander Montgomerie-Corcoran, Cheng Zhang, Jianyi Cheng, Christos-Savvas Bouganis, and Yiren Zhao. 2024. HASS: Hardware-Aware Sparsity Search for Dataflow DNN Accelerator. In 2024 34th International Conference on Field-Programmable Logic and Applications (FPL) . 257–263. https://doi.org/10.1109/FPL64840.2024.00043 [36] Jie-Fang Zhang, Ching-En Lee, Chester Liu, Yakun Sophia Shao, Stephen W. Keck-ler, and Zhengya Zhang. 2021. SNAP: An Efficient Sparse Neural Acceleration Processor for Unstructured Sparse Deep Neural Network Inference. IEEE Journal of Solid-State Circuits 56, 2 (2021), 636–647. https://doi.org/10.1109/JSSC.2020. 3043870 [37] Xiaofan Zhang, Hanchen Ye, Junsong Wang, Yonghua Lin, Jinjun Xiong, Wen-Mei Hwu, and Deming Chen. 2020. DNNExplorer: A Framework for Modeling and Exploring a Novel Paradigm of FPGA-based DNN Accelerator. In 2020 IEEE/ACM International Conference On Computer Aided Design (ICCAD) . 1–9. [38] Zhekai Zhang, Hanrui Wang, Song Han, and William J. Dally. 2020. SpArch: Efficient Architecture for Sparse Matrix Multiplication. In Proceedings of the 26th IEEE International Symposium on High-Performance Computer Architecture (HPCA) . IEEE, 261–274. [39] Xuda Zhou, Zidong Du, Qi Guo, Shaoli Liu, Chengsi Liu, Chao Wang, Xuehai Zhou, Ling Li, Tianshi Chen, and Yunji Chen. 2018. Cambricon-S: Addressing Ir-regularity in Sparse Neural Networks through A Cooperative Software/Hardware Approach. In Proceedings of the 51st Annual IEEE/ACM International Symposium on Microarchitecture (MICRO) . IEEE, 15–28. [40] Jinming Zhuang, Jason Lau, Hanchen Ye, Zhuoping Yang, Yubo Du, Jack Lo, Tejus Gupta, Jason Cong, Deming Chen, and Peipei Zhou. 2023. CHARM: Composing Heterogeneous AcceleRators for Matrix Multiply on Versal ACAP Architecture. In Proceedings of the ACM/SIGDA International Symposium on Field-Programmable Gate Arrays (FPGA) . ACM, 153–164. 13 MICRO 2026, October 31–November 04, 2026, Athens, Greece Afzal Ahmad, Gaoyu Mao, Shoubo Hu, Hui-Ling Zhen, Mingxuan Yuan, Xinyu Chen, and Wei Zhang 
+
+## A Artifact Appendix A.1 Abstract 
+
+This artifact reproduces the two on-device results tables of Sparse by Command : Table 2 (per-command active-tile counts and FPGA inference latency/speedup) and Table 3 (accelerator resource uti-lization and clock frequency). It provides the accelerator RTL, the C++/OpenCL host sources, the pre-built bitstream (287 MHz, INT8), the quantized INT8 weights/biases and golden references, the per-command tile masks, the trained dense and sparse model checkpoints, and the CARLA training/evaluation scripts. The gat-ing network maps each one-hot driving command to per-tile execution masks; one script reproduces the active-tile counts (49/57/55/54/53/34 of the 182 prunable tiles) exactly, a second builds the host and runs it against the bitstream on an Alveo U50 to repro-duce the per-command latency and speedup, and a third reports the Table 3 utilization from the shipped build logs (or, optionally, from a fresh Vivado/Vitis build). The paper’s central claim—task-conditional compute skipping via per-command tile masks—is re-produced quantitatively by Table 2. 
+
+## A.2 Artifact check-list (meta-information) 
+
+• Algorithm: Task-conditional structured (tile-level) sparsity for tiled inference accelerators. 
+
+• Program: SystemVerilog RTL accelerator; C++/OpenCL 1.2 host; Python scripts (active-tile extraction; CARLA training/eval). 
+
+• Compilation: Vivado 2022.1 (package .xo ); Vitis v++ (link 
+
+.xclbin ); g++ (C++14) with XRT/OpenCL. 
+
+• Transformations: None at run time (masks precomputed and encoded into the instruction stream). 
+
+• Binary: Pre-built vla_accel.xclbin (Alveo U50, 287 MHz). The host is built from source on the target machine (it links against the local XRT), so no host binary is shipped. 
+
+• Model: 8-layer INT8 CNN driving controller with six branched heads and a lightweight tile-gating MLP. Both the dense and the sparse (gated) checkpoints are included. 
+
+• Data set: The quantized INT8 weights, INT32 biases, and per-layer golden reference outputs (used to verify INT8 correctness); see §A.3.4. 
+
+• Run-time environment: Ubuntu with XRT 2.14 (2022.2). 
+
+• Hardware: AMD/Xilinx Alveo U50. 
+
+• Run-time state: The card is reset to a known HBM-calibration state before latency measurement (see §A.6). 
+
+• Execution: Scripted; one inference pass per configuration; on-chip performance counters read back over PCIe. 
+
+• Metrics: Per-command active-tile counts; on-device latency and total/compute cycles; speedup; INT8 correctness; and DSP, BRAM, URAM, LUT, and FF utilization with achieved clock frequency. 
+
+• Output: A console table of per-command active tiles, cycles, latency, and speedup with pass/fail INT8 verification (Table 2), and the parsed utilization report (Table 3). 
+
+• Experiments: E1 active-tile counts (software); E2 on-device latency (FPGA); E3 resource utilization and frequency (build logs / rebuild). 
+
+• How much disk space required (approximately)?: ∼2 GB with the pre-built bitstream; ∼10 GB if rebuilding from RTL. 
+
+• How much time is needed to prepare workflow (approxi-mately)?: ∼15–30 min with the pre-built bitstream. 
+
+• How much time is needed to complete experiments (approxi-mately)?: ∼10 min (E1+E2); ∼3 h for an optional bitstream rebuild (E3). 
+
+• Publicly available?: Yes. 
+
+• Code licenses (if publicly available)?: MIT License. 
+
+• Data licenses (if publicly available)?: The model checkpoints, quantized weights, and golden references are released under the same license as the code; no third-party dataset is redistributed. 
+
+• Workflow automation framework used?: Shell + Python scripts (no external framework). 
+
+• Archived (provide DOI)?: https://doi.org/10.5281/zenodo.21503283 
+
+## A.3 Description 
+
+A.3.1 How to access. The artifact is located at https://doi.org/10. 5281/zenodo.21503283, sparse-by-command_artifacts/, containing: the accelerator RTL (rtl/), the Vivado/Vitis build scripts (hw_build/), the C++/OpenCL host sources and per-command specs (host/), the software side—model definitions, dense and sparse checkpoints, active-tile extractor, and CARLA training/eval scripts (sw/), one-shot reproduction scripts (scripts/), and the pre-built bitstream, quantized data, and the last full hardware-build reports (prebuilt/). 
+
+A.3.2 Hardware dependencies. An AMD/Xilinx Alveo U50 accel-erator card in a PCIe Gen3 x16 host is required for the on-device measurements (E2). The optional bitstream rebuild (E3) needs only a machine that can run Vivado/Vitis; no FPGA is required for the build itself. 
+
+A.3.3 Software dependencies. For E2: Xilinx Runtime (XRT) 2.14 / 2022.2 and the U50 deployment shell, with g++ (C++14) and OpenCL 1.2 headers to build the host. For the optional E3 re-build: Vivado 2022.1 and Vitis v++ (the design also builds under 2024.2, at a slightly lower achieved frequency). For the software side: Python3 with PyTorch (active-tile extraction) and, for the provided training/evaluation recipes, the CARLA 0.9.14 simulator and its Python API together with their usual dependencies ( numpy ,
+
+opencv , pygame ). 
+
+A.3.4 Data sets. The artifact provides pre-trained checkpoints and the derived tensors: the per-layer quantized INT8 weights, INT32 biases, and golden reference activations (fpga_data_carla/), extracted from the CARLA Town10HD_Opt calibration frames. The 
+
+∼88 golden tensors let the host verify INT8 correctness bit-exactly during E2. 
+
+A.3.5 Models. The 8-layer CNN backbone with six branched heads and the tile-gating MLP; model definitions are in sw/models/. Both trained checkpoints are included in sw/checkpoints/: the dense controller and the sparse (gated) controller whose gater produces the per-command tile masks. The corresponding dense and sparse training and evaluation recipes are provided under sw/ for com-pleteness. 
+
+## A.4 Installation 
+
+No installation is needed beyond the target toolchains. Two scripts drive the FPGA flow. scripts/reproduce_table2.sh builds the host from source (host/make_host.py compiles main_carla.cpp into app_single.exe) and then runs that host against vla_accel.xclbin, streaming the quantized weights/biases and the per-command tile  
+
+> 14 Sparse by Command: Task-Conditional Compute Skipping for Multi-Task Inference Accelerators MICRO 2026, October 31–November 04, 2026, Athens, Greece
+
+masks to the card and reading back the on-chip performance coun-ters. scripts/build_bitstream.sh (optional) regenerates the bit-stream: it packages the RTL into vla_accel.xo and links it into vla_accel.xclbin, emitting the Table 3 reports. 
+
+## A.5 Experiment workflow 
+
+• E1 — active-tile counts (Table 2, software). 
+
+cd sw && python3 extract_active_tiles.py 
+
+loads the sparse gating checkpoint, runs the gating MLP on each one-hot command, thresholds at 0.5, and prints the active-tile count per command. 
+
+• E2 — on-device latency (Table 2, FPGA). 
+
+DO_RESET=0 bash scripts/reproduce_table2.sh 
+
+builds the host, resets the card to the paper HBM-calibration state, then runs the dense configuration and each of the six commands, printing active tiles, total/compute cycles, latency, speedup, and INT8 verification. 
+
+• E3 — resource utilization and frequency (Ta-ble 3). Two methods: (a) prebuilt (default). bash scripts/reproduce_table3_prebuilt.sh parses the shipped placement report and prints the DSP, BRAM, URAM, LUT, and FF counts. (b) rebuild (optional, ∼3 h). bash scripts/build_bitstream.sh re-runs the full build and points to the freshly generated reports. 
+
+## A.6 Evaluation and expected results 
+
+E1 prints 49/57/55/54/53/34 (of 182), matching the Table 2 “Ac-tive Tiles” column exactly. E2 prints, per command, the active tiles, total/compute cycles, latency, and speedup: the dense configura-tion is ≈2.62 M cycles ( ≈9.12 ms at 287 MHz), the per-command speedups fall in the 2.1–2.4 × range of Table 2, and every run re-ports TEST PASSED against the golden references. E3 reproduces Table 3: DSP 2082, BRAM 238.5, and URAM 60 exactly, with LUT and FF within <0.3% of the reported values, at an achieved clock of ≈287 MHz. Method (a) reads these from the shipped report at prebuilt/hw_reports/utilization_placed.rpt; method (b) reads them from the impl_1 report emitted by the rebuild. 
+
+Reproducibility note (FPGA latency). Compute cycles, active-tile counts, speedup ratios, INT8 correctness, and the Table 3 utilization are deterministic and reproduce exactly. The absolute total cycles (hence latency) include an HBM memory-wait component whose value depends on the HBM PHY timing selected at each card reset (∼ ± 3% ). The paper’s Table 2 corresponds to the “slow” calibration (dense ≈2.62 M cycles → 9.12 ms); reproduce_table2.sh resets the card until that state is reached and then reproduces the reported latencies within ∼1–2%. 
+
+Scope (closed-loop driving, Figures 8 and 9). The artifact in-cludes the CARLA training and evaluation scripts, but the closed-loop driving results (Figures 8 and 9) are not claimed as repro-ducible artifacts. CARLA’s per-run rendering and physics are non-deterministic and depend on the GPU model, the GPU load, and the host workstation—a documented simulator behavior (https: //github.com/carla-simulator/carla/issues/4004)—so absolute cross-track error is not portably reproducible across machines. The pa-per’s core contribution—task-conditional compute skipping, i.e., cutting the active compute per driving command via learned tile masks—is captured by the deterministic on-device measurements of Table 2 (and its implementation cost by Table 3), which are the focus of this artifact. 
+
+## A.7 Experiment customization 
+
+The per-command masks can be swapped by pointing the host at a different model_spec_task*.txt spec to run any tile-sparsity pat-tern; setting DO_RESET=0 makes reproduce_table2.sh measure the current HBM state without the reset loop. The parallelism pa-rameters ( OC_PAR , PP_PAR ) are defined in host/srcs/globals.hpp for rebuilds. 
+
+## A.8 Methodology 
+
+Submission, reviewing and badging methodology: 
+
+• https://www.acm.org/publications/policies/artifact-review-and-badging-current 
+
+• https://cTuning.org/ae
