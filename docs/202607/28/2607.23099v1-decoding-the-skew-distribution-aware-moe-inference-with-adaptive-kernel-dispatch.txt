@@ -1,0 +1,609 @@
+Title: Decoding the Skew: Distribution-Aware MoE Inference with Adaptive Kernel Dispatch
+
+URL Source: https://arxiv.org/pdf/2607.23099v1
+
+Published Time: Tue, 28 Jul 2026 00:29:14 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# Decoding the Skew: Distribution-Aware MoE Inference with Adaptive Kernel Dispatch 
+
+En-Ming Huang 1,2∗, An-Cheng Chang 2, Bai-Cheng Jeng 2, Shih-Hao Hung 1, H.T. Kung 3
+
+> 1
+
+Dept. of Computer Science and Information Engineering, National Taiwan University, Taipei, Taiwan 
+
+> 2
+
+NVIDIA Corporation, Taipei, Taiwan 
+
+> 3
+
+Dept. of Computer Science, Harvard University, Cambridge, USA r13922078@csie.ntu.edu.tw, hungsh@csie.ntu.edu.tw, kung@harvard.edu 
+
+Abstract —Mixture-of-Experts (MoE) inference consists of sparse expert GEMMs whose shapes vary with the runtime rout-ing distribution. Existing serving systems typically select fused-MoE kernels using static token-count buckets, ignoring the per-expert routing distribution that determines tile padding, memory reuse, and kernel efficiency. We introduce a distribution-aware framework for modeling and benchmarking MoE inference. The framework combines the compact Effective Experts metric with a Dirichlet-based reverse-modeling procedure that generates con-trollable routing distributions for systematic hardware studies. Using it, we show that the best fused-MoE kernel changes with routing skew and token count. We further present DA-MoE, a GPU-resident kernel-dispatch runtime for NVIDIA GPUs that matches the live routing histogram to offline-tuned distributions and selects a near-optimal fused-MoE kernel without CPU– GPU synchronization. On HumanEval-X serving traces, DA-MoE improves geomean fused-MoE latency by 1.16 × on DeepSeek-V3 and 1.29 × on Kimi K2, with peak speedups of 1.40 × and 1.56 ×.
+
+Index Terms —Large Language Models, Mixture-of-Experts, GPU Inference, Tensor Cores 
+
+I. I NTRODUCTION 
+
+Mixture-of-Experts (MoE) architectures [1]–[4] have be-come the dominant approach for scaling large language models (LLMs) to trillion-parameter scale, decoupling total model ca-pacity from per-token compute cost. As shown in Fig. 1, by ac-tivating only a small subset of expert sub-networks per token, modern MoE models such as DeepSeek-V3 [3] (671B total / 37B activated) keep inference latency tractable while their total capacity grows beyond prior dense models [5]. However, this dynamic sparsity produces highly variable workloads across experts and introduces challenges in memory access efficiency, compute utilization, and computation–communication overlap. These challenges are particularly acute in the small general matrix multiplications (GEMMs) executed by individual ex-perts, where routing imbalance directly determines the shape and efficiency of each computation. At the micro-architectural level, the key lever for managing this variability is the matrix-multiply-accumulate (MMA) tile shape, which determines the tradeoff between data reuse and padding overhead. Yet the right tile depends on a moving target, as MoE routing is not only sparse but also non-uniform across experts, causing per-expert token counts to vary widely across layers and inputs. 
+
+*This work were conducted during an internship at NVIDIA. Expert 
+
+1 …
+
+FFN / 
+
+MoE Layer  Top k (k = 2) 
+
+> …
+
+Router  
+
+> (Gating Network)
+> Dense Model Mixture of Experts
+> Sum & Norm
+> Expert
+
+2
+
+> Expert
+
+3
+
+> Expert
+
+4
+
+> Expert
+
+N
+
+> Attention
+> Sum & Norm
+
+Feed Forward 
+
+Network 
+
+> Attention
+
+Fig. 1: Comparison of dense and MoE layer architectures. When these uneven counts are mapped onto fixed-size MMA tiles (e.g., Tensor Cores or systolic arrays [6]), two competing inefficiencies emerge. Larger tiles (e.g., up to 256 × 256 on both Blackwell-class NVFP4 Tensor Cores and Google’s TPU) maximize data reuse but force under-utilized expert GEMMs to round up, wasting compute cycles on padding trailing columns with zeros; smaller tiles eliminate padding but reload matrix weights more frequently, multiplying memory traffic. NVIDIA’s TensorRT LLM (TRTLLM) [7], the state-of-the-art (SoTA) LLM inference kernel library, responds with kernel specialization, instantiating hundreds of GEMM kernel variants that span different MMA tile shapes (to mitigate tile-padding overhead and memory reuse efficiency) and software-pipelining configurations (to amortize latency). Yet the existing LLM serving frameworks [7]–[9] uses randomly generated routing assignments to select only “the best kernel” for each token count (batch size), ignoring the routing distribution that actually determines per-expert token counts. On the analysis side, recent MoE characterization studies [10], [11] rely on statically collected traces and lack mathematical indicators for skew quantification. No existing work provides a gener-ative model of expert skew whose parameters can be tuned for sensitivity analysis in hardware performance models and architectural simulators [12], [13]. We observe that closing these gaps requires two coupled pieces: a sweepable model of routing skew and a low-overhead dynamic runtime. We first introduce the Effective Experts 
+
+metric paired with a Dirichlet distribution model whose con-centration parameter α is fitted via binary search. The resulting distributions allow architects to sweep α to generate arbitrary skew levels for controlled simulation and hardware studies. arXiv:2607.23099v1 [cs.AR] 25 Jul 2026 Using this framework, we expose a wide performance variance across TRTLLM’s kernels and quantify the tile-padding over-head of MoE computations on B200’s NVFP4 Tensor Cores. Second, we present DA-MoE , a distribution-aware runtime that selects near-optimal GPU kernels on a per-layer basis by aligning tile shapes and software configurations with live rout-ing distributions. By leveraging conditional CUDA Graphs, DA-MoE executes kernel selection with negligible overhead while entirely eliminating CPU–GPU synchronization. The main contributions in this work are fourfold: 1) Mathematical Reverse-Modeling of MoE Routing Skew :We propose the Effective Experts metric and a Dirichlet-based reverse-modeling method, producing parameterized routing distributions that approximate measured real-trace routing and enable controlled studies on real hardware. 2) Quantitative Characterization on NVFP4 Tensor Cores :Using this framework, we quantify the tile-padding over-head and micro-architectural latency bounds of MoE GEMMs on Blackwell-class NVFP4 Tensor Cores, expos-ing the performance variance across TRTLLM’s generated kernels and the gap to an oracle upper bound. 3) DA-MoE Runtime : We build DA-MoE for NVIDIA GPUs, which selects a near-optimal tactic per MoE layer invocation based on the live routing distribution using con-ditional CUDA Graph. On HumanEval-X serving traces, DA-MoE improves geomean fused-MoE latency by 1.16 ×
+
+on DeepSeek-V3 and 1.29 × on Kimi K2, with peak speedups of 1.40 × and 1.56 ×. End-to-end MoE-layer latency improves by 1.15 × and 1.26 × geomean, peaking at 1.37 × and 1.51 ×, respectively, over SoTA baselines. 4) Co-Design Across SIMT GPUs and Spatial ASICs : We derive two accelerator-design implications from DA-MoE: SIMT GPUs need fast GPU-resident launch primitives for post-routing kernel selection, while spatial ASICs need routing-aware tile or array partitioning to serve hot experts efficiently without overpadding cold experts. The remainder of this paper reviews the necessary back-ground (Section II), develops the routing-skew model and kernel characterization (Section III), presents DA-MoE (Sec-tion IV), evaluates its performance (Section V), discusses architectural implications (Section VI), and concludes with related work and final remarks (Sections VII–VIII). II. B ACKGROUND 
+
+This section introduces the background for the rest of the paper: modern MoE model structures (§II-A), the NVIDIA GPU architecture (§II-B), Tensor Core tile shapes and their effect on MoE kernel execution (§II-C), and the Dirichlet dis-tribution underlying our reverse-modeling framework (§II-D). 
+
+A. Mixture-of-Experts Models 
+
+As illustrated in Fig. 1, a standard Transformer block alter-nates an attention layer with a feed-forward network (FFN). In a dense model, the full FFN weight matrix is applied to every token. An MoE model replaces the FFN with N parallel expert sub-networks and a learned router that, per token, selects the GB100    
+
+> DRAM
+> GPC
+> GPC
+> GPC
+> XBAR
+> L2$
+> GB100
+> L1$ & SHMEM
+> TMA Reg. file
+> Tensor cores
+> CUDA cores
+> CTA
+> CTA
+> Launch
+> ...
+> CUDA Grid GPU (B200)
+> CTA
+> Schedule
+> SM SM
+> GPC
+> SM
+
+## ... SM 
+
+Fig. 2: NVIDIA GPU (B200) microarchitecture. top-k experts ( k ≪ N ) to activate, decoupling total model capacity from per-token compute cost. Recent open-source models illustrate the trend toward larger 
+
+N . The largest SoTA open-source dense model is Qwen3-32B [14] (32B parameters), while leading open-source MoE models have scaled to hundreds of experts and trillions of pa-rameters: DeepSeek-V3 [3] (671B total, top-8 of 256 experts, 37B activated per token), Kimi K2 [4] (1T total, top-8 of 384 experts, 32B activated per token), and Llama 4 Maverick [15] (400B total, top-1 of 128 experts). As N grows, per-expert token counts within a batch become smaller and more non-uniform, intensifying the inefficiencies described in Section I. 
+
+B. NVIDIA GPU Microarchitecture 
+
+Hardware. As illustrated in Fig. 2, an NVIDIA GPU’s memory hierarchy consists of two main levels for general data access, including a configurable shared memory and L1 data cache per Streaming Multiprocessor (SM), and a chip-wide L2 cache backed by device memory. Within each SM, CUDA cores support general-purpose single-instruction, multiple-threads (SIMT) execution, while Tensor Cores sup-port MMA operations. Data reaches the compute units through standard load/store instructions issued by the CUDA core pipeline or through the Tensor Memory Accelerator (TMA) with both data paths backed by dedicated buffers and queues. TMA uses dedicated hardware to compute addresses for an 
+
+N -dimensional array and load data into shared memory in the background, freeing CUDA threads from address calculation and overlapping data movement with MMA computation. 
+
+Software. A CUDA kernel is the GPU-side function in-voked by the CPU program. Each kernel launch creates a grid of Cooperative Thread Arrays (CTAs), and the GPU dispatches each CTA to an SM. In a tiled GEMM kernel, each CTA is responsible for computing one output tile: it iterates over the 
+
+K dimension (the K-loop), loading one weight tile and one activation tile into shared memory per iteration, performing the MMA, and accumulating the result. The tile shape therefore determines how much shared memory is consumed per CTA, how many K-loop iterations are required, and how well data Matrix 
+
+NK
+
+K
+
+M
+
+> Matrix
+> Matrix
+
+Fig. 3: MMA tile shape choices for a single expert GEMM (C = A × B, accumulator omitted for clarity). A is the expert weight matrix ( RM ×K ); B is the token matrix ( RK×N ) where blue columns are real tokens and white columns are zero-padding. Green: small N-tile requires two N-loop iterations, loading A twice. Brown: same N-coverage in one pass but with a smaller K-tile (half the K-loop of green). Purple: largest N-tile covers all tokens in one pass but incurs greater waste. can be reused within shared memory before the next load, directly governing both memory traffic and SM occupancy. 
+
+C. NVIDIA GPU Tensor Core & TRTLLM Kernel Generation 
+
+Tensor Cores execute MMA operations over fixed-size tiles of shape M ×N ×K. On Blackwell GPUs, the dense NVFP4 1
+
+Tensor Core instruction family ( tcgen05.mma ) exposes 80 valid dense tile shapes, ranging from small-N tiles such as 
+
+128 ×8×64 to large tiles such as 256 ×256 ×64 . This range is important for MoE inference as larger tiles reduce the number of MMA instructions and improve data reuse, but can also increase padding when an expert receives only a small number of tokens, wasting computing power. Smaller tiles reduce padding but reload weights more frequently. Selecting optimal tile shapes is a central design variable for MoE models, where the per-expert token count changes across layers and inputs. Earlier MoE implementations such as Mixtral 8x7B [1] launch one GPU kernel per expert, incurring repeated kernel-launch overhead and leaving SMs idle between launches. NVIDIA’s TRTLLM [7], the SoTA library for LLM inference, instead uses fused MoE kernels that complete all expert com-putations for an MoE layer within a single launch, amortizing overhead and improving SM utilization. TRTLLM produces hundreds of such kernel variants, each instantiated with a specific combination of MMA tile shape, software-pipelining configuration (e.g., memory pre-fetching depth), and memory load path (e.g., traditional load instructions vs. TMA). The choice of tile shape directly interacts with per-expert token counts. As shown in Fig. 3, each expert computes 
+
+C = A × B where A is the expert weight matrix and B         
+
+> 1NVFP4 uses E2M1 (2 exponent, 1 mantissa, 1 sign bit) with no Inf/NaN. 164 128 192 256
+> Expert rank (sorted)
+> 10 4
+> 10 3
+> 10 2
+> 10 1
+> Token fraction
+> = 0.1
+> = 1
+> = 10
+> Uniform (1/ N)
+
+Fig. 4: Per-expert token fractions (log-scale) from Dir (α) with 
+
+N = 256 experts. Small α concentrates tokens on few experts; large α approaches the uniform baseline (dashed). holds the tokens assigned to that expert (blue columns); the remaining white columns are zero-padded. The three colored tiles show different choices along the N dimension: the green tile requires two N-loop iterations (loading A twice), while the brown and purple tiles each cover all tokens in one pass but differ in padding waste and K-loop tile size. Although the optimal tile shape shifts with the routing distribution, as detailed in Section III, the per-kernel configurations are closed-source as NVIDIA distributes only pre-compiled binary files, leaving the execution logic opaque to researchers. 
+
+D. Dirichlet Distribution 
+
+The Dirichlet distribution generates probability vectors. Each sample is a vector p = ( p1, . . . , p N ) over N outcomes, where pi ≥ 0 and P 
+
+> i
+
+pi = 1 . This structure directly matches MoE expert routing because a forward pass routes tokens across experts and induces a per-expert token-fraction vector 
+
+p. In its general form, Dir( α) is parameterized by a positive vector α = ( α1, . . . , α N ) and has density 
+
+f (p; α) = 1
+
+B(α)
+
+> N
+
+Y
+
+> i=1
+
+p αi−1 
+
+> i
+
+, (1) where B(α) is the multivariate Beta function. This density defines which probability vectors are likely to be sampled. The parameter α shapes the distribution, while p is the generated routing probability vector. Each αi acts as a pseudo-count that biases samples toward the i-th coordinate. In this work, we use the symmetric case, where αi = α for all i. The scalar α is therefore the only input parameter. We sample p ∼ Dir( α, . . . , α ), so each pi
+
+is a generated expert-routing probability rather than an input. Fig. 4 shows synthetic routing distributions generated with different α values. Large α produces samples close to the uniform vector (1 /N, . . . , 1/N ), while small α places most probability on one or a few experts. The scalar α therefore provides a one-dimensional control knob from near-uniform routing ( α → ∞ ) to highly skewed routing ( α → 0). We use the Dirichlet distribution because it directly gener-ates valid routing probability vectors over N experts. Simpler alternatives such as Gaussian, Beta, or exponential distri-butions do not match the mathematical meaning of expert selection. Section V-D evaluates these alternatives empirically. In Section III, we show that the parameter α can be fitted to 32 
+
+> 64
+> 128
+> 256
+> 512
+> 1024
+> Model layer
+> Token
+> counts
+> 60
+> 80
+> 100
+> 120
+> 140
+> 160
+> 200
+> 220
+> 180
+> Effective experts
+
+Fig. 5: ef f exp across model layers and token counts for DeepSeek-V3 (NVFP4) on the MMLU dataset [16]. Middle layers exhibit consistently low ef f exp (concentrated rout-ing), while early and late layers are more uniform. a real routing trace via a one-dimensional binary search over the Effective Experts metric, enabling controlled generation of synthetic routing distributions. III. M ODELING AND BENCHMARKING 
+
+This section develops a quantitative framework for study-ing MoE kernel performance under routing skew. We first introduce the Effective Experts metric and a Dirichlet-based reverse-modeling procedure that generates controlled routing distributions (§III-A). We then apply this metric to characterize the layer-wise routing behavior of DeepSeek-V3 (§III-B). Finally, we benchmark TRTLLM’s fused MoE kernels under these controlled distributions, revealing that tile shape, pipelin-ing depth, and memory-load path must all be co-adapted to the routing distribution (§III-C, §III-D). 
+
+A. Routing Skew Modeling 
+
+In this paper, we propose Effective Experts (ef f exp ), a metric that directly expresses routing concentration as an in-terpretable effective number of active experts and is convenient for controlled hardware sweeps. 
+
+ef f exp =
+
+PNi=1 ti
+
+2
+
+PNi=1 t2
+
+> i
+
+, (2) where ti is the number of tokens routed to expert i in a given forward pass and N is the total number of experts. Intuitively, 
+
+ef f exp estimates how many experts carry the tokens. A high value represents that traffic is spread over many experts, whereas a low value indicates that tokens are concentrated on a smaller expert subset and routing is more skewed. The metric ranges over [1 , N ], equaling N under uniform routing and 1 when all tokens are directed to a single expert. Unlike 
+
+variance , which varies with total token counts, or entropy [10], which expands logarithmically with expert count ( N ), effective experts is scale-invariant across batch sizes and provides an intuitive, physical proxy for workload modeling. To generate synthetic routing distributions that match a target ef f exp ∗, we use a symmetric Dirichlet distribution with concentration parameter α. Since ef f exp increases monotonically with α, we approximate the matching α via binary search. At each iteration, we draw S samples from 
+
+Dir( αmid ), compute their mean ef f exp , and narrow the interval accordingly, as detailed in Algorithm 1. 
+
+Algorithm 1 Binary Search for Dirichlet α
+
+Require: Target ef f exp ∗, number of experts N , samples S,iterations T
+
+Require: Search range [αmin , α max ] = [10 −6, 10 6]
+
+Ensure: α such that sampled ef f exp ≈ ef f exp ∗ 
+
+> 1:
+
+lo ← αmin , hi ← αmax  
+
+> 2:
+
+for t = 1 to T do  
+
+> 3:
+
+αmid ← (lo + hi )/2 
+
+> 4:
+
+Draw p(1) , . . . , p(S) ∼ Dir( αmid , . . . , α mid ) 
+
+> 5:
+
+v ← 1
+
+> SS
+
+X
+
+> s=1
+
+ef f exp 
+
+
+
+p(s) 
+
+> 6:
+
+if v < ef f exp ∗ then  
+
+> 7:
+
+lo ← αmid ▷ too skewed; increase α 
+
+> 8:
+
+else  
+
+> 9:
+
+hi ← αmid ▷ too uniform; decrease α 
+
+> 10:
+
+return αmid 
+
+We denote the resulting parameterization ddist:X , a
+
+Dir( α) distribution targeting ef f exp ∗ = N/X , with the parameter X acting as a skew multiplier. Increasing X reduces the target number of effectively used experts and concentrates tokens on a smaller subset of experts. At X = 1 , ef f exp ∗ =
+
+N , so routing is near-uniform across all experts; at X = N ,
+
+ef f exp ∗ = 1 , so the distribution approaches the maximally skewed case in which one expert dominates. This notation decouples routing skew from model-specific expert counts and provides a stable axis for sweeping distributions. 
+
+B. Layer-Wise Routing Skew in DeepSeek-V3 
+
+Fig. 5 reports ef f exp measured layer-by-layer for DeepSeek-V3 (NVFP4) on the MMLU dataset [16]. Two patterns emerge. First, routing skew is highly layer-dependent. More central layers exhibit persistently low ef f exp (concen-trated routing), while early layers (3–12) and late layers (45– 60) remain more uniform. Second, ef f exp increases with token count across all layers, as a larger batch aggregates more diverse tokens and smooths the per-expert distribution. The layer-wise distribution shifts substantially between token counts 32 and 1024, from values around 80 in the most skewed layers to values around 180 or higher in the more uniform regime. This heterogeneity implies that a single, statically chosen kernel configuration will be mismatched to a substantial fraction of layers at any given token count. 
+
+Observation 1: MoE routing skew depends on layers and token counts. In our DeepSeek-V3 trace, ef f exp varies by over 2× across layers at each token count, so a dispatch policy should adapt to the observed routing distribution rather than assume one fixed skew level for the whole model. 
+
+C. Kernel Performance Under Controlled Distributions 1) Throughput Definitions: We profile TRTLLM’s fused MoE kernels under controlled ddist:X distributions and report two throughput metrics: (a) Physical throughput : total MMA FLOPs issued per second, including both useful and ddist:4.0 ddist:1.5 
+
+> Effective throughput (TFLOPs) Physical throughput (TFLOPs)
+
+8 16 32 64 128 8 16 32 64 128 8 16 32 64 128 8 16 32 64 128 8 16 32 64 128 8 16 32 64 128 
+
+8 16 32 64 128 8 16 32 64 128 8 16 32 64 128 8 16 32 64 128 8 16 32 64 128 8 16 32 64 128 
+
+Tile N Tile N                 
+
+> tc=32 tc=64 tc=128
+> tc=256 tc=512 tc=1024
+> tc=32 tc=64 tc=128
+> tc=256 tc=512 tc=1024
+> tc=32 tc=64 tc=128
+> tc=256 tc=512 tc=1024
+> tc=32 tc=64 tc=128
+> tc=256 tc=512 tc=1024
+
+Fig. 6: Effective throughput (top rows) and physical throughput (bottom rows) of TRTLLM MoE kernels as a function of Tile N, under ddist:1.5 (left) and ddist:4.0 (right) for token counts 32–1024. Each point shows Q1/Q2/Q3 percentiles across all kernels sharing the same Tile N. Physical throughput increases monotonically with Tile N and Q1–Q3 bands are tight. Effective throughput is non-monotonic: for small batches, large Tile N incurs excessive zero-padding, degrading useful throughput; for larger batches, an intermediate Tile N is optimal. The Q1–Q3 spread in effective throughput exceeds 10% at the same Tile N, reflecting the impact of software-pipelining and memory-path configuration. (TC = token counts) tc=32 tc=64 tc=128                 
+
+> tc=256 tc=512 tc=1024
+> Effective & physical throughput (TFLOPs)
+> 816 32 64 128 816 32 64 128 816 32 64 128
+> Tile N
+
+Fig. 7: Effective and physical throughput when all tokens are routed to a single expert (dense-model behavior). Performance increases monotonically with Tile N across all token counts, as larger tiles maximize weight-matrix data reuse. zero-padded compute; (b) Effective throughput : physical throughput scaled by the fraction of non-padded tokens, re-flecting only computation that contributes to valid outputs. 
+
+2) Physical vs. Effective Throughput: Fig. 6 reports both metrics for ddist:1.5 and ddist:4.0 across Tile N 
+
+∈ {8, 16 , 32 , 64 , 128 } and token counts 32–1024. Physical throughput (bottom rows) increases monotonically with Tile N regardless of token count or distribution, since larger tiles reuse the expert weight matrix over more token columns, raising arithmetic intensity toward the compute roofline. Effective throughput (top rows) includes the penalty from zero-padded work, so its trend is non-monotonic. The pre-ferred Tile N follows the number of tokens assigned to each active expert. Under ddist:1.5 , small batches favor the smallest tiles, while larger batches move the optimum toward larger Tile N values; the preferred tile grows from Tile N=8 at token counts 32–64 to Tile N=64 at token count 1024. This progression reflects the tradeoff between padding and reuse. Small tiles reduce padding when each expert receives few tokens, while larger tiles improve expert weight reuse. Higher skew shifts the same tradeoff toward larger tiles. Under 
+
+ddist:4.0 , tokens concentrate on fewer experts, increasing the per-active-expert token count and moving the preferred Tile N one step higher in the tile sequence. The Q1–Q3 spread in effective throughput in both distributions exceeds 10% at the same Tile N, indicating that software-pipelining depth and memory-load path must be selected together with tile shape. 
+
+3) Single-Expert (Dense Model) Routing: Fig. 7 shows the limiting case where all tokens route to a single expert, equivalent to dense-model behavior. Zero-padding is absent, so effective throughput equals physical throughput. Performance increases monotonically with Tile N across all token counts. This baseline confirms that larger tiles are unconditionally better only when routing is perfectly concentrated. As routing becomes non-uniform, the optimal Tile N shifts downward due TC= 32      
+
+> tile_N=8
+> TC= 256
+> tile_N=32
+> (a)
+> (b)
+> uniform ddist:1.5 ddist:2.0 ddist:3.0 ddist:4.0 single
+> 1.0
+> 2.0
+> 3.0
+> 1.0
+> 2.0
+> 3.0
+> Latency / best (lower is better)
+
+Fig. 8: Normalized latency (latency / best-in-distribution; lower is better) for all TRTLLM kernels (gray) and the top-performing / largest-rank-shifting kernels (colored) as routing distribution is swept from uniform through ddist:1.5 –
+
+4.0 to single-expert. (a) TC = 32, Tile N = 8 (168 kernels). (b) TC = 256, Tile N = 32 (192 kernels). The best kernel (la-tency/best = 1.0) changes across distributions in both settings, confirming that no single kernel dominates all routing patterns. to the padding overhead analyzed above. 
+
+Observation 2: The optimal Tile N depends on both the routing distribution and the token count. Under skewed routing, smaller tiles reduce padding waste; under uniform routing or large batches, larger tiles improve data reuse. Tile shape selection cannot be decoupled from routing skew. 
+
+D. No Single Kernel Dominates Across Distributions 
+
+The preceding analysis shows that the optimal tile shape de-pends on both routing distribution and token count. Beyond tile shape, each Tile N still admits multiple kernel configurations that differ in pipelining configuration and memory-load path. We next examine whether any single configuration remains optimal across distributions at a fixed Tile N. Fig. 8 sweeps routing from uniform through ddist:1.5 ,
+
+2.0 , 3.0 , 4.0 to single-expert and plots the normalized latency (latency / best-in-distribution) for all TRTLLM kernels sharing the same Tile N. Gray lines show all kernels; colored lines highlight the top-performing ones. In both token count of 32 and 256, the kernel that achieves the lowest latency changes across distributions, and rank crossings are frequent. This result directly motivates the distribution-aware dispatch system described in Section IV since the optimal kernel shifts with the routing distribution observed at runtime, and the kernel dispatcher must select accordingly. 
+
+Observation 3: Even at a fixed Tile N, no single kernel configuration dominates all routing distributions. The dis-patch system must select among kernel configurations at runtime based on the observed routing distribution. IV. DA-M OE: D ISTRIBUTION -A WARE KERNEL DISPATCH 
+
+Section III shows that no single kernel configuration is opti-mal across routing distributions since the best choice changes with both the layer and the token count. DA-MoE exploits this behavior during inference, which raises two practical concerns for each MoE layer invocation: which kernel should execute the current routing distribution, and how can that choice be made without introducing CPU-side dispatch overhead that would offset the benefit. We respond to the first question with an offline auto-tuning stage that maps representative routing distributions to their fastest kernels (§IV-A), and we answer the second with an online, fully GPU-resident dispatch path built on conditional CUDA Graphs (§IV-B, §IV-C). The end-to-end flow is illustrated in Fig. 9. DA-MoE targets the execution point where the routing distribution becomes known but before expert computation begins. Each MoE layer processes a batch of tokens in two stages. First, the router network scores all experts for every token. Second, the tokens pass through the selected top-
+
+k experts’ fully-connected network layers, which production backends execute as fused MoE kernels that processes all experts within a kernel. This fused expert-computation stage dominates MoE-layer latency. DA-MoE inserts its kernel-selection decision after the first stage and before the fused MoE kernel executes, while keeping the decision inside the same CUDA Graph that captures the full MoE-layer path. At a high level, as depicted in Fig. 9, our DA-MoE workflow consists of two stages. The offline auto-tuning stage profiles candidate fused MoE kernels and builds a separate dispatch table for each token-count bucket, while the online dynamic path first selects the bucket for the current token count, queries that bucket’s table, and launches the selected kernel without CPU intervention. Similar profiling-and-dispatch flows already appear in common LLM inference frameworks such as TRTLLM, vLLM and FlashInfer [7]–[9]; however, these flows typically use random router logits during tuning, choose a single kernel configuration for each token-count bucket, and instantiate one CUDA Graph per bucket (e.g., 32, 64, . . . ). DA-MoE instead makes the routing distribution explicit, so each token-count bucket has its own set of exemplars and can contain multiple distribution-specific kernel choices while still preserving graph-based launch efficiency. 
+
+A. Offline Auto-Tuning 
+
+The offline stage constructs one lookup table per token-count bucket. Each table maps representative routing distribu-tions for that bucket to the fused MoE kernels that execute them with the lowest latency. As shown in Fig. 9(a), for each token count we 1 generate synthetic routing distributions by sweeping ddist:X over a range of skew levels, using the Dirichlet reverse-modeling procedure from §III-A. We then  
+
+> 2
+
+benchmark each distribution against all available TRTLLM fused MoE kernels and 3 record the kernel ID with the lowest latency for that distribution. We represent each distribution with an exemplar derived from the vector of token counts across experts. The vector is sorted in descending order and L2-normalized to unit norm. Sorting removes dependence on expert identity, so two layers with the same skew profile but different hot experts map to the batch size (32, 64, ...,) 
+
+(a) Before inferencing (auto-tuning) 
+
+routing data 
+
+upload to GPU 
+
+set CUDA conditional node 
+
+A single CUDA graph. No CPU-GPU syncronization 
+
+> TRTLLM GPU kernels benchmarking
+
+(b) During inferencing (dynamic inference) 
+
+Launch the corresponding fused MoE kernel 
+
+1 2 3 4
+
+5 6
+
+a) Calculate expert histogram b) Sort the histogram in ascending order c) Cosine similarity comparison with exemplars  
+
+> exemplar 1 → best kernel ID exemplar 2 → best kernel ID exemplar → best kernel ID
+> ...
+> token count = 32 token count=128
+> distribution 1 distribution 2 distribution
+> ...
+> token count = 32 token count=64 token count=128 token count=64
+
+Fig. 9: Distribution-aware dispatch flow. (a) Offline auto-tuning : (1) for each token-count bucket, generate synthetic routing distributions via ddist:X ; (2) benchmark them against all available TRTLLM kernels; (3) record the best kernel ID per distribution and form an exemplar–kernel pair, where the exemplar is the sorted, L2-normalized per-expert token vector; (4) upload the bucket-specific exemplar tables to the GPU. (b) Online dispatch : (5) build the per-expert histogram from the router logits, sort it, and match it against the exemplar table for the current token-count bucket by cosine similarity; (6) launch the selected fused MoE kernel through a conditional CUDA Graph, entirely on the GPU with no CPU–GPU synchronization. same representation, while L2 normalization removes residual scale differences within a token-count bucket. The offline stage produces, for each token-count bucket, a dispatch table that maps each exemplar to the kernel ID selected by profiling. We 4 upload these tables to GPU memory before inference. 
+
+B. Online Dispatch 
+
+At inference time, the routing distribution of an MoE layer is known only after the router executes, so kernel selection lies on the critical path. As shown in Fig. 9(b), once the router produces per-token expert logits, we 5 build the per-expert histogram by counting how many tokens are routed to each expert and sorting the histogram in descending order. The dispatcher compares this query with the exemplars in the current token-count bucket using cosine similarity, which is a single dot product per exemplar because the exemplars are unit vectors. The exemplar with the highest score provides the kernel ID for the current layer invocation. The histogram construction, sorting, similarity search, and dispatch decision all execute on the GPU. This placement is essential: a CPU-side selector would have to copy the routing histogram back to the host and synchronize the CPU with the GPU for every MoE layer. Keeping the decision on the device removes this synchronization from the critical path. 
+
+C. GPU-Side Dispatch via Conditional CUDA Graphs 
+
+The remaining obstacle is the launch mechanism for low-latency inference. LLM inference issues many small kernels per model layer, and launching each kernel separately through the CPU exposes per-launch overhead on the critical path. CUDA Graphs mitigate this overhead by capturing a fixed kernel sequence once and replaying it as a single graph exe-cution, thereby amortizing CPU launch cost. Fig. 10 illustrates this mechanism: instead of issuing individual CPU launches for each kernel in the decoding path, the runtime replays a Launch A Launch B     
+
+> ABC
+> Launch C
+> (a) Without CUDA graph
+> Launch Graph
+> (b) With CUDA graph
+> Build Graph
+> ABCGPU CPU GPU CPU
+> Time
+> speedup
+
+Fig. 10: Kernel launch with and without CUDA Graphs. 
+
+(a) Without CUDA Graphs , each kernel is launched through the CPU, exposing per-launch latency on the critical path. 
+
+(b) With CUDA Graphs , the runtime captures the kernel sequence once and replays it as a single graph execution, removing per-kernel CPU launch overhead. pre-captured graph that contains the same kernel sequence. This property is why modern LLM serving frameworks [7], [9], [17] rely heavily on CUDA Graphs. A standard CUDA Graph, however, represents a static sequence. It cannot make a data-dependent branch to one of several kernels without leaving the graph. Fig. 11(a) shows the consequence for distribution-aware dispatch under traditional graphs. The graph must be split at the dispatch point, and the selected kernel ID must be returned to the CPU so that the CPU can launch the matching subgraph. This design reintroduces the same CPU–GPU synchronization that our GPU-resident selector is meant to avoid. We avoid this synchronization with conditional CUDA Graphs, introduced in CUDA 12.8. A
+
+cudaGraphConditional node embeds a device-side (a) Traditional path   
+
+> Launch graph
+> (b) Conditional CUDA graph
+> GPU CPU GPU CPU
+> Time
+> Launch Launch MemCpy
+> (no CPU-GPU communications)
+> Kernel selection Kernel selection
+> speedup
+> MoE kernel
+> MoE kernel SWITCH NODE cudaGraphSetConditional
+
+Fig. 11: Traditional vs. conditional CUDA Graphs. (a) Tradi-tional graphs require CPU copy-back and subgraph relaunch for data-dependent dispatch. (b) Conditional graphs use a device-side SWITCH to keep selection and launch on the GPU. 
+
+SWITCH branch directly inside the graph. Fig. 11(b) shows our dispatch path: the kernel ID selected in §IV-B drives the switch, and the corresponding fused MoE kernel is launched without returning control to the host. Thus, after the online matcher produces a kernel ID, the graph 6 launches the selected fused MoE kernel through the device-side conditional branch. Histogram construction, exemplar matching, branch selection, and kernel launch all execute within one graph context, keeping distribution-aware selection GPU-resident and low overhead relative to the kernel execution it controls. V. E VALUATION 
+
+This section evaluates the performance of DA-MoE in realistic LLM serving. The central concern is whether aruntime selector can improve over the static per-bucket kernel choice used by production MoE backends, while preserving the CUDA Graph execution model needed for low-latency decoding. We compare DA-MoE against NoDA , which profiles each token-count bucket with a single random input and commits to one kernel for that bucket, as in common auto-tuning flows used by TRTLLM [7] and FlashInfer [8]. We also report an oracle that selects the fastest available kernel for each individual invocation. We report two latency metrics. Fused-MoE latency measures only the expert-computation kernel and isolates the benefit of distribution-aware kernel selection, while end-to-end MoE-layer latency measures the full CUDA Graph path, including router selection, routing-metadata construction, DA-MoE dis-patch, and fused-MoE execution. The first metric shows how much opportunity exists in the kernel choice itself; the second shows how much of that opportunity remains after the GPU-resident selection cost is included. The evaluation proceeds as follows. We first establish the headline result on real workloads (§V-B). We then quantify the cost of keeping the dispatch decision on GPU through conditional CUDA Graphs (§V-C). Next, we validate the assumption that synthetic Dirichlet distributions match real routings (§V-D). Finally, we study how the gain scales with routing skew (§V-E) and expert-parallelism degree (§V-F). 32 64 128 256 512 
+
+Batch size 
+
+> 100
+> 200
+> 300
+> 400
+> Latency ( μs)
+
+DeepSeek-V3 (EP=4)     
+
+> 32 64 128 256 512
+
+Batch size 
+
+Kimi K2 (EP=6)  
+
+> NoDA DA-MoE
+
+Fig. 12: Mean fused-MoE latency on HumanEval-X for DeepSeek-V3 (EP=4) and Kimi K2 (EP=6) across token counts 32–512. DA-MoE improves geomean latency by 1.16 ×
+
+and 1.29 × over NoDA, respectively. 
+
+A. Experimental Setup 
+
+All experiments run on NVIDIA B200 GPUs connected with NVLink under CUDA 13.1. We implement DA-MoE on FlashInfer v0.6.6 [8] and integrate it with vLLM [9] for LLM serving. Experiments are evaluated on two large MoE-based LLMs: DeepSeek-V3 [3] (256 experts, top-8 routing) running on four GPUs with expert parallelism EP=4, and Kimi K2 [4] (384 experts, top-8 routing) on six GPUs with EP=6. We use two workloads for distinct purposes. MMLU [16] is used only for routing-distribution analysis, matching Sec-tion III-C, while HumanEval-X [18] provides the real-world serving workload, testing DA-MoE on a dataset different from the one used for workload analysis. Decoding uses temperature 0.3 and generates 64 tokens. Each configuration is ran eight times, and we report the median to suppress noise. The offline auto-tuning sweep covers token-count buck-ets {32 , 64 , 128 , 256 , 512 } and Dirichlet skew settings 
+
+{1.1, 1.3, 1.5, 1.7, 2.0, 2.5, 4.0} with number of samples S of 10 for each skew, covering the range of skews observed in Section III-A. We focus on token counts 32–512, where low-latency serving is most demanding as tile padding, execution latency and memory efficiency are most visible. 
+
+B. Real-Workload MoE Latency 
+
+Fig. 12 presents the geometric mean fused-MoE latency on the captured workload. On DeepSeek-V3, DA-MoE improves geomean fused-MoE latency by 1.16 × over NoDA, with a peak speedup of 1.40 ×. The gains are largest at token counts 64–256, where routing skew and token count jointly expose alternative kernels that are substantially faster than the static bucket choice. Kimi K2 shows a larger geomean improvement of 1.29 ×, peaking at 1.56 × at token count 128. The stronger gain on Kimi K2 follows from its larger expert pool (384 versus 256), so routing imbalance is more pronounced, giving distribution-aware selection more room to improve. Fig. 13 reports the per-invocation latency distribution. DA-MoE shifts the Q1–Q3 range downward at the token counts where the static choice is mismatched, with little increase in spread, indicating that the gain comes from consistently better kernel selection rather than from a few outliers. 32 64 128 256 512 
+
+Batch size 
+
+> 100
+> 200
+> 300
+> 400
+> Latency distribution ( μs)
+
+DeepSeek-V3 (EP=4)     
+
+> 32 64 128 256 512
+
+Batch size 
+
+Kimi K2 (EP=6)  
+
+> NoDA DA-MoE
+
+Fig. 13: Per-invocation fused-MoE latency distribution for NoDA and DA-MoE, shown as min, Q1, median, Q3, and max across the captured MoE-layer invocations. DA-MoE shifts the distribution downward for most token counts while preserving low variance near the oracle-selected kernel. TABLE I: Fused-MoE latency normalized to the per-invocation oracle. Lower is better.                                     
+
+> Model Method Token count 32 64 128 256 512 DS-V3 NoDA 103.8% 118.8% 140.1% 125.9% 121.5% DA-MoE 100.3% 101.1% 100.3% 101.0% 120.6% Oracle 100.0% 100.0% 100.0% 100.0% 100.0% Kimi K2 NoDA 122.7% 123.0% 158.5% 131.3% 126.7% DA-MoE 102.6% 102.5% 101.8% 101.6% 103.7% Oracle 100.0% 100.0% 100.0% 100.0% 100.0%
+
+Table I quantifies how close each method comes to the oracle. DeepSeek-V3 with DA-MoE stays within 1.1% of the oracle for token counts 32–256, compared with 26–40% for NoDA over the same range. At token count 512, both DA-MoE and NoDA sit approximately 20% above the oracle, indicating that the oracle selects a kernel outside the coverage of both the exemplar matcher and the static bucket choice. For Kimi K2, DA-MoE stays within 4% of the oracle across all evaluated token counts, while NoDA trails the oracle by up to 59%. 
+
+C. Overhead of Conditional CUDA Graph Dispatch 
+
+Our distribution-aware selection runs on the critical path; copying the routing data to the host to choose a kernel would reintroduce the CPU–GPU synchronization that conditional CUDA Graphs are meant to remove. Table II isolates this cost with a microbenchmark: a producer kernel computes a value that selects which of two follow-up kernels to launch, a data-dependent branch analogous to choosing a fused MoE kernel from the per-expert token counts. Routing this branch on the host adds about 15 μs of overhead per dispatch over a branch-free fixed graph. Keeping the branch on the GPU with a conditional CUDA graph cuts this to about 8 μs. The per-graph overhead of our DA-MoE workflow, including TABLE II: Latency of a data-dependent dispatch microbench-mark: a producer kernel computes a value that selects which of two follow-up kernels to launch.             
+
+> Dispatch path Latency ( μs) Branch overhead ( μs) Copy to host, branch on CPU 19.1 15.0 Conditional CUDA Graph (on GPU) 12.3 8.2 Fixed graph, no branch 4.1 —32 64 128 256 512
+
+Batch size 
+
+> 100
+> 200
+> 300
+> 400
+> Latency ( μs)
+
+DeepSeek-V3 (EP=4)     
+
+> 32 64 128 256 512
+
+Batch size 
+
+Kimi K2 (EP=6)  
+
+> NoDA DA-MoE
+
+Fig. 14: End-to-end MoE-layer latency (the full captured CUDA Graph: router selection, routing metadata, and fused-MoE kernel execution) for NoDA and DA-MoE. histogram construction, sorting and exemplar matching, and the conditional branch, is about 14 μs. Fig. 14 measures the end-to-end MoE-layer latency. The full graph includes router selection, routing metadata, GPU-resident DA-MoE dispatch, and fused-MoE kernel execution. DA-MoE improves geomean end-to-end latency by 1.15 ×
+
+on DeepSeek-V3 and 1.26 × on Kimi K2, peaking at token count 128 (1.37 × and 1.51 ×). These closely track the fused-MoE-only speedups of 1.16 × and 1.29 × from Fig. 12, con-firming that the ≈14 μs dispatch overhead is small relative to MoE-layer latency and erodes the kernel-selection benefit only marginally. Overall, conditional CUDA Graphs make GPU-resident distribution-aware dispatch practical by eliminating CPU-GPU synchronization. 
+
+D. Distribution Modeling Accuracy 
+
+DA-MoE’s offline auto-tuning is driven by synthetic routing distributions, so its validity rests on whether those distributions preserve the shape of real expert-count vectors once matched to the target ef f exp ∗ value. Fig. 15 compares three synthetic families—Beta, exponential, and Dirichlet—against real rout-ing samples collected from DeepSeek-V3 on the prefill tokens of the MMLU dataset. Each family is parameterized to match the sample’s ef f exp ∗ value and then compared using cosine similarity over sorted, L2-normalized expert-count vectors. The Dirichlet family gives the strongest match across token counts 32–512, with a geomean cosine similarity of 0.97, compared with 0.92 for Beta and 0.94 for exponential. Beta requires a brute-force two-parameter search, for which we use a grid spacing of 0.1, whereas exponential and Dirichlet match the target ef f exp value through binary search. This result confirms that a Dirichlet sweep is sufficient for offline tuning, 32 64 128 256 512   
+
+> Batch size
+> 0.7
+> 0.8
+> 0.9
+> 1.0
+> Cosine similarity
+> Dirichlet Exponential Beta
+
+Fig. 15: Cosine similarity between real sorted expert-count dis-tributions (DeepSeek-V3, MMLU prefill tokens) and synthetic families matched to the same ef f exp ∗ value. Shaded regions show the 10th–90th percentile over sampled real distributions. TABLE III: Fused-MoE latency speedup over NoDA (higher is better) for DeepSeek-V3 at EP=4 across imbalance factors.                                
+
+> Imb ( f)TC 32 TC 64 TC 128 TC 256 Geomean
+> 01.03 ×1.18 ×1.40 ×1.25 ×1.21 ×
+> 10 1.06 ×1.35 ×1.56 ×1.31 ×1.31 ×
+> 20 1.10 ×1.33 ×1.66 ×1.34 ×1.34 ×
+> 50 1.35 ×1.68 ×1.95 ×1.43 ×1.59 ×
+> 100 1.41 ×1.77 ×2.05 ×1.47 ×1.66 ×
+
+as its mathematical formulation coincides with the expert-selection process, which is a distribution of distributions. 
+
+E. Ablation Study: Routing Skew 
+
+Real deployments differ in how concentrated their routing distributions are, so we next quantify how the gain scales with routing skew under controlled conditions. We introduce an imbalance factor f ∈ { 0, 10 , 20 , 50 , 100 } that partitions each batch into approximately equal groups of f % of the prompts and replaces every prompt in a group with one shared prompt. The batch thus holds 100 /f distinct prompts, each repeated across its group, which concentrates the per-expert token counts without changing the nominal token count. The two endpoints bracket the range: f = 0 leaves every prompt distinct, matching the real-workload experiment, while 
+
+f = 100 collapses the batch to a single repeated prompt and maximally skewed routing. Table III reports the fused-MoE latency speedup over NoDA for DeepSeek-V3 at EP=4. The speedup grows monotonically with skew, rising from a geomean of 1.21 × at f = 0 to 1.66 ×
+
+at f = 100 . The increase is steepest at token counts 64– 256, where concentrating the distribution exposes alternative kernels that are substantially faster than the static choice. DA-MoE’s advantage therefore compounds with routing skew precisely where it matters for low-latency serving, since a more concentrated distribution at small token counts yields a larger gain over the NoDA baseline. 
+
+F. Ablation Study: Expert-Parallelism Degree 
+
+Expert parallelism (EP) sets how many devices share the expert pool, and a higher degree reduces the total routed tokens processed by each device’s local experts, amplifying per-device routing imbalance. We evaluate DeepSeek-V3 at EP 
+
+∈ { 1, 2, 4, 8} with token counts 32–256. EP=1 corresponds to pure pipeline parallelism with no cross-device expert sharding. TABLE IV: Fused-MoE latency speedup (NoDA latency / DA-MoE latency, higher is better) for DeepSeek-V3 across expert-parallelism degrees, at token counts 32–256 (imbalance factor 0). EP=1 corresponds to pure pipeline parallelism (PP=4). Geomean is over token counts 32–256.                          
+
+> EP TC 32 TC 64 TC 128 TC 256 Geomean
+> 1 (PP=4) 1.00 ×1.00 ×1.01 ×1.00 ×1.00 ×
+> 21.02 ×1.01 ×1.06 ×1.23 ×1.07 ×
+> 41.03 ×1.18 ×1.40 ×1.25 ×1.21 ×
+> 81.17 ×1.32 ×1.23 ×1.00 ×1.17 ×
+
+Table IV shows that DA-MoE delivers no measurable ben-efit at EP=1, with a geomean speedup of 1.0 ×. At EP=1, the fused kernel is selected once for the full 256-expert pool on each pipeline stage. The local workload therefore combines many small expert GEMMs with different token counts, and one kernel configuration must serve this broad mixture rather than a narrow routing regime. Under this aggregated view, changing the kernel for one hot subset provides limited benefit because the same choice is still applied to many other experts with different counts. The static bucket choice is already a robust selection, leaving little room for DA-MoE to specialize. As EP increases, each device sees a smaller shard of the expert pool, so local hot and cold patterns are less averaged out and the runtime selector can match a more specific routing regime. The benefit grows to 1.07 × at EP=2 and 1.21 × at EP=4, then eases to 1.17 × at EP=8. Across EP=2–8, DA-MoE consistently outperforms the static baseline. VI. D ISCUSSION & A RCHITECTURAL IMPLICATIONS 
+
+DA-MoE shows that the live routing histogram is useful for choosing a faster MoE kernel, but this choice must be made after routing and before expert computation. Its cost lies directly on the decoding critical path. We draw two architectural implications from this result. First, GPUs need lower-cost GPU-resident branching for data-dependent kernel selection. Second, spatial accelerators need tile flexibility to match the observed expert distribution. 
+
+A. GPU-Side Branching Should Be a Hardware Primitive 
+
+Conditional CUDA Graphs are necessary because DA-MoE’s kernel choice depends on a routing histogram produced on the GPU. Branching on the CPU would require copying this value back to the host and synchronizing the decoding path. Table II confirms this cost: CPU-side branching adds about 15 μs of overhead, while a conditional CUDA Graph reduces the branch overhead to about 8 μs. This device-side branch is still not free as the full DA-MoE selection path adds about 14 μs per graph, includ-ing histogram construction, sorting, exemplar matching, and conditional dispatch. DeepSeek-V3 and Kimi K2 amortize this cost because their MoE workloads are large enough for better kernel selection to dominate the overhead. Smaller MoE variants, such as Qwen3 models [14], may not expose enough latency savings, so distribution-aware dispatch is beneficial only when the kernel-selection gain exceeds the dispatch cost. A similar issue appears on AMD accelerators and their programming interface, HIP. HIP Graphs supports graph cap-ture and replay, but do not expose an equivalent of CUDA’s device-side conditional SWITCH node [19]. DA-MoE on HIP would therefore need CPU copy-back, removing the benefit of GPU-resident online dispatch. Thus, graph replay alone is insufficient for MoE serving because the runtime also requires a low-overhead GPU-resident control flow. 
+
+B. Spatial Accelerators Need Tile Flexibility 
+
+The tile tradeoff is not specific to Tensor Cores. On systolic-array accelerators, the analogous choice is how much array area to allocate to each expert GEMM. A large tile improves reuse for hot experts, but wastes work when many experts receive few tokens. Section III-C shows that the preferred tile size changes with token count and routing skew. ReSA [20] proposed a reconfigurable systolic array archi-tecture that supports partitioning an array into smaller subar-rays to handle multiple tiny GEMMs. For MoE workloads, these subarrays can be dynamically allocated to individual expert GEMMs using heterogeneous tile shapes. Our model-ing framework directly applies to such reconfigurable spatial architectures, enabling quantitative performance analysis and optimal tile-shape selection under varying routing skews. Overall, future inference accelerators need two forms of adaptivity: low-overhead device-side control flow, and tile-shape flexibility driven by the observed expert distribution. VII. R ELATED WORK 
+
+MoE inference systems and runtime dispatch. Production inference systems such as TensorRT LLM, FlashInfer, and vLLM [7]–[9] support modern MoE models [1]–[4] with fused MoE kernels, graph replay, and auto-tuning. Their dispatch policies are primarily keyed by static properties such as token-count buckets. DA-MoE adds the live routing distribution as a dispatch signal, selecting among existing kernel variants without changing the model or serving API. Some inference methods improve hardware utilization by changing expert choices [21], [22], but they can incur accuracy tradeoffs. 
+
+MoE training kernels and sparse expert computa-tion. Training-oriented MoE systems reduce sparse expert-computation overhead through block-sparse execution, scal-able scheduling, or IO- and tile-aware optimization [11], [23], [24]. These techniques address padding and scheduling costs in training workloads, while DA-MoE targets runtime kernel dispatch for low-latency inference. 
+
+GEMM tiling and configurable accelerators. Prior archi-tectural work on matrix multiplication shows that tile shape and resource partitioning should match the memory hierarchy and tensor shape. CAKE [25] studies multi-level cache-aware blocking for CPU GEMMs, while ReSA [20] reconfigures systolic-array resources for small neural network tensors. Our work applies the same principle to MoE inference, where routing dynamically changes the per-expert GEMM sizes seen by fused GPU kernels. 
+
+Communication and memory movement in MoE in-ference. Prior MoE inference systems optimize data move-ment, communication, memory capacity, or routing-pattern forecasting [10], [26]–[28]. Some systems coordinate expert placement and communication to reduce distributed all-to-all overheads, while others target memory-constrained serving by managing expert placement across GPU and host memory. Recent characterization work also studies routing and data-movement patterns to forecast communication behavior during large-scale MoE serving. These works reduce inter-device and memory-system overheads in distributed or memory-constrained settings. 
+
+MoE routing characterization. Existing MoE analyses often rely on aggregate statistics or collected traces [10], [11], which are difficult to sweep systematically in hardware studies. We introduce the effective experts metric and a Dirichlet-based reverse-modeling procedure that converts real routing traces into a controllable distribution family. DA-MoE uses the same distribution-aware view at runtime by matching the observed per-expert histogram against offline-tuned exemplars. VIII. C ONCLUSION 
+
+This paper demonstrates that MoE inference performance depends not only on the token-count bucket, but also on the runtime routing distribution within each bucket. We introduce effective experts as a compact metric for expert-utilization skew and develop a Dirichlet reverse-modeling method for generating controllable distributions. This enables systematic hardware studies of MoE routing skew and shows that the best fused-MoE kernel changes with routing skew, token count, and expert-parallelism degree. These results indicate that static per-bucket kernel dispatch is insufficient for modern MoE serving. We further present DA-MoE, a distribution-aware kernel-dispatch runtime building on top of the open-sourced ker-nel framework FlashInfer that selects near-optimal fused-MoE kernels. DA-MoE combines offline-tuned distribution exemplars with GPU-resident online matching to select the kernel. On HumanEval-X serving traces, DA-MoE improves geomean fused-MoE latency by 1.16 × on DeepSeek-V3 and 1.29 × on Kimi K2, with peak speedups of 1.40 × and 1.56 ×,respectively. It also improves end-to-end MoE-layer latency by 1.15 × and 1.26 × geomean, peaking at 1.37 × and 1.51 ×,respectively. Overall, these results show that routing-aware dis-patch and low-overhead device-side control flow are important mechanisms for efficient sparse expert computation in future MoE runtimes and accelerators. REFERENCES [1] A. Q. Jiang, A. Sablayrolles, A. Roux, A. Mensch, B. Savary, C. Bamford, D. S. Chaplot, D. de las Casas, E. B. Hanna, F. Bressand, G. Lengyel, G. Bour, G. Lample, L. R. Lavaud, L. Saulnier, M.-A. Lachaux, P. Stock, S. Subramanian, S. Yang, S. Antoniak, T. L. Scao, T. Gervet, T. Lavril, T. Wang, T. Lacroix, and W. E. Sayed, “Mixtral of experts,” arXiv preprint arXiv:2401.04088, 2024. [Online]. Available: https://arxiv.org/abs/2401.04088 [2] W. Fedus, B. Zoph, and N. Shazeer, “Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity,” Journal of Machine Learning Research , vol. 23, no. 120, pp. 1–39, 2022. [3] DeepSeek-AI, A. Liu, A. Mei, B. Lin, B. Xue, B. Wang, B. Xu, B. Wu, B. Zhang, C. Lin, C. Dong, C. Lu, C. Zhao, C. Deng, C. Xu, C. Ruan, D. Dai, D. Guo, D. Yang, D. Chen, E. Li, F. Zhou, F. Lin, F. Dai, G. Hao, G. Chen, G. Li, H. Zhang, H. Xu, H. Li, H. Liang, H. Wei, H. Zhang, H. Luo, H. Ji, H. Ding, H. Tang, H. Cao, H. Gao, H. Qu, H. Zeng, J. Huang, J. Li, J. Xu, J. Hu, J. Chen, J. Xiang, J. Yuan, J. Cheng, J. Zhu, J. Ran, J. Jiang, J. Qiu, J. Li, J. Song, K. Dong, K. Gao, K. Guan, K. Huang, K. Zhou, K. Huang, K. Yu, L. Wang, L. Zhang, L. Wang, L. Zhao, L. Yin, L. Guo, L. Luo, L. Ma, L. Wang, L. Zhang, M. S. Di, M. Y. Xu, M. Zhang, M. Zhang, M. Tang, M. Zhou, P. Huang, P. Cong, P. Wang, Q. Wang, Q. Zhu, Q. Li, Q. Chen, Q. Du, R. Xu, R. Ge, R. Zhang, R. Pan, R. Wang, R. Yin, R. Xu, R. Shen, R. Zhang, S. H. Liu, S. Lu, S. Zhou, S. Chen, S. Cai, S. Chen, S. Hu, S. Liu, S. Hu, S. Ma, S. Wang, S. Yu, S. Zhou, S. Pan, S. Zhou, T. Ni, T. Yun, T. Pei, T. Ye, T. Yue, W. Zeng, W. Liu, W. Liang, W. Pang, W. Luo, W. Gao, W. Zhang, X. Gao, X. Wang, X. Bi, X. Liu, X. Wang, X. Chen, X. Zhang, X. Nie, X. Cheng, X. Liu, X. Xie, X. Liu, X. Yu, X. Li, X. Yang, X. Li, X. Chen, X. Su, X. Pan, X. Lin, X. Fu, Y. Q. Wang, Y. Zhang, Y. Xu, Y. Ma, Y. Li, Y. Li, Y. Zhao, Y. Sun, Y. Wang, Y. Qian, Y. Yu, Y. Zhang, Y. Ding, Y. Shi, Y. Xiong, Y. He, Y. Zhou, Y. Zhong, Y. Piao, Y. Wang, Y. Chen, Y. Tan, Y. Wei, Y. Ma, Y. Liu, Y. Yang, Y. Guo, Y. Wu, Y. Wu, Y. Cheng, Y. Ou, Y. Xu, Y. Wang, Y. Gong, Y. Wu, Y. Zou, Y. Li, Y. Xiong, Y. Luo, Y. You, Y. Liu, Y. Zhou, Z. F. Wu, Z. Z. Ren, Z. Zhao, Z. Ren, Z. Sha, Z. Fu, Z. Xu, Z. Xie, Z. Zhang, Z. Hao, Z. Gou, Z. Ma, Z. Yan, Z. Shao, Z. Huang, Z. Wu, Z. Li, Z. Zhang, Z. Xu, Z. Wang, Z. Gu, Z. Zhu, Z. Li, Z. Zhang, Z. Xie, Z. Gao, Z. Pan, Z. Yao, B. Feng, H. Li, J. L. Cai, J. Ni, L. Xu, M. Li, N. Tian, R. J. Chen, R. L. Jin, S. S. Li, S. Zhou, T. Sun, X. Q. Li, X. Jin, X. Shen, X. Chen, X. Song, X. Zhou, Y. X. Zhu, Y. Huang, Y. Li, Y. Zheng, Y. Zhu, Y. Ma, Z. Huang, Z. Xu, Z. Zhang, D. Ji, J. Liang, J. Guo, J. Chen, L. Xia, M. Wang, M. Li, P. Zhang, R. Chen, S. Sun, S. Wu, S. Ye, T. Wang, W. L. Xiao, W. An, X. Wang, X. Sun, X. Wang, Y. Tang, Y. Zha, Z. Zhang, Z. Ju, Z. Zhang, and Z. Qu, “Deepseek-v3.2: Pushing the frontier of open large language models,” arXiv preprint arXiv:2512.02556, 2025. [Online]. Available: https://arxiv.org/abs/2512.02556 [4] Y. Bai, Y. Bao, Y. Charles, C. Chen, G. Chen, H. Chen, H. Chen, J. Chen, N. Chen, R. Chen, Y. Chen, Y. Chen, Y. Chen, Z. Chen, J. Cui, H. Ding, M. Dong, A. Du, C. Du, D. Du, Y. Du, Y. Fan, Y. Feng, K. Fu, B. Gao, C. Gao, H. Gao, P. Gao, T. Gao, Y. Ge, S. Geng, Q. Gu, X. Gu, L. Guan, H. Guo, J. Guo, X. Hao, T. He, W. He, W. He, Y. He, C. Hong, H. Hu, Y. Hu, Z. Hu, W. Huang, Z. Huang, Z. Huang, T. Jiang, Z. Jiang, X. Jin, Y. Kang, G. Lai, C. Li, F. Li, H. Li, M. Li, W. Li, Y. Li, Y. Li, Y. Li, Z. Li, Z. Li, H. Lin, X. Lin, Z. Lin, C. Liu, C. Liu, H. Liu, J. Liu, J. Liu, L. Liu, S. Liu, T. Y. Liu, T. Liu, W. Liu, Y. Liu, Y. Liu, Y. Liu, Y. Liu, Z. Liu, E. Lu, H. Lu, L. Lu, Y. Luo, S. Ma, X. Ma, Y. Ma, S. Mao, J. Mei, X. Men, Y. Miao, S. Pan, Y. Peng, R. Qin, Z. Qin, B. Qu, Z. Shang, L. Shi, S. Shi, F. Song, J. Su, Z. Su, L. Sui, X. Sun, F. Sung, Y. Tai, H. Tang, J. Tao, Q. Teng, C. Tian, C. Wang, D. Wang, F. Wang, H. Wang, H. Wang, J. Wang, J. Wang, J. Wang, S. Wang, S. Wang, S. Wang, X. Wang, Y. Wang, Y. Wang, Y. Wang, Y. Wang, Y. Wang, Z. Wang, Z. Wang, Z. Wang, Z. Wang, C. Wei, Q. Wei, H. Wu, W. Wu, X. Wu, Y. Wu, C. Xiao, J. Xie, X. Xie, W. Xiong, B. Xu, J. Xu, L. H. Xu, L. Xu, S. Xu, W. Xu, X. Xu, Y. Xu, Z. Xu, J. Xu, J. Xu, J. Yan, Y. Yan, H. Yang, X. Yang, Y. Yang, Y. Yang, Z. Yang, Z. Yang, Z. Yang, H. Yao, X. Yao, W. Ye, Z. Ye, B. Yin, L. Yu, E. Yuan, H. Yuan, M. Yuan, S. Yuan, H. Zhan, D. Zhang, H. Zhang, W. Zhang, X. Zhang, Y. Zhang, Y. Zhang, Y. Zhang, Y. Zhang, Y. Zhang, Y. Zhang, Y. Zhang, Y. Zhang, Z. Zhang, H. Zhao, Y. Zhao, Z. Zhao, H. Zheng, S. Zheng, L. Zhong, J. Zhou, X. Zhou, Z. Zhou, J. Zhu, Z. Zhu, W. Zhuang, and X. Zu, “Kimi k2: Open agentic intelligence,” arXiv preprint arXiv:2507.20534, 2026. [Online]. Available: https://arxiv.org/abs/2507.20534 [5] T. B. Brown, B. Mann, N. Ryder, M. Subbiah, J. Kaplan, P. Dhariwal, A. Neelakantan, P. Shyam, G. Sastry, A. Askell, S. Agarwal, A. Herbert-Voss, G. Krueger, T. Henighan, R. Child, A. Ramesh, D. M. Ziegler, J. Wu, C. Winter, C. Hesse, M. Chen, E. Sigler, M. Litwin, S. Gray, B. Chess, J. Clark, C. Berner, S. McCandlish, A. Radford, I. Sutskever, and D. Amodei, “Language models are few-shot learners,” arXiv preprint arXiv:2005.14165, 2020. [Online]. Available: https://arxiv.org/abs/2005.14165 [6] H. Kung and C. E. Leiserson, “Systolic arrays (for vlsi),” Sparse Matrix Proceedings , 1978. [7] NVIDIA, “TensorRT LLM: A tensorrt toolbox for optimized large language model inference,” accessed: 2026-06-01. [Online]. Available: https://nvidia.github.io/TensorRT-LLM/ [8] Z. Ye, L. Chen, R. Lai, W. Lin, Y. Zhang, S. Wang, T. Chen, B. Kasikci, V. Grover, A. Krishnamurthy, and L. Ceze, “FlashInfer: Efficient and customizable attention engine for llm inference serving,” arXiv preprint arXiv:2501.01005, 2025. [Online]. Available: https: //arxiv.org/abs/2501.01005 [9] W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. E. Gonzalez, H. Zhang, and I. Stoica, “Efficient memory management for large language model serving with pagedattention,” in Proc. ACM Symp. on Operating System Principles (SOSP) , 2023. [10] Z. Yu, Y. Guan, Z. Yu, C. Zhou, Z. Hu, S. Pei, Y. Kang, Y. Ding, and P.-A. Tsai, “Patterns behind chaos: Forecasting data movement for efficient large-scale moe llm inference,” in Proc. Int. Symp. on Computer Architecture (ISCA) , 2026. [11] T. Gale, D. Narayanan, C. Young, and M. Zaharia, “MegaBlocks: Efficient sparse training with mixture-of-experts,” in Proc. of Machine Learning and Systems (MLSys) , D. Song, M. Carbin, and T. Chen, Eds., vol. 5, 2023. [12] H. Zhang, A. Ning, R. B. Prabhakar, and D. Wentzlaff, “LLMCompass: Enabling efficient hardware design for large language model inference,” in Proc. Int. Symp. on Computer Architecture (ISCA) , 2024, pp. 1080– 1096. [13] H. Peng, S. Davidson, C.-J. R. Shi, and M. Taylor, “ReaLLM: A trace-driven framework for rapid simulation of large-scale llm inference,” in Int. Conference on Application-specific Systems, Architectures and Processors (ASAP) , 2025, pp. 85–92. [14] A. Yang, A. Li, B. Yang, B. Zhang, B. Hui, B. Zheng, B. Yu, C. Gao, C. Huang, C. Lv, C. Zheng, D. Liu, F. Zhou, F. Huang, F. Hu, H. Ge, H. Wei, H. Lin, J. Tang, J. Yang, J. Tu, J. Zhang, J. Yang, J. Yang, J. Zhou, J. Zhou, J. Lin, K. Dang, K. Bao, K. Yang, L. Yu, L. Deng, M. Li, M. Xue, M. Li, P. Zhang, P. Wang, Q. Zhu, R. Men, R. Gao, S. Liu, S. Luo, T. Li, T. Tang, W. Yin, X. Ren, X. Wang, X. Zhang, X. Ren, Y. Fan, Y. Su, Y. Zhang, Y. Zhang, Y. Wan, Y. Liu, Z. Wang, Z. Cui, Z. Zhang, Z. Zhou, and Z. Qiu, “Qwen3 technical report,” arXiv preprint arXiv:2505.09388, 2025. [15] Meta, “The llama 4 herd: The beginning of a new era of natively multimodal ai innovation,” 2025, accessed: 2026-06-01. [Online]. Available: https://ai.meta.com/blog/llama-4-multimodal-intelligence/ [16] D. Hendrycks, C. Burns, S. Basart, A. Zou, M. Mazeika, D. Song, and J. Steinhardt, “Measuring massive multitask language understanding,” in 
+
+Proc. Int. Conf. on Learning Representations (ICLR) , 2021. [17] L. Zheng, L. Yin, Z. Xie, C. Sun, J. Huang, C. H. Yu, S. Cao, C. Kozyrakis, I. Stoica, J. E. Gonzalez, C. Barrett, and Y. Sheng, “SGLang: efficient execution of structured language model programs,” in Proc. Advances in Neural Information Processing Systems (NIPS) ,2024. [18] Q. Zheng, X. Xia, X. Zou, Y. Dong, S. Wang, Y. Xue, L. Shen, Z. Wang, A. Wang, Y. Li, T. Su, Z. Yang, and J. Tang, “CodeGeeX: A pre-trained model for code generation with multilingual benchmarking on humaneval-x,” in Proc. ACM SIGKDD Conf. on Knowledge Discovery and Data Mining , 2023, p. 5673–5684. [19] AMD, “Rocm documentation - hip graphs,” 2026, accessed: 2026-06-01. [Online]. Available: https://rocm.docs.amd.com/projects/HIP/en/ latest/how-to/hip runtime api/hipgraph.html [20] C.-J. Lee and T. T. Yeh, “ReSA: Reconfigurable systolic array for multiple tiny dnn tensors,” ACM Trans. on Architecture and Code Optimization , vol. 21, no. 3, 2024. [21] Z. Zeng, Q. Guo, Z. Fei, Z. Yin, Y. Zhou, L. Li, T. Sun, H. Yan, D. Lin, and X. Qiu, “Turn waste into worth: Rectifying top-k router of MoE,” in Proc. Conf. Empirical Methods in Natural Language Processing (EMNLP) , 2024, pp. 13 305–13 320. [22] R. Yi, L. Guo, S. Wei, A. Zhou, S. Wang, and M. Xu, “EdgeMoE: Empowering sparse large language models on mobile devices,” IEEE Trans. on Mobile Computing (TMC) , vol. 24, no. 08, pp. 7059–7073, Aug. 2025. [23] Y. Yuan, A. Gupta, J. Li, S. Dash, F. Wang, and M. Zhang, “X-MoE: Enabling scalable training for emerging mixture-of-experts architectures on hpc platforms,” in Proc. Int. Conf. on High Performance Computing, Networking, Storage and Analysis (SC) , 2025, p. 1315–1331. [24] W. Guo, M. Mishra, X. Cheng, I. Stoica, and T. Dao, “Sonicmoe: Accelerating moe with io and tile-aware optimizations,” arXiv preprint arXiv:2512.14080, 2026. [Online]. Available: https://arxiv.org/abs/2512. 14080 [25] H. T. Kung, V. Natesh, and A. Sabot, “CAKE: matrix multiplication us-ing constant-bandwidth blocks,” in Proc. Int. Conf. on High Performance Computing, Networking, Storage and Analysis (SC) , 2021. [26] J. Li, Y. Jiang, Y. Zhu, C. Wang, and H. Xu, “Accelerating distributed MoE training and inference with lina,” in Proc. USENIX Annual Technical Conference (USENIX ATC) . USENIX Association, Jul. 2023, pp. 945–959. [Online]. Available: https://www.usenix.org/conference/ atc23/presentation/li-jiamin [27] S. Cao, S. Liu, T. Griggs, P. Schafhalter, X. Liu, Y. Sheng, J. E. Gonzalez, M. Zaharia, and I. Stoica, “Moe-lightning: High-throughput moe inference on memory-constrained gpus,” in Proc. Int. Conf. on Ar-chitectural Support for Programming Languages and Operation Systems (ASPLOS) , 2025, p. 715–730. [28] E.-M. Huang, L.-S. Lin, and C.-Y. Lee, “Efficient cpu-gpu collaborative inference for moe-based llms on memory-limited systems,” in Proc. Asia and South Pacific Design Automation Conference (ASP-DAC) , 2026, pp. 333–340.
