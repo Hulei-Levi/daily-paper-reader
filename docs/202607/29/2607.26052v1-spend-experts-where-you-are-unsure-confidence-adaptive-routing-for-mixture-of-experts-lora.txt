@@ -1,0 +1,594 @@
+Title: Spend Experts Where You Are Unsure: Confidence-Adaptive Routing for Mixture-of-Experts LoRA
+
+URL Source: https://arxiv.org/pdf/2607.26052v1
+
+Published Time: Wed, 29 Jul 2026 01:22:11 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# Spend Experts Where You Are Unsure: Confidence-Adaptive Routing for Mixture-of-Experts LoRA 
+
+Tom Saliencro 1, Rohan Desai 2, Priya Nair 1, Maya Lindqvist 1, Daniel Whitmore 2
+
+> 1
+
+University of California, Irvine 
+
+> 2
+
+University of Washington 
+
+saliencro@gmail.com 
+
+Abstract 
+
+Mixture-of-Experts (MoE) variants of Low-Rank Adaptation (LoRA) route every token to a fixed number of experts k. Tokens differ in how uncertain the model is about them, so a single k over-spends on easy tokens and under-serves hard ones. We observe that the router’s output distribution is already a per-token uncer-tainty signal: peaked mass indicates confidence, while a flat distribution indicates ambiguity. We introduce CARE (Confidence-Adaptive Rout-ing of Experts), which admits experts in a nu-cleus fashion. Experts are activated in decreas-ing router weight until their cumulative mass reaches a threshold, with a small extension when the admitted experts disagree. A bud-get thermostat calibrates the threshold so that the average number of active experts matches any target. CARE is a drop-in, single-forward-pass rule with no extra parameters. Across eight commonsense benchmarks on LLaMA-3.1-8B and Qwen2.5-7B, as well as math, code, and knowledge tasks, CARE improves over fixed top-k MoE-LoRA at matched compute and matches the fixed-k=4 baseline while acti-vating 12% fewer experts. The same confidence and disagreement signals also improve out-of-distribution detection over MSP, entropy, and multi-pass proxies. We support the design with nucleus fidelity, budget optimality, and an epis-temic reading of disagreement, and we release code. 
+
+1 Introduction 
+
+Parameter-efficient fine-tuning (PEFT) adapts large language models (LLMs) to downstream tasks by training a small number of added parameters while keeping the backbone frozen. Low-Rank Adap-tation (LoRA) (Hu et al., 2022) is the dominant instance, and a productive line of work injects a Mixture-of-Experts (MoE) structure into LoRA (multiple low-rank “experts” selected by a router) to increase capacity without increasing per-token cost (Dou et al., 2024; Li et al., 2024; Gao et al., 
+
+Figure 1: Fixed top-k spends the same budget on every token; CARE spends it where uncertainty de-mands. Each row is a token and each square an expert slot. Left: every token activates k=4 experts, over-spending on easy (green) tokens and under-serving hard (orange) ones. Right: CARE reallocates the same aver-age budget per token according to uncertainty read off the router. 
+
+2024; Zou et al., 2025b). These MoE-LoRA meth-ods share one design choice inherited from sparse MoE (Shazeer et al., 2017; Fedus et al., 2022): the router activates a fixed top-k set of experts for every token. A fixed k is convenient but blunt. Tokens are not equally hard: a function word or an unambigu-ous continuation needs little adaptation, whereas an ambiguous or out-of-distribution token may need many experts. Spending the same k every-where wastes computation on the easy majority while starving the hard minority that limits accu-racy (Figure 1). Making k adaptive raises a con-crete question: what per-token signal should decide how many experts to use, and can it be obtained without extra models, extra forward passes, or pos-terior sampling? The router already computes such a signal. After the softmax, it emits a distribution p over experts. When the layer is confident about a token, p is peaked: one or two experts carry almost all the mass. When it is uncertain, the mass spreads across many experts. Concentration of p is therefore a cheap, per-token proxy for confidence, available arXiv:2607.26052v1 [cs.LG] 28 Jul 2026 in the forward pass the model already performs. A second signal is available once a few experts are selected: if the admitted experts disagree in output space, the token is ambiguous in a way a peaked router can hide, and admitting more experts is worthwhile. CARE (Confidence-Adaptive Routing of Ex-perts) uses these signals to choose the per-token expert count. Following the spirit of nucleus sam-pling (Holtzman et al., 2020), it admits experts in decreasing router weight until their cumulative mass reaches a threshold τ , then admits up to a few more if the admitted experts disagree. A sin-gle global τ is calibrated once on a small held-out set so that the average number of active experts equals a target budget B; we call this the budget thermostat. CARE adds no parameters, requires a single forward pass, and drops into any MoE-LoRA backbone by replacing its top-k gate. By moving budget from confident tokens to un-certain ones, CARE improves accuracy at a fixed average compute and, equivalently, reaches a tar-get accuracy with fewer experts. The same signals also serve as uncertainty estimates: routing con-centration provides a confidence score, and expert disagreement provides an epistemic signal that im-proves out-of-distribution (OOD) detection. Prior uncertainty methods for fine-tuned LLMs typically average over many predictions (deep en-sembles, MC-dropout, LoRA ensembles, Bayesian or Laplace LoRA). That approach is accurate but multiplies inference cost, while methods that cal-ibrate the router change the training objective. CARE instead extracts both a routing decision and an uncertainty estimate from a single deterministic forward pass of an already-trained MoE-LoRA. It adds no parameters and leaves the training loop and backbone unchanged: any MoE-LoRA checkpoint becomes uncertainty-adaptive by replacing its gate, at the cost of a sort over the N router logits already computed by the model. Our contributions are: • We identify the router distribution as a per-token uncertainty signal for MoE-LoRA and use it to make the number of active experts adaptive (§4). • We propose CARE, a nucleus expert-admission rule with an epistemic disagreement extension and a budget thermostat that matches any av-erage compute; it is single-pass and parameter-free (§4). • We give theoretical support: a nucleus fidelity bound, a confidence-ranking guarantee, budget-allocation optimality, and an ensemble-variance reading of disagreement (§5, App. A). • Across two backbones and four task families at matched compute, CARE improves accu-racy over fixed top-k MoE-LoRA (e.g. +0 .5
+
+on LLaMA commonsense) and saves 12% of ex-perts at equal accuracy, while improving OOD detection over MSP, entropy, and multi-pass proxies (§6). 
+
+2 Related Work 
+
+MoE-LoRA and adaptive PEFT. LoRA (Hu et al., 2022) and its adaptive-rank variant AdaLoRA (Zhang et al., 2023) tune a single low-rank branch. MoE-LoRA methods add multiple LoRA experts with a router: LoRAMoE (Dou et al., 2024) and MixLoRA (Li et al., 2024) attach ex-perts to feed-forward or attention modules, Gao et al. (2024) show deeper layers benefit from more experts, and FlyLoRA (Zou et al., 2025b) builds a rank-wise MoE-LoRA. DynMoLE (Li et al., 2025) stabilizes routing with an entropy-based aux-iliary loss. Concurrently, FRAME (Saliencro et al., 2026) learns a fractional-Fourier adaptation do-main per expert, but still routes with a fixed top-k.All of these commit to a fixed top-k at inference. AdaLoRA adapts the rank globally by importance but keeps computation static across tokens; Dyn-MoLE modulates the router’s sharpness but still activates a fixed number of experts. CARE ad-dresses a different axis: it adapts the number of active experts per token by uncertainty, while leav-ing the experts, the router weights, and the training objective unchanged. It therefore composes with any MoE-LoRA backbone as a test-time gate. 
+
+Uncertainty in LLMs. Deep ensembles (Laksh-minarayanan et al., 2017) and MC-dropout (Gal and Ghahramani, 2016) estimate uncertainty through multiple stochastic predictions. For LLM fine-tuning, LoRA ensembles (Wang et al., 2023; Mühlematter et al., 2026) and Laplace/Bayesian LoRA (Yang et al., 2024a) improve calibration but require several adapters or posterior sampling (multiple forward passes). Post-hoc Bayesian treat-ments of MoE routers (Dialameh et al., 2025) and functional calibration of LoRA-MoE (Niu et al., 2024) add training or inference machinery. En-ergy scores (Liu et al., 2020) and label-free energy statistics for model evaluation (Peng et al., 2024) give confidence proxies from logits, and semantic-uncertainty methods target generation (Kuhn et al., 2023). CARE instead reads uncertainty from the router distribution and the disagreement of already-selected experts, with neither extra parameters nor extra passes; the estimate is a by-product of a routing decision the model must make anyway. Post-hoc scores such as max-softmax probability and temperature scaling (Guo et al., 2017) act on the final logits and leave computation unchanged. CARE’s signals live inside the adapter’s router and are the same quantities used to route, so the con-fidence estimate is tied to the computation that is actually performed. 
+
+Conditional computation. Adaptive computa-tion allocates compute per input, e.g. early exit or mixture-of-depths, and nucleus sampling (Holtz-man et al., 2020) adapts the number of tokens kept by cumulative probability. CARE transplants the nucleus idea from output tokens to experts , and couples it to a compute budget and an uncertainty signal. Selective prediction (Geifman and El-Yaniv, 2017) similarly trades coverage for reliability by abstaining on low-confidence inputs; CARE’s con-centration score yields such a rule for free (Prop. 2). Forward-pass statistics have also been used to score data (e.g., the nuclear norm of the logit matrix for utility and diversity in batch selection (Zou et al., 2025a)), which motivates our use of cheap router statistics, though our target (per-token expert count) and signals differ. 
+
+3 Preliminaries 
+
+MoE-LoRA. Let h ∈ Rd be a backbone activa-tion feeding an adapted module with N LoRA ex-perts. Expert i has factors Ai ∈ Rr×d, Bi ∈ Rd×r
+
+and computes ei(h) = BiAih. A router with weights Wr ∈ RN ×d produces logits g = Wrh
+
+and a distribution p = softmax( g). Standard MoE-LoRA activates a fixed top-k set Sk(h) of experts and returns 
+
+∆( h) = X 
+
+> i∈Sk(h)
+
+˜pi ei(h), ˜pi = pi
+
+P 
+
+> j∈Sk
+
+pj
+
+, (1) added to the frozen output W0h. The design choice we revisit is that k = |Sk| is a constant, identical for every token. This discards information the router already produces: the shape of p reports, per token, how concentrated the useful experts are. A fixed k
+
+ignores that shape, over-provisioning tokens whose mass is already covered by one or two experts and under-provisioning tokens whose mass is spread out. 
+
+Router-distribution statistics. Write the sorted weights p(1) ≥ p(2) ≥ · · · ≥ p(N ). We use three cheap statistics of p: the top-1 mass 
+
+p(1) and margin p(1) − p(2) (concentration →
+
+confidence), the normalized entropy H(p) =
+
+− 1log N
+
+P 
+
+> i
+
+pi log pi ∈ [0 , 1] (spread → uncer-tainty), and the cumulative mass Ck(p) =P 
+
+> i≤k
+
+p(i).
+
+Expert disagreement. For an admitted set S
+
+with outputs {ei}i∈S and weights {˜pi}, define the (scale-free) disagreement 
+
+D(h; S) = 
+
+P 
+
+> c
+
+Var ˜p
+
+ei,c 
+
+
+
+∥e∥2 + ϵ , (2) the mean per-coordinate weighted variance of the admitted experts’ outputs normalized by their mean squared magnitude. High D means the selected experts do not concur. 
+
+4 Method: CARE 
+
+CARE replaces the fixed k in Eq. (1) with a per-token count k(h) decided by two uncertainty sig-nals read from the router (Figure 2). 
+
+4.1 Two uncertainty signals Confidence (aleatoric). The concentration of p
+
+measures how sure the layer is about which experts a token needs. A peaked p (large p(1) or margin) means one expert suffices; a flat p means the token is ambiguous and needs more. We operationalize concentration through the cumulative mass Ck used below. 
+
+Disagreement (epistemic). Concentration alone can miss ambiguity: the router may be peaked yet the top experts may still disagree on the output .The disagreement D(h; S) in Eq. (2) captures this residual epistemic uncertainty and is available once a candidate set is admitted. 
+
+4.2 Nucleus expert admission 
+
+Given a threshold τ ∈ (0 , 1) , CARE admits experts in decreasing weight until their cumulative mass reaches τ :
+
+kν (h; τ ) = min 
+
+n
+
+k : Ck(p) ≥ τ
+
+o
+
+. (3) A confident (peaked) token reaches τ with few ex-perts; an uncertain (flat) one needs many. We then Figure 2: CARE pipeline. From the router distribution we read a confidence signal (concentration) and an epistemic signal (disagreement of the admitted experts). A single budget-calibrated threshold turns them into a per-token expert count k(h), activating exactly that many experts in one forward pass with no added parameters. 
+
+apply the epistemic extension: if the admitted ex-perts disagree beyond a level δ, admit up to γ addi-tional experts, 
+
+k(h) = clip 
+
+
+
+kν + γ ρ , k min , k max 
+
+
+
+, (4) where ρ = max  0, D−δ
+
+> 1−δ
+
+ scales the extension with how far disagreement exceeds δ. Finally CARE activates the top k(h) experts and combines them exactly as in Eq. (1) . The whole rule is a few sorts and cumulative sums over the N router weights. 
+
+4.3 Budget thermostat 
+
+The threshold τ controls the average compute. Be-cause kν (h; τ ) is non-decreasing in τ for every token, the population average ¯k(τ ) = Eh[k(h)] is non-decreasing in τ , so a single bisection finds the 
+
+τ that meets a target budget B:
+
+τ ⋆ = {τ : ¯k(τ ) = B}. (5) We calibrate τ ⋆ once on a small unlabeled set and reuse it; the average number of active experts (and thus the FLOPs of the adapter) matches any fixed-k
+
+baseline we compare against. 
+
+4.4 Uncertainty read-out 
+
+The same signals give a sequence-level uncertainty for selective prediction and OOD detection: 
+
+u(x) = (1 − w) H(p) + w D (h; S), (6) the mean routing entropy blended with mean admitted-expert disagreement over the sequence. 
+
+Algorithm 1: CARE expert admission (per token)                                       
+
+> Input: router dist. p, expert outputs {ei}, threshold
+> τ,kmin , k max , γ, δ
+> Output: active count k(h)
+> sort pdescending; Ck←cumulative mass
+> kν←min {k:Ck≥τ}
+> S←top-kνexperts; D←disagreement (S)
+> // Eq. (2)
+> ρ←max(0 ,(D−δ)/(1 −δ))
+> k←clip( kν+⌈γρ ⌉, k min , k max )
+> return k
+
+Higher u means less certain; we use it directly as a detection score and, thresholded, as an abstention rule. The two terms are complementary: entropy captures cases where the router is unsure which 
+
+experts to use, while disagreement captures cases where the chosen experts are sure but inconsis-tent. Both are read from the same forward pass that produced the routing decision, so a deployed model obtains an OOD or abstention signal at no additional cost, unlike ensemble or sampling-based uncertainty. We use w=0 .5 throughout and analyze its effect in Appendix C. 
+
+Cost. Algorithm 1 adds only an O(N log N ) sort and an O(|S|d) disagreement over the experts the model already evaluates, with no new parameters and one forward pass. This contrasts with ensemble or Bayesian uncertainty, which cost several passes. 
+
+5 Theoretical Properties 
+
+We state four properties; proofs are in Appendix A. Proposition 1 (Nucleus fidelity) . Let ∆( h) =P 
+
+> i
+
+piei(h) be the full (unnormalized) adapter output and ∆S its restriction to the nucleus set 
+
+S = {(1) , . . . , (kν )} with mass Ckν ≥ τ . Then 
+
+∥∆( h) − ∆S (h)∥ ≤ (1 − τ ) max i ∥ei(h)∥.
+
+Proposition 2 (Confidence ranking) . If the cor-rectness likelihood ratio is monotone in the top-1 mass p(1) , then thresholding p(1) is a Bayes-optimal selective classifier: it attains the optimal risk–coverage curve among all confidence scores. 
+
+Proposition 3 (Budget optimality) . Suppose the per-token accuracy gh(k) is non-decreasing and concave in k. Then the allocation maximizing 
+
+Eh[gh(k(h))] subject to Eh[k(h)] ≤ B equalizes marginal gains at a common multiplier λ, and the threshold rule in Eq. (5) implements this optimal allocation when marginal gain is monotone in cov-ered mass. 
+
+Proposition 4 (Disagreement is epistemic) . Treat-ing the admitted experts as members of an en-semble with mixing weights ˜p, the disagreement 
+
+D(h; S) equals (up to the normalizing constant) the weighted predictive variance of the ensemble, an estimator of epistemic uncertainty that vanishes when the experts agree. 
+
+Proposition 1 says a nucleus with mass τ pre-serves the adapter output up to the discarded tail, so raising τ (more experts) trades compute for fi-delity in a controlled way. Proposition 2 justifies using routing concentration as a confidence score; Proposition 3 justifies the single-threshold thermo-stat as the optimal way to meet a compute budget; and Proposition 4 justifies disagreement as the epis-temic complement to concentration. 
+
+6 Experiments 
+
+6.1 Setup Backbones and tasks. We fine-tune LL AMA-3.1-8B (Grattafiori et al., 2024) and Q WEN 2.5-7B (Yang et al., 2024b). We evaluate four task fam-ilies: (i) commonsense reasoning : BoolQ, PIQA, SIQA, HellaSwag, WinoGrande, ARC-easy, ARC-challenge, OBQA (Clark et al., 2019; Bisk et al., 2020; Sap et al., 2019; Zellers et al., 2019; Sak-aguchi et al., 2020; Clark et al., 2018; Mihaylov et al., 2018); (ii) mathematical reasoning : GSM8K, MATH, SVAMP, MAWPS, AQuA (Cobbe et al., 2021; Hendrycks et al., 2021b; Patel et al., 2021; Koncel-Kedziorski et al., 2016; Ling et al., 2017); (iii) code : HumanEval and MBPP (Chen et al., 2021; Austin et al., 2021); and (iv) knowledge :MMLU (Hendrycks et al., 2021a). This suite mir-rors recent MoE-LoRA evaluation protocols and spans single-task and multi-task settings. 
+
+Baselines. We compare against single-adapter PEFT (LoRA, DoRA, AdaLoRA) (Hu et al., 2022; Liu et al., 2024; Zhang et al., 2023) and MoE-LoRA / heterogeneous-expert methods (Lo-RAMoE, HydraLoRA, MixLoRA, DynMoLE, HMoRA, FlyLoRA) (Dou et al., 2024; Tian et al., 2024; Li et al., 2024, 2025; Liao et al., 2025; Zou et al., 2025b). All MoE baselines use a fixed top-
+
+k=4 ; CARE is calibrated to the same average bud-get B=4 so the comparison isolates adaptive allo-cation. 
+
+Implementation. CARE uses N =16 experts, 
+
+kmin =1 , kmax =8 , disagreement extension γ=2 ,and a thermostat calibrated once on a held-out split. Full hyperparameters are in Appendix B. 
+
+6.2 Main results Commonsense reasoning. Table 1 reports per-task accuracy on eight benchmarks for both back-bones. CARE attains the best average on each backbone, improving over FlyLoRA from 86.0% to 86.5% on LLaMA-3.1-8B ( +0 .5 points) and reach-ing 87.9% on Qwen2.5-7B ( +0 .5 over the strongest baseline). Gains are largest on the harder composi-tional tasks (ARC-challenge, WinoGrande), where token-level difficulty varies most and reallocating experts helps most. Dense adapters trail the MoE cluster by a few points, consistent with published PEFT comparisons, while fixed-k MoE methods form a tight band that CARE sits above at matched compute. 
+
+Math, code, and knowledge. Table 2 extends the comparison on LLaMA-3.1-8B. CARE again leads on average (48.8%), ahead of the strongest fixed-k baseline by +0 .9 points, with gains holding across mathematical reasoning, code generation, and knowledge. This indicates that uncertainty-adaptive expert counts help beyond any single task family. 
+
+6.3 Accuracy–compute trade-off 
+
+Figure 3 sweeps the average budget. The CARE frontier lies above the fixed-k frontier everywhere: for any compute level CARE is more accurate, and to reach the fixed-k=4 accuracy it needs only 3.5
+
+experts on average (12% fewer). The gap is largest Method #Exp. BoolQ PIQA SIQA HellaS. WinoG. ARC-e ARC-c OBQA Avg. 
+
+LLaMA-3.1-8B 
+
+LoRA – 70.3 84.7 77.4 90.4 82.9 87.0 78.6 83.1 81.8 DoRA – 70.9 85.3 78.0 91.0 83.5 87.6 79.2 83.7 82.4 AdaLoRA – 70.6 85.0 77.7 90.7 83.2 87.3 78.9 83.4 82.1 LoRAMoE 4 73.2 87.9 80.3 93.4 85.3 90.0 80.0 85.9 84.5 HydraLoRA 4 73.6 88.3 80.7 93.8 85.7 90.4 80.4 86.3 84.9 MixLoRA 4 73.8 88.5 80.9 94.0 85.9 90.6 80.6 86.5 85.1 DynMoLE 4 74.2 88.9 81.3 94.3 86.3 91.0 81.0 86.9 85.5 HMoRA 4 74.4 89.1 81.5 94.5 86.5 91.2 81.2 87.1 85.7 FlyLoRA 4 74.7 89.3 81.8 94.8 86.8 91.5 81.5 87.4 86.0 
+
+CARE (ours) 4.0 75.3 89.6 82.3 94.9 87.5 91.9 82.6 88.0 86.5 
+
+Qwen2.5-7B 
+
+LoRA – 71.5 86.1 79.0 91.7 84.0 88.6 80.3 84.4 83.2 DoRA – 72.1 86.7 79.6 92.3 84.6 89.2 80.9 85.0 83.8 AdaLoRA – 71.8 86.4 79.3 92.0 84.3 88.9 80.6 84.7 83.5 LoRAMoE 4 74.5 89.2 82.0 94.8 86.0 91.7 81.8 87.0 85.9 HydraLoRA 4 74.9 89.6 82.4 95.1 86.4 92.1 82.2 87.4 86.3 MixLoRA 4 75.1 89.8 82.6 95.3 86.6 92.3 82.4 87.6 86.5 DynMoLE 4 75.5 90.2 83.0 95.6 87.0 92.7 82.8 88.0 86.9 HMoRA 4 75.7 90.4 83.2 95.8 87.2 92.9 83.0 88.2 87.1 FlyLoRA 4 76.0 90.7 83.5 96.0 87.5 93.2 83.3 88.5 87.3 
+
+CARE (ours) 4.0 76.5 91.0 84.0 96.2 88.4 93.4 84.3 89.2 87.9 
+
+Table 1: Commonsense reasoning accuracy (%) on eight benchmarks and two backbones. #Exp. is the average number of active experts per token (– for dense non-MoE adapters). All MoE baselines use fixed top-k=4 ; CARE matches the same average budget with uncertainty-adaptive k. Best per column in bold .1 2 3 4 5 6 7 8
+
+> avg. active experts (compute)
+> 42
+> 44
+> 46
+> 48
+> 50
+> 52
+> 54
+> 56
+> accuracy (%)
+> Accuracy--compute trade-off
+> −12% experts
+> fixed top-k
+> CARE (ours)
+
+Figure 3: Accuracy–compute trade-off (pooled). 
+
+CARE dominates the fixed top-k frontier; it matches fixed-k=4 accuracy using 12% fewer active experts (ar-row). 
+
+in the mid-budget regime, where reallocating ex-perts across heterogeneous tokens matters most. 
+
+6.4 Mechanism analysis 
+
+Figure 4 inspects the two signals that drive CARE. Panel (a) shows the top-1 routing mass is higher on correct than on erroneous predictions, so routing concentration ranks confidence (cf. Prop. 2). Panel (b) shows CARE’s per-token expert count increases with token difficulty: it automatically spends more on hard tokens and less on easy ones around the fixed-k=4 line. Panel (c) shows the marginal accu-racy gain from an extra expert grows with expert disagreement, validating the disagreement-driven extension (cf. Prop. 4). 
+
+6.5 Uncertainty quality 
+
+Table 3 compares uncertainty read-outs across PEFT and MoE methods. Dense LoRA and several MoE variants with MSP or routing-entropy scores form a band around AUROC ≈ 0.640 ; multi-pass proxies (MC-dropout, deep ensembles) improve de-tection but multiply inference cost. CARE reaches AUROC 0.668 in a single forward pass by blending concentration with expert disagreement. Raw ECE remains comparable across single-pass methods (0.175–0.186); the distinctive gain is OOD detec-tion, not a raw-ECE reduction. Figure 5 shows the corresponding reliability curves. 
+
+6.6 Ablation 
+
+Table 4 and Figure 6 decompose CARE at a matched budget. Making k adaptive by random 
+
+assignment hurts accuracy, confirming the gain comes from the signal , not from variance in k. Al-locating by routing entropy helps, and the nucleus Method GSM8K MATH SVAMP MAWPS AQuA HumanE. MBPP MMLU Avg. 
+
+LoRA 55.7 18.7 63.4 81.7 30.8 33.5 37.2 37.1 44.8 DoRA 56.3 19.3 64.0 82.3 31.4 34.1 37.8 37.7 45.4 AdaLoRA 56.0 19.0 63.7 82.0 31.1 33.8 37.5 37.4 45.1 LoRAMoE 57.2 18.3 65.5 84.8 32.0 35.1 39.2 39.4 46.4 HydraLoRA 57.6 18.6 65.9 85.2 32.4 35.5 39.6 39.8 46.8 MixLoRA 57.8 18.8 66.1 85.4 32.6 35.7 39.8 40.0 47.0 DynMoLE 58.2 19.2 66.5 85.8 33.0 36.1 40.2 40.4 47.4 HMoRA 58.4 19.4 66.7 86.0 33.2 36.3 40.4 40.6 47.6 FlyLoRA 58.7 19.7 67.0 86.3 33.5 36.6 40.7 40.9 47.9 
+
+CARE (ours) 59.7 20.7 67.8 86.7 34.5 37.6 41.6 41.8 48.8 
+
+Table 2: Mathematical reasoning, code, and knowledge on LLaMA-3.1-8B (accuracy / pass@1, %). CARE attains the best average across all three task families at a matched expert budget. 0.0 0.2 0.4 0.6 0.8 1.0               
+
+> top-1 routing mass p(1)
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> density
+> (a) routing →correctness
+> correct
+> error
+> 0.2 0.4 0.6 0.8
+> token difficulty
+> 2
+> 4
+> 6
+> 8
+> active experts  k(h)
+> (b) adaptive budget
+> fixed k= 4
+> CARE k(h)
+> 0.2 0.4 0.6 0.8
+> expert disagreement
+> 1.0
+> 1.1
+> 1.2
+> 1.3
+> 1.4
+> 1.5
+> marg. gain (pts)
+> (c) disagreement →gain
+
+Figure 4: Why CARE works. (a) Confident routing (high top-1 mass) concentrates on correct predictions. (b) CARE spends more experts on harder tokens, crossing the fixed-k=4 line. (c) Expert disagreement predicts the marginal gain of admitting one more expert. 
+
+Method ECE OOD-AUROC ↑
+
+LoRA + MSP 0.267 0.640 HydraLoRA + MSP 0.173 0.640 MixLoRA + MSP 0.173 0.640 DynMoLE + entropy 0.174 0.651 FlyLoRA + MSP 0.175 0.640 FlyLoRA + entropy 0.175 0.651 MC-dropout (proxy) 0.179 0.636 Deep ensemble (proxy) 0.176 0.638 
+
+CARE 0.186 0.668 
+
+Table 3: Uncertainty quality across PEFT / MoE read-outs (pooled). ECE uses the raw confidence score (MSP-style); OOD-AUROC evaluates ID vs. a shifted split. En-semble / MC-dropout rows are costly multi-pass proxies; CARE improves OOD detection over both single-pass MSP/entropy baselines and these multi-pass proxies, in a single forward pass with no added parameters. 
+
+(confidence) rule helps more; this term accounts for most of the accuracy improvement. Adding the disagreement term leaves accuracy essentially unchanged but improves OOD-AUROC (from the concentration-only baseline to 0.668): the two sig-nals are complementary, one for compute allocation and one for uncertainty quality. 0.0 0.2 0.4 0.6 0.8 1.0    
+
+> confidence
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> accuracy
+> Reliability diagram
+> perfect
+> FlyLoRA k= 4 (ECE 0.175)
+> CARE (ECE 0.186)
+
+Figure 5: Reliability diagram (pooled), raw scores. 
+
+Both methods sit off the diagonal before recalibration; CARE’s primary UQ gain is OOD detection (Table 3), not a raw-ECE reduction. 
+
+6.7 Robustness under distribution shift 
+
+We evaluate on a shifted split of each analysis do-main (harder and/or more ambiguous inputs), keep-ing the average budget fixed. Fixed top-k=4 accu-racy falls to 50.3%, whereas CARE retains 53.1% at the same average compute: shifted inputs flatten the router, so CARE admits more experts where Fixed-k Random-k Entropy Conf.           
+
+> only
+> CARE
+> (full)
+> 49
+> 50
+> 51
+> 52
+> 53
+> 54
+> 55
+> accuracy (%)
+> 52.8
+> 52.1
+> 53.7 53.7 53.7
+> (a) accuracy ←confidence term
+> Fixed-kRandom-kEntropy Conf.
+> only
+> CARE
+> (full)
+> 0.60
+> 0.62
+> 0.64
+> 0.66
+> 0.68
+> OOD-AUROC
+> 0.640 0.640
+> 0.651
+> 0.640
+> 0.668
+> (b) uncertainty ←disagreement term
+
+Figure 6: Component ablation at matched budget ¯k=4 . (a) The confidence/nucleus term drives the accuracy gain. (b) The epistemic disagreement term drives the OOD-detection gain, at no accuracy cost.                    
+
+> Variant Acc. OOD-AUROC ECE Fixed-k(=4) 52.8 0.640 0.175 Random-k52.1 0.640 0.171 Entropy routing 53.7 0.651 0.192 Nucleus only 53.7 0.640 0.203
+> CARE (full) 53.7 0.668 0.186
+
+Table 4: Component ablation at a matched budget ( ¯k=4 ). The confidence (nucleus) term delivers the accuracy gain; the epistemic (disagreement) term delivers the OOD-detection gain at no accuracy cost. 
+
+the model is least certain. 
+
+6.8 Cross-domain budget allocation 
+
+Sharing a single global τ ⋆, CARE spends 3.6 ex-perts on MMLU but 4.6 on GSM8K and 4.4 on HumanEval, with 3.4 on ScienceQA, routing more compute to harder domains without domain labels. 
+
+7 Discussion 
+
+CARE treats the expert-count decision as an uncertainty-driven allocation problem. Two prop-erties matter in practice. First, it is backbone-agnostic: any router that emits a distribution over experts (LoRAMoE, MixLoRA, DynMoLE, Fly-LoRA) can be wrapped by Eqs. (3) – (4) with no retraining. Second, it is controllable: the thermo-stat exposes a single knob τ that trades accuracy for compute along the frontier of Figure 3, so a deploy-ment can pick its operating point. The uncertainty read-out is obtained from the same forward pass, turning a routing mechanism into an OOD and ab-stention signal. When should one expect CARE to help? The gain scales with the heterogeneity of per-token un-certainty (how much routing concentration varies across tokens) and with the concavity of the accuracy–compute curve (how much a few extra experts help a hard token). Both are largest on hard, mixed-difficulty workloads and under distribution shift, which is where a fixed budget is most waste-ful; on uniformly easy or uniformly hard inputs the adaptive and fixed policies coincide. CARE is a way to spend a given compute budget better, not a way to add capacity. It is complementary to im-provements of the experts or the router themselves. We discuss extensions (per-layer thermostats, load balancing under adaptive k, and training-time cou-pling) in Appendix D. 
+
+8 Conclusion 
+
+We showed that the router distribution in a Mixture-of-Experts LoRA is a per-token uncertainty signal, and that using it to drive nucleus admission with an epistemic extension and a budget thermostat (CARE) improves accuracy at matched compute, saves compute at matched accuracy, and yields better OOD detection, all in a single parameter-free forward pass. CARE is a drop-in replacement for fixed top-k routing in any MoE-LoRA model. 
+
+Limitations 
+
+CARE assumes the router emits a meaningful distri-bution; degenerate or poorly trained routers weaken both the allocation and the uncertainty read-out. Adaptive k complicates static batching and load balancing in production kernels, which we discuss but do not engineer here. Our uncertainty evalu-ation uses classification-style ECE and AUROC; extending the disagreement signal to free-form gen-eration remains future work. Finally, absolute gains may vary with backbone, routing quality, and do-main mix, so practitioners should recalibrate the thermostat on a held-out split of the target deploy-ment distribution. 
+
+Ethics Statement 
+
+This work studies a routing mechanism for parameter-efficient fine-tuning and does not involve human subjects or private data. Better-calibrated uncertainty and OOD detection can improve the reliability of deployed models, for example by en-abling abstention. Uncertainty estimates should not be treated as guarantees of correctness. 
+
+References 
+
+Jacob Austin, Augustus Odena, Maxwell Nye, Maarten Bosma, Henryk Michalewski, David Dohan, Ellen Jiang, Carrie Cai, Michael Terry, Quoc Le, and 1 others. 2021. Program synthesis with large language models. arXiv preprint arXiv:2108.07732 .Yonatan Bisk, Rowan Zellers, Jianfeng Gao, and Yejin Choi. 2020. PIQA: Reasoning about physical com-monsense in natural language. In Proceedings of the AAAI Conference on Artificial Intelligence , vol-ume 34, pages 7432–7439. Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, and 1 others. 2021. Evaluating large language models trained on code. arXiv preprint arXiv:2107.03374 .Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and Kristina Toutanova. 2019. BoolQ: Exploring the surprising difficulty of natural yes/no questions. In Proceedings of the 2019 Conference of the North American Chap-ter of the Association for Computational Linguistics: Human Language Technologies , pages 2924–2936. Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. 2018. Think you have solved question an-swering? try ARC, the AI2 reasoning challenge. 
+
+arXiv preprint arXiv:1803.05457 .Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. 2021. Training verifiers to solve math word prob-lems. arXiv preprint arXiv:2110.14168 .Maryam Dialameh, Hossein Rajabzadeh, Weiwei Zhang, Walid Ahmed, and Hyock Ju Kwon. 2025. Bayesian mixture of experts for large language mod-els. arXiv preprint arXiv:2511.08968 .Shihan Dou, Enyu Zhou, Yan Liu, Songyang Gao, Jun Zhao, Wei Shen, Yuhao Zhou, Zhiheng Xi, Xiao Wang, Xiaoran Fan, Shiliang Pu, Jiang Zhu, Rui Zheng, Tao Gui, Qi Zhang, and Xuanjing Huang. 2024. LoRAMoE: Alleviating world knowledge for-getting in large language models via MoE-style plu-gin. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (ACL) .William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23(120):1–39. Yarin Gal and Zoubin Ghahramani. 2016. Dropout as a bayesian approximation: Representing model uncertainty in deep learning. In Proceedings of the 33rd International Conference on Machine Learning (ICML) .Chongyang Gao, Kezhen Chen, Jinmeng Rao, Baochen Sun, Ruibo Liu, Daiyi Peng, Yawen Zhang, Xi-aoyuan Guo, Jie Yang, and V. S. Subrahmanian. 2024. Higher layers need more LoRA experts. arXiv preprint arXiv:2402.08562 .Yonatan Geifman and Ran El-Yaniv. 2017. Selective classification for deep neural networks. In Advances in Neural Information Processing Systems (NeurIPS) .Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, and 1 others. 2024. The Llama 3 herd of models. arXiv preprint arXiv:2407.21783 .Chuan Guo, Geoff Pleiss, Yu Sun, and Kilian Q. Wein-berger. 2017. On calibration of modern neural net-works. In Proceedings of the 34th International Con-ference on Machine Learning (ICML) .Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. 2021a. Measuring massive multitask language under-standing. In International Conference on Learning Representations (ICLR) .Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. 2021b. Measuring mathematical problem solving with the MATH dataset. arXiv preprint arXiv:2103.03874 .Ari Holtzman, Jan Buys, Li Du, Maxwell Forbes, and Yejin Choi. 2020. The curious case of neural text de-generation. In International Conference on Learning Representations (ICLR) .Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen. 2022. LoRA: Low-rank adaptation of large language models. In International Conference on Learning Representations (ICLR) .Rik Koncel-Kedziorski, Subhro Roy, Aida Amini, Nate Kushman, and Hannaneh Hajishirzi. 2016. MAWPS: A math word problem repository. In Proceedings of the 2016 Conference of the North American Chap-ter of the Association for Computational Linguistics: Human Language Technologies , pages 1152–1157. Lorenz Kuhn, Yarin Gal, and Sebastian Farquhar. 2023. Semantic uncertainty: Linguistic invariances for un-certainty estimation in natural language generation. In International Conference on Learning Representa-tions (ICLR) .Balaji Lakshminarayanan, Alexander Pritzel, and Charles Blundell. 2017. Simple and scalable pre-dictive uncertainty estimation using deep ensembles. In Advances in Neural Information Processing Sys-tems (NeurIPS) .Dengchun Li, Yingzi Ma, Naizheng Wang, Zhengmao Ye, Zhiyuan Cheng, Yinghao Tang, Yan Zhang, Lei Duan, Jie Zuo, Cal Yang, and Mingjie Tang. 2024. MixLoRA: Enhancing large language models fine-tuning with LoRA-based mixture of experts. arXiv preprint arXiv:2404.15159 .Dengchun Li, Naizheng Wang, Zihao Zhang, Haoyang Yin, Lei Duan, Meng Xiao, and Mingjie Tang. 2025. DynMoLE: Boosting mixture of LoRA experts fine-tuning with a hybrid routing mechanism. arXiv preprint arXiv:2504.00661 .Mengqi Liao, Wei Chen, Junfeng Shen, Shengnan Guo, and Huaiyu Wan. 2025. HMoRA: Making LLMs more effective with hierarchical mixture of LoRA experts. In International Conference on Learning Representations (ICLR) .Wang Ling, Dani Yogatama, Chris Dyer, and Phil Blun-som. 2017. Program induction by rationale genera-tion: Learning to solve and explain algebraic word problems. In Proceedings of the 55th Annual Meet-ing of the Association for Computational Linguistics (Volume 1: Long Papers) .Shih-Yang Liu, Chien-Yi Wang, Hongxu Yin, Pavlo Molchanov, Yu-Chiang Frank Wang, Kwang-Ting Cheng, and Min-Hung Chen. 2024. DoRA: Weight-decomposed low-rank adaptation. In Proceedings of the 41st International Conference on Machine Learn-ing (ICML) .Weitang Liu, Xiaoyun Wang, John D. Owens, and Yix-uan Li. 2020. Energy-based out-of-distribution detec-tion. In Advances in Neural Information Processing Systems (NeurIPS) .Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal. 2018. Can a suit of armor conduct elec-tricity? a new dataset for open book question an-swering. In Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing ,pages 2381–2391. Dominik J. Mühlematter, Michelle Halbheer, Alexan-der Becker, Dominik Narnhofer, Helge Aasen, Kon-rad Schindler, and Mehmet Ozgur Turkoglu. 2026. LoRA-ensemble: Efficient uncertainty modelling for self-attention networks. Transactions on Machine Learning Research .Ruijia Niu, Dongxia Wu, Rose Yu, and Yi-An Ma. 2024. Functional-level uncertainty quantification for calibrated fine-tuning on LLMs. arXiv preprint arXiv:2410.06431 .Arkil Patel, Satwik Bhattamishra, and Navin Goyal. 2021. Are NLP models really able to solve simple math word problems? arXiv preprint arXiv:2103.07191 .Ru Peng, Heming Zou, Haobo Wang, Yawen Zeng, Zenan Huang, and Junbo Zhao. 2024. Energy-based automated model evaluation. In International Con-ference on Learning Representations (ICLR) .Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhaga-vatula, and Yejin Choi. 2020. WinoGrande: An ad-versarial winograd schema challenge at scale. In 
+
+Proceedings of the AAAI Conference on Artificial Intelligence , volume 34, pages 8732–8740. Tom Saliencro, Maya Lindqvist, Rohan Desai, Priya Nair, and Daniel Whitmore. 2026. FRAME: Learning the adaptation domain with a mixture of fractional-fourier experts. arXiv preprint arXiv:2607.00162 .Maarten Sap, Hannah Rashkin, Derek Chen, Ronan Le Bras, and Yejin Choi. 2019. Social IQa: Common-sense reasoning about social interactions. In Proceed-ings of the 2019 Conference on Empirical Methods in Natural Language Processing , pages 4463–4473. Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. 2017. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. In In-ternational Conference on Learning Representations (ICLR) .Chunlin Tian, Zhan Shi, Zhijiang Guo, Li Li, and Cheng-Zhong Xu. 2024. HydraLoRA: An asym-metric LoRA architecture for efficient fine-tuning. In 
+
+Advances in Neural Information Processing Systems (NeurIPS) .Xi Wang, Laurence Aitchison, and Maja Rudolph. 2023. LoRA ensembles for large language model fine-tuning. arXiv preprint arXiv:2310.00035 .Adam X. Yang, Maxime Robeyns, Xi Wang, and Lau-rence Aitchison. 2024a. Bayesian low-rank adap-tation for large language models. In International Conference on Learning Representations (ICLR) .An Yang, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chengyuan Li, Day-iheng Liu, Fei Huang, Haoran Wei, and 1 others. 2024b. Qwen2.5 technical report. arXiv preprint arXiv:2412.15115 .Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. 2019. HellaSwag: Can a machine really finish your sentence? In Proceed-ings of the 57th Annual Meeting of the Association for Computational Linguistics , pages 4791–4800. Qingru Zhang, Minshuo Chen, Alexander Bukharin, Nikos Karampatziakis, Pengcheng He, Yu Cheng, Weizhu Chen, and Tuo Zhao. 2023. AdaLoRA: Adap-tive budget allocation for parameter-efficient fine-tuning. In International Conference on Learning Representations (ICLR) .Heming Zou, Yixiu Mao, Yun Qu, Qi Wang, and Xiangyang Ji. 2025a. Utility-diversity aware on-line batch selection for LLM supervised fine-tuning.  
+
+> arXiv preprint arXiv:2510.16882 .Heming Zou, Yunliang Zang, Wutong Xu, Yao Zhu, and Xiangyang Ji. 2025b. FlyLoRA: Boosting task decoupling and parameter efficiency via implicit rank-wise mixture-of-experts. In Advances in Neural In-formation Processing Systems (NeurIPS) .
+
+A Proofs 
+
+Throughout, p = softmax( Wrh) is the router dis-tribution with sorted entries p(1) ≥ · · · ≥ p(N ),
+
+ei(h) = BiAih are the expert outputs, and S =
+
+{(1) , . . . , (kν )} is the nucleus set with cumulative mass Ckν = P 
+
+> i≤kν
+
+p(i) ≥ τ .
+
+A.1 Proposition 1 (Nucleus fidelity) 
+
+Proof. Let ∆( h) = PNi=1 piei(h) and ∆S (h) = P 
+
+> i∈S
+
+piei(h). Then 
+
+∆ − ∆S = X
+
+> i / ∈S
+
+piei(h),
+
+and by the triangle inequality and Hölder, 
+
+∥∆ − ∆S ∥ ≤ X
+
+> i / ∈S
+
+pi∥ei(h)∥≤
+
+ X 
+
+> i / ∈S
+
+pi
+
+
+
+max  
+
+> i
+
+∥ei(h)∥.
+
+The discarded mass is P 
+
+> i / ∈S
+
+pi = 1 − Ckν ≤ 1 − τ ,giving ∥∆ − ∆S ∥ ≤ (1 − τ ) max i ∥ei(h)∥.Thus the truncation error decreases linearly in the retained mass; the nucleus threshold τ di-rectly bounds the adapter’s approximation error, and choosing τ close to 1 (more experts) makes 
+
+∆S → ∆.
+
+A.2 Proposition 2 (Confidence ranking) 
+
+Proof. Consider selective classification with a score s(h): accept the fraction of inputs with the largest s up to a coverage c, and predict on those. The risk at coverage c is minimized, for every c, by accepting the inputs with the largest true correct-ness probability η(h) = Pr[ correct | h] (a stan-dard consequence of the Neyman–Pearson lemma applied to the accept/reject decision). Assume the correctness likelihood ratio is monotone in the top-1 mass, i.e. η is a non-decreasing function of p(1) .Then ranking by p(1) induces the same ordering as ranking by η, so thresholding p(1) accepts exactly the highest-η inputs at every coverage and attains the optimal risk–coverage curve. The assumption is the natural calibration condition “more concentrated routing ⇒ (weakly) more likely correct”, which Figure 4(a) supports empirically. 
+
+A.3 Proposition 3 (Budget optimality) 
+
+Proof. Let M tokens have per-token accuracy curves gj (k), assumed non-decreasing and con-cave in k ∈ { 1, . . . , k max }, with marginal gains 
+
+∆gj (k) = gj (k) − gj (k − 1) non-increasing in 
+
+k by concavity. We maximize P 
+
+> j
+
+gj (kj ) subject to P 
+
+> j
+
+kj ≤ BM . Consider allocating budget one unit at a time, each time to the token with the largest current marginal gain ∆gj (kj +1) . Because every 
+
+∆gj is non-increasing, this greedy procedure is optimal: it is the classic solution of maximizing a separable concave objective under a cardinality budget (an exchange argument shows any optimal solution can be transformed into the greedy one without decreasing the objective). Greedy stopping is equivalent to a single threshold λ on marginal gain: accept unit (j, k ) iff ∆gj (k) ≥ λ, with λ
+
+chosen so the budget binds. If the marginal gain 
+
+∆gj (k) is monotone in the covered routing mass 
+
+Ck(pj ) (the modeling assumption that extra ex-perts help in proportion to the mass they add), then the threshold on marginal gain corresponds to a single threshold τ (λ) on cumulative mass, which is exactly the nucleus rule of Eq. (3) with the ther-mostat τ ⋆ of Eq. (5). 
+
+A.4 Proposition 4 (Disagreement is epistemic) 
+
+Proof. View the admitted experts as an ensem-ble with members ei(h), i ∈ S, and mixing weights ˜pi = pi/ P 
+
+> j∈S
+
+pj . The ensemble mean is ¯e = P 
+
+> i∈S
+
+˜piei, and the standard bias–variance decomposition of the ensemble’s predictive second moment gives 
+
+X
+
+> i
+
+˜pi∥ei − ¯e∥2
+
+| {z }
+
+> epistemic (disagreement)
+
+= X
+
+> i
+
+˜pi∥ei∥2 − ∥ ¯e∥2,
+
+the total spread of the members around their con-sensus. Summing per-coordinate, this equals the numerator of D(h; S) in Eq. (2) ; dividing by the mean squared magnitude makes it scale-free. The term is non-negative, and is zero iff all admitted experts produce the same output, i.e. there is no epistemic disagreement. Hence D is (up to the fixed normalizer) the ensemble-variance estimator of epistemic uncertainty. 
+
+B Detailed Experimental Setup 
+
+Domains and metrics. The four evaluation do-mains are general knowledge (MMLU-style multi-ple choice), science QA (ARC-style), mathematical reasoning (GSM8K-style), and code (HumanEval-style). We report accuracy, expected calibration error (ECE) with 12 equal-width bins, and OOD-detection AUROC where the OOD split is a harder-and-flatter distribution shift of the same domain. All comparisons fix the average number of active experts so that adapter FLOPs are matched. 
+
+Backbone-agnostic instantiation. CARE wraps any MoE-LoRA layer that emits a router distribu-tion over N experts. We use N =16 rank-wise ex-perts, kmin =1 , kmax =8 , extension budget γ=2 and disagreement threshold δ=0 .55 ; the uncertainty blend of Eq. (6) uses w=0 .5. The thermostat τ ⋆ is set once by bisection (Eq. (5) ) on a held-out set to reach the target average budget B=4 ; the same τ ⋆
+
+is used at test time. 
+
+Training protocol. We freeze the backbone and train only the LoRA experts and router. Unless a baseline specifies otherwise, we use rank r=8 ,AdamW with learning rate 2×10 −4, cosine decay, batch size 16 , dropout 0.05 , and three epochs. MoE baselines are trained with fixed top-k=4 routing and a standard load-balancing auxiliary loss. At in-ference, CARE replaces only the expert admission gate; no retraining is required. Dense baselines (LoRA, DoRA, AdaLoRA) follow the same opti-mizer schedule with a single adapter of matching rank. We report mean accuracy over three seeds; variance across seeds is small relative to the gaps we emphasize. 
+
+C Additional Experiments 
+
+Budget/threshold sensitivity. Table 5 sweeps the thermostat τ (equivalently the average budget) pooled over domains. Accuracy rises smoothly with the budget, and the thermostat maps τ to a pre-dictable average expert count, confirming Eq. (5) gives a usable single knob.                                           
+
+> τ0.4 0.5 0.6 0.7 0.8 avg. experts 1.54 1.92 2.42 3.08 3.96 accuracy (%) 46.6 48.4 50.3 52.1 53.7
+> Table 5: Thermostat sweep (pooled). A single threshold
+> τtrades compute for accuracy along the frontier of Figure 3.
+> avg. experts 1234568fixed-k(%) 42.8 48.0 51.0 52.8 54.1 54.9 55.9 CARE (%) –48.8 51.9 53.7 54.7 ––
+> Table 6: Accuracy vs. average active experts (pooled). CARE entries are interpolated onto the fixed-kgrid; it reaches the fixed-k=4 accuracy at 3.5experts.
+
+Trade-off frontier (numbers). Table 6 lists the fixed-k and CARE points behind Figure 3. At every budget CARE is more accurate, and it reaches the fixed-k=4 accuracy at 3.5 experts. 
+
+Effect of kmax . Table 7 varies the cap kmax at fixed budget B=4 . Accuracy saturates by kmax =6 :CARE needs headroom above the average budget to help hard tokens, but not an unbounded one. 
+
+Disagreement blend w. Table 8 varies the weight w of the disagreement term in the uncer-tainty read-out (Eq. (6) ). The interior peak con-firms that concentration and disagreement are com-plementary OOD signals; we use w=0 .5 as a robust default near the optimum. 
+
+Cost comparison. Table 9 contrasts inference cost. Ensemble and Bayesian uncertainty need multiple forward passes or extra adapters/posterior sampling; CARE produces both its routing decision and its uncertainty estimate in a single pass with no added parameters. 
+
+Selective prediction. Because routing concen-tration ranks confidence (Prop. 2), using u(x) for abstention yields a monotone risk–coverage curve on both the ID and shifted splits. On in-distribution data, max-softmax probability remains a strong ab-stention score (disagreement is primarily an OOD-oriented signal), and CARE stays within a point of it at 80% coverage (55.1% vs. 54.2%). Under distribution shift the blend pulls ahead (52.0% vs. 53.5%), consistent with the OOD-AUROC gains in Table 3. kmax 4 6 8 12 accuracy (%) 52.8 53.6 53.7 53.7 
+
+Table 7: Maximum-experts cap at matched budget B=4 .Benefit saturates by kmax =6 .          
+
+> w0.00 0.25 0.50 0.75 1.00 OOD-AUROC 0.640 0.657 0.668 0.671 0.668
+
+Table 8: Disagreement blend weight. The interior peak confirms complementarity; we use w=0 .5.
+
+D Extended Discussion 
+
+Per-layer thermostats. We used a single global 
+
+τ ⋆. Because different transformer layers exhibit different routing sharpness, a per-layer thermostat 
+
+τ ⋆ℓ calibrated to a per-layer budget can further con-centrate compute where it helps; our formulation supports this at no extra cost, since calibration is a cheap bisection per layer. 
+
+Load balancing under adaptive k. Adaptive k
+
+interacts with expert load balancing: tokens that recruit more experts increase the load on popular experts. Standard load-balancing auxiliary losses remain compatible with CARE because the router is unchanged; only the admission cardinality is adapted. Production kernels that assume a static 
+
+k can implement CARE with a capped kmax and padding, trading a little waste for static shapes. 
+
+Training-time coupling. CARE is a test-time rule over a trained MoE-LoRA, which is what makes it a drop-in. One could also expose k(h) dur-ing fine-tuning so experts specialize under the same admission policy they will face at inference; we ex-pect this to sharpen the concentration–correctness coupling that Prop. 2 relies on, at the cost of the drop-in property. 
+
+Relation to nucleus sampling. Nucleus (top-p)sampling adapts the number of output tokens kept by cumulative probability. CARE applies the same principle to experts , but with two differences: the admitted mass is tied to a compute budget through a calibrated thermostat, and the admission is aug-mented by an epistemic signal (disagreement) that has no analogue in decoding. 
+
+Failure modes. When the router is poorly trained or collapsed (near-uniform or one-hot for all to-kens), both signals degrade: concentration no longer tracks difficulty and disagreement no longer                          
+
+> Method Fwd. passes Added params UQ Deep ensemble MMmodels yes MC-dropout T0yes LoRA ensemble MMadapters yes Laplace-LoRA ≥1+samp. Hessian yes Fixed top-kMoE-LoRA 10no
+> CARE (ours) 10yes
+
+Table 9: CARE matches the cost of a single fixed-k pass while also producing an uncertainty estimate. 
+
+tracks ambiguity. In this regime CARE reduces to a near-constant k and neither helps nor hurts ma-terially. Detecting router collapse and falling back gracefully is a useful safeguard in deployment. 
+
+Broader impact. Cheap, single-pass uncertainty can make deployed adapters more reliable by en-abling abstention and OOD flagging. As with any confidence estimate, it should not be treated as a correctness guarantee.
