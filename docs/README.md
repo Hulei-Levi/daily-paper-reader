@@ -6,32 +6,29 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-30
-- 运行时间：2026-07-30 21:23:14 UTC
+- 最新运行日期：2026-07-31
+- 运行时间：2026-07-31 21:23:21 UTC
 - 运行状态：成功
-- 本次总论文数：4
-- 精读区：3
-- 速读区：1
+- 本次总论文数：2
+- 精读区：2
+- 速读区：0
 
 ### 今日简报（AI）
-今日精选4篇论文，精读3篇、速读1篇。最值得关注的是路由块成员选择控制机制（9.0分）和异构联邦MoE-LoRA专业化单元重新思考（9.0分）。建议优先阅读这两篇高分文章，学习其中针对模型效率与异构场景的架构优化思路。
-- 详情：[/202607/30/README](/202607/30/README)
+今日精读2篇高分论文，聚焦稀疏混合专家（MoE）路由机制的优化与多模态融合应用。  
+最值得关注的方向：一是提出基于条件模态风险的可信路由（TIER-MoE），提升生物医学分类可靠性；二是揭示路由中“相干重叠”比几何互补性更关键，为稀疏MoE设计提供新视角。  
+建议普通读者优先理解“路由决策如何影响专家协作”，后续可关注这两项方法在更广任务上的泛化验证。
+- 详情：[/202607/31/README](/202607/31/README)
 
 ### 精读区论文标签
-1. [Route-Block Membership Selects Packed-AWQ Arithmetic: A Controlled Single-Fixture Mechanism Study](/202607/30/2607.26316v1-route-block-membership-selects-packed-awq-arithmetic-a-controlled-single-fixture-mechanism-study)  
+1. [TIER-MoE: Trust-Informed Expert Routing via Conditional Modality Risk for Multimodal Fusion in Biomedical Classification](/202607/31/2607.27289v1-tier-moe-trust-informed-expert-routing-via-conditional-modality-risk-for-multimodal-fusion-in-biomedical-classification)  
    标签：评分：9.0/10、query:moe-special
-   evidence：MoE推理中路由块干预研究
-2. [FedWeave: Rethinking the Unit of Specialization in Heterogeneous Federated MoE-LoRA](/202607/30/2607.26618v1-fedweave-rethinking-the-unit-of-specialization-in-heterogeneous-federated-moe-lora)  
+   evidence：针对模态风险的专家路由机制与专家专门化
+2. [Beyond Geometric Complementarity: Coherent Overlap in Sparse Mixture-of-Experts Routing](/202607/31/2607.28308v1-beyond-geometric-complementarity-coherent-overlap-in-sparse-mixture-of-experts-routing)  
    标签：评分：9.0/10、query:moe-special
-   evidence：在联邦MoE-LoRA中重新定义专业化单元，以提高专家纯度和路由对比
-3. [Route by Kinematics, Act by Observation: Kinematics-Supervised Expert Routing in MoE-Augmented VLA](/202607/30/2607.26807v1-route-by-kinematics-act-by-observation-kinematics-supervised-expert-routing-in-moe-augmented-vla)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：提出运动学监督显式路由改善MoE中专家路由
+   evidence：直接研究稀疏MoE中的专家专业化和路由一致性，提出专家子空间分离指数
 
 ### 速读区论文标签
-1. [Mixture-of-experts for handwriting trajectory reconstruction from IMU sensors](/202607/30/2607.26708v1-mixture-of-experts-for-handwriting-trajectory-reconstruction-from-imu-sensors)  
-   标签：评分：6.0/10、query:moe-special
-   evidence：使用MoE方法进行笔迹轨迹重建
+- 本次无速读推荐。
 
 
 <div class="dpr-home-promo-card">
