@@ -1,0 +1,261 @@
+Title: Incast-Free MoE Rate-Based Scheduling
+
+URL Source: https://arxiv.org/pdf/2607.26340v1
+
+Published Time: Thu, 30 Jul 2026 00:16:33 GMT
+
+Number of Pages: 8
+
+Markdown Content:
+# Incast-Free MoE Rate-Based Scheduling 
+
+# Evyatar Cohen 1, Jose Yallouz 1, Alexander Shpiner 2,Mark Silberstein 1, Sylvia Ratnasamy 3, Isaac Keslassy 1,3 
+
+> 1
+
+Technion 2 Nvidia 3 UC Berkeley 
+
+## Abstract 
+
+Mixture of Experts (MoE) architectures have become key to large language models; however, their typical round-robin (RR) scheduling introduces significant bottlenecks. In this paper, we demonstrate that RR causes a previously-undiscovered exponential incast phenomenon with MoE traf-fic. We propose an alternative proactive fair scheduling framework tailored for MoE workloads, which effectively prevents fabric oversubscription. We also outline how it can be implemented in NICs. Finally, through extensive simu-lations with real and synthetic workloads, we demonstrate that this framework consistently eliminates incast, main-tains a near-100% link utilization, and reduces Collective Completion Time (CCT). 
+
+## 1 Introduction 
+
+To overcome the hardware scaling constraints of massive Large Language Models (LLMs), modern data centers are in-creasingly adopting Mixture of Experts (MoE) architectures. MoE networks scale model capacity by orders of magni-tude by dynamically routing individual tokens to a sparse subset of expert layers. However, this application layer ef-ficiency places a severe burden on the underlying network layer. MoE token routing inherently creates highly skewed and fast changing all-to-all communication patterns, which heavily strain datacenter networks [14, 17, 18, 21, 22, 32]. The MoE pipeline begins with a local routing phase to determine the destination experts for each token, then pro-ceeds in a dispatch stage, i.e., an all-to-all communication phase where GPUs simultaneously inject token payloads into the fabric. In an environment with 𝑁 GPU NICs, this dispatch phase causes each node to concurrently flood the fabric with up to 𝑁 − 1 variable-length flows. The main goal is to minimize the Collective Communication Time (CCT), defined as the arrival time of the last packet of this dispatch phase at its final receiver. Scheduling these emerging MoE workloads remains an open challenge. Recent works like FAST [ 20 ], Chronos [ 30 ]and DFS [ 37 ] advocate using Birkhoff-von Neumann (BvN) decomposition [ 8 , 36 ] to schedule synchronized, collision-free permutations. However, this tight global synchroniza-tion is near impossible to reconcile with distributed Conges-tion Control Algorithms (CCAs) under variable Round-Trip Times (RTTs), link failures, or background traffic. Conse-quently, datacenters rely on decentralized heuristics like round-robin (RR), where each NIC independently cycles through its active flows [ 3 , 4, 12 ]. While computationally simple, RR is entirely blind to traffic skewness. In this paper, we demonstrate that RR suffers from a fun-damental breakdown we term the MoE exponential incast .When senders independently cycle through asymmetric MoE traffic matrices, they quickly deplete their lighter flows to unpopular experts, leaving only flows for hot GPUs near the end of the epoch. This uncoordinated convergence causes the aggregate arrival rate at bottleneck receivers to spike ex-ponentially. Without a CCA, this incast forces the number of inflight packets to grow exponentially, causing catastrophic buffer overflows. While flows must employ a CCA, such as the emerging Ultra Ethernet Consortium (UEC) Network-Signaled Congestion Control (NSCC) standard [ 5 , 11 , 33 ], to protect switch buffers, we show that such reactive throttling can severely over-correct by throttling too much. This over-correction drops link utilization below 100%, inflating the CCT, and is increasingly significant as we scale 𝑁 (§6). To eliminate this exponential incast, we propose a globally proportional, fair-scheduling framework designed explicitly for MoE workloads. Our core insight is to transform the dy-namic scheduling problem into a static, demand-guided rate allocation. By calculating a normalized traffic matrix scaled by the maximum of the worst-case row and column demands, we guarantee that the aggregate arrival rate at any sender or receiver NIC never exceeds its physical link rate. Thus, the fabric remains completely collision-free and balanced, preventing the onset of an incast bottleneck by design. Trans-lating this mathematical framework into a scalable practical system requires sub-microsecond enforcement at the hard-ware layer. We outline how to achieve this by leveraging for example the NVIDIA DOCA Programmable Congestion Control (PCC) [ 28 ] runtime integrated directly into modern NICs. By mapping the normalized rate weights directly onto hardware memory lines, our framework bypasses complex network handshakes and control-plane negotiations entirely. We explain that our weight updating scheme can sequen-tially program up to 1,000 concurrent inter-server flows in under 10 𝜇 s , an execution window that is practically negli-gible compared to operational MoE token routing intervals,  
+
+> 1arXiv:2607.26340v1 [cs.NI] 28 Jul 2026 E. Cohen et al.
+
+yielding a scalable network control plane. We also explain why our scheme is resilient to any initial jitter. We evaluate our proposed fair scheduler across 64 × 64 to 
+
+512 ×512 High-radix non-blocking three-tier fat tree, running both a Qwen2/3 MoE workload and a synthetic Zipfian MoE workload. Experimental results firmly corroborate our theo-retical framework, showing that our approach consistently outperforms a baseline running RR with UEC’s NSCC. In summary, this paper makes the following contributions: 
+
+• We identify and mathematically model the MoE expo-nential incast, a structural bottleneck in decentralized RR scheduling where the MoE skewness causes an exponential load spike at hot receivers. 
+
+• We present a proportional rate-allocation framework that normalizes MoE traffic matrices by the worst-case row and column sums, mathematically prevent-ing port oversubscription and incast. 
+
+• We outline a hardware-enforced architecture utiliz-ing the NVIDIA DOCA Congestion Control inter-face on modern SmartNICs/DPUs that scales to 1,000 flows in under 10 𝜇 s. 
+
+• We evaluate our framework across 64 ×64 to 512 ×512 
+
+network environments, demonstrating a substantial reduction in CCT compared to RR with NSCC. 
+
+## 2 Background and Related Work 2.1 Scheduling Goal 
+
+We model the network traffic demand using a demand ma-trix 𝐷 , each entry 𝐷 𝑖 𝑗 in the matrix represents the volume of traffic demand originating from sender 𝑖 and destined for receiver 𝑗 . The objective of the scheduler is to compute a transmission sequence that minimizes the Collective Com-pletion Time (CCT), defined as the total time elapsed until all individual flows represented in matrix 𝐷 have been suc-cessfully transmitted across the network fabric. 
+
+## 2.2 Decomposition-Based Scheduling 
+
+Several papers leverage matrix decomposition techniques to coordinate globally optimal collision-free schedules across the network fabric. The FAST framework [ 20 ] focuses on achieving optimal scheduling by utilizing the classic Birkhoff-von Neumann (BvN) decomposition theorem [8, 36]. Under this approach, the traffic demand matrix 𝐷 is decomposed into a weighted sum of permutation matrices, ensuring struc-turally optimal, collision-free fabric allocation. Conversely, the Chronos framework [ 30 ] attempts to mitigate the mathe-matical and computational overhead of exact BvN decompo-sition by employing a fast, maximal matching decomposition strategy, which sacrifices strict optimality in scheduling effi-ciency to achieve lower computational complexity. A key architectural contribution of FAST is that it lever-ages high-speed intra-server interconnects like NVLink [ 29 ]to handle intra-node communication. By doing so, the frame-work abstracts away the complexity of GPU-to-GPU routing, allowing the scheduler to focus exclusively on the matrix of transmissions between physical servers. In this work, we leverage this exact same structural paradigm, focusing our optimization solely on inter-server traffic matrices while relying on underlying hardware interconnects to resolve localized intra-node transfers. However, both FAST and Chronos suffer from several key weaknesses that prevent them from being implemented in practice: (1) While theoretically robust and architecturally streamlined, the primary trade-off of executing an exact Birkhoff-von Neumann (BvN) decomposition in FAST re-mains its substantial computational complexity, making real-time scheduling a challenge for highly dynamic work-loads. (2) The BvN decomposition into permutations does not work when the network has failures, and it cannot be easily adapted to using congestion control. (3) The BvN de-composition into permutations fits optical switches with the same link delays everywhere and tight timing constraints. But in packet-switched networks, this full complexity of finding permutations is unneeded: (i) Flows have heteroge-neous delays depending on the distance between nodes (e.g., whether or not the flows cross core switches in fat trees), so all senders and receivers are not fully synchronized, and (ii) we don’t need to fully avoid conflicts, as we have packet buffers, we just need to avoid incast. 
+
+## 2.3 Frameworks 
+
+State-of-the-art distributed LLM frameworks, in-cluding NVIDIA’s Megatron-LM [ 26 ], ByteDance’s veScale/MegaScale [ 10 ], Microsoft’s DeepSpeed [ 1 ], and DeepSeek’s DeepEP [ 12 ]. Starting with local route tokens to target experts at the start of each MoE layer. Before executing the heavy all-to-all dispatch, the participating GPUs must coordinate to prepare receiving memory buffers. Crucially, this coordination phase inherently exposes traffic matrix metadata to the devices. For instance, in Megatron-LM, GPUs execute a synchronous metadata handshake (collective gather) where each rank exchanges its split sizes, ensuring that every GPU constructs the exact traffic mapping before the physical dispatch begins. Similarly, veScale (MegaScale) employs a Single Program, Multiple Data (SPMD) execution model with matching pre-allocated buffers, allowing devices to mathematically derive the traffic matrix without dynamic runtime handshakes. Other frameworks only distribute partial mapping information, but the full global traffic matrix can be propagated to all 
+
+> 2Incast-Free MoE Rate-Based Scheduling
+
+participating GPUs with minimal additional control-plane overhead. 
+
+## 2.4 Additional Related Work 
+
+Load-balancing (LB) algorithms. A variety of standard load-balancing (LB) mechanisms can be deployed to distrib-ute MoE traffic across datacenter networks. First, NVIDIA’s Spectrum-X platform [ 25 , 31 ] relies on switch-based Adap-tive Routing (AR) [ 7 , 24 , 35 ] to dynamically route packets based on path congestion. Second, Alibaba implements host-based Oblivious Packet Spraying (OPS) [ 13 , 16 , 23 , 38 ] di-rectly at the endpoints to randomize packet distribution with-out switch-level coordination. Third, the emerging Ultra Eth-ernet Consortium (UEC) specification [ 34 ] recommends host-based adaptive packet spraying schemes, such as REPS [ 9]and STrack [ 19 ]. In this paper, we evaluate our scheduler across all three routing approaches for completeness. 
+
+Congestion control algorithms (CCA). Modern datacen-ter networks employ various congestion control algorithms (CCAs) to mitigate packet loss and queue buildup caused by transient traffic bursts. In this work, we focus on the recent Network-Signaled Congestion Control (NSCC) [ 5 , 11 , 33 ]standard, defined by the Ultra Ethernet Consortium (UEC). 
+
+## 3 The MoE Exponential Incast 
+
+Intuition. MoE workloads exhibit highly skewed, dynamic traffic patterns where token routing is dominated by a few highly popular expert servers. Under standard round-robin scheduling, each sender independently cycles through its active flow queues, servicing each active queue at an equal rate. However, because lighter flows to unpopular experts possess significantly fewer tokens, they quickly deplete and drop out of the scheduling pool. Senders are then left ex-clusively targeting the remaining hot destinations at full line rate, causing a severe network bottleneck that escalates exponentially, a phenomenon we term the exponential incast .To see why this bottleneck surges exponentially, consider the feedback loop inherent to round-robin scheduling. Imag-ine a sender with one large flow to a hot expert and nine tiny flows to cold experts. Initially, traffic is spread evenly, with only 10% of the sender’s bandwidth going to the hot expert. But as the nine light flows rapidly finish and drop out, the hot flow’s share of transmission rate continuously accelerates (from 1/10 to 1/1). Because this queue depletion occurs across all senders simultaneously, their remaining transmissions inadvertently synchronize, focusing 100% of the fabric’s capacity onto the hot receiver near the end of the epoch. We prove below that the number of remaining destinations decays exponentially fast, and therefore the incast strength also grows exponentially fast. As a result, we also show that nearly the entire workload volume becomes stuck in the network fabric. 
+
+Theoretical Framework. We model MoE using a Zipfian model and use fluid dynamics to show the resulting impact of RR. Let 𝑁 be the number of concurrent senders, and let 
+
+𝑅 = {𝑟 1, 𝑟 2, . . . , 𝑟 𝑁 } be the set of destination receivers hosting the experts, ordered by their Zipfian popularity rank 𝑗 ∈{1, 2, . . . , 𝑁 }, where 𝑟 1 represents the most requested "hot" expert. We consider the classic Zipfian distribution (with a skewness index 𝑠 = 1), where the total traffic volume 𝐷 𝑖 𝑗 
+
+originating from source 𝑖 to destination 𝑗 is given by: 
+
+𝐷 𝑖 𝑗 = 𝑇 · 1
+
+𝑗 · 𝛼 , with 𝛼 =
+
+> 𝑁
+
+∑︁ 
+
+> 𝑚 =1
+
+1
+
+𝑚 ≈ ln 𝑁 (1) and 𝑇 represents the total traffic volume per sender row. Approximating the harmonic number 𝛼 as ln 𝑁 allows us to ground the fluid dynamics in direct system parameters. Under RR, each sender loops through its active flow queues independently. If a sender has 𝑘 active destinations remain-ing, a round-robin scheduler visits each active queue exactly once per cycle, thereby draining each active flow at an in-stantaneous rate of 1/𝑘 .
+
+Exponential decay of active destinations. Crucially, be-cause lighter flows to less popular receivers ( 𝑟 𝑁 , 𝑟 𝑁 −1, . . . )possess significantly fewer tokens, they exhaust their capac-ity early and drop out of the scheduling pool. To model this in a continuous fluid limit, let 𝜏 represent time. A flow at rank 𝑟 drains at a rate of 1/𝑘 (𝜏 ) and is completely depleted at the exact instant 𝑡 when the boundary of remaining active flows reaches its rank, meaning 𝑟 = 𝑘 (𝑡 ). The accumulated service this boundary flow received up to time 𝑡 must equal its initial Zipfian volume: ∫ 𝑡    
+
+> 01
+> 𝑘 (𝜏 )
+
+𝑑𝜏 = 𝑇 𝛼𝑘 (𝑡 ) . Differentiating both sides with respect to 𝑡 yields 1   
+
+> 𝑘 (𝑡 )
+
+= − 𝑇 𝛼𝑘 (𝑡 )2 
+
+> 𝑑𝑘 𝑑𝑡
+
+, which we can simplify and solve, yielding an exponential decay of active destinations: 𝑘 (𝑡 ) = 𝑁 𝑒 − 𝛼𝑡 𝑇 ≈ 𝑁 1− 𝑡 𝑇 .
+
+Exponential incast. The above decay triggers a severe pos-itive feedback loop for the bottleneck receiver 𝑟 1. Because 𝑟 1
+
+remains active throughout the entire epoch, the aggregate arrival rate 𝜆 1 (𝑡 ) across all 𝑁 senders increasingly focuses directly onto it. The incoming load scales inversely with the number of surviving flows, yielding a power-scaling law: 
+
+𝜆 1 (𝑡 ) = 𝑁 · 1   
+
+> 𝑘 (𝑡 )
+
+= 𝑒 𝛼𝑡 𝑇 ≈ 𝑁 𝑡 𝑇 . In other words, initially, traffic is balanced and the hot receiver experiences line-rate capac-ity ( 𝜆 1 (0) = 1). However, as time progresses, the arrival rate surges exponentially until it peaks at 𝜆 1 (𝑇 ) = 𝑁 at the end of the epoch, where all 𝑁 senders are fully synchronized and transmitting exclusively to 𝑟 1.
+
+Queue dynamics. To uncover the collective impact of this global incast, we analyze the total network backlog at some  
+
+> 3E. Cohen et al.
+
+Figure 1: Simulation results showing the queue size at the most requested receiver over time, which grows exponentially near the end of the scheduling epoch. 
+
+time 𝑡 = 𝑇 . Each sender drains its active queues at a con-tinuous aggregate rate of 𝑘 · ( 1/𝑘 ) = 1, introducing ex-actly 𝑇 packets into the network over the epoch, which sums to an aggregate injected workload of 𝑁𝑇 . Conversely, assuming each destination receiver services packets at a maximum normalized line rate of 1, a receiver can clear at most 𝑇 packets during this period. Due to the severe Zipfian skew, the total arrivals at receiver 𝑗 are given by 
+
+𝑁𝑇 /( 𝛼 𝑗 ). Consequently, receivers can be partitioned into two distinct regimes based on saturation: receiver 𝑗 is sat-urated (hot) when 𝑁𝑇 𝛼 𝑗 > 𝑇 i.e., 𝑗 < 𝑁 𝛼 , and underuti-lized (cold) otherwise. While underutilized nodes process all incoming traffic and go idle early, saturated receivers remain bottlenecks for the entire duration, leaving a per-sistent backlog in their buffers. By integrating the residual queue sizes across all saturated nodes up to the saturation boundary 𝑗 𝑚𝑎𝑥 = 𝑁 /𝛼 , we derive a lower bound on the to-tal number of packets stranded in the network at 𝑡 = 𝑇 :
+
+𝑄 𝑡𝑜𝑡𝑎𝑙 (𝑇 ) ≈ ∫ 𝑁 /𝛼 
+
+> 1
+
+  𝑁𝑇 𝛼𝑥 − 𝑇  𝑑𝑥 = 𝑁𝑇 
+
+
+
+1 − ln (ln 𝑁 )+ 1ln 𝑁 
+
+
+
+. This closed-form bound reveals an architectural insight for large-scale AI clusters: as 𝑁 scales out, the second term vanishes, meaning 𝑄 𝑡𝑜𝑡𝑎𝑙 (𝑇 ) → 𝑁𝑇 . Under RR, nearly 100% of the en-tire workload volume becomes completely clogged within the network fabric. Even though the core bisection bandwidth is theoretically sufficient, independent round-robin selec-tion forces colder destination links to waste valuable ser-vice capacity by going idle early, guaranteeing catastrophic cluster-wide buffer oversubscription. 
+
+Empirical exponential incast. To validate this exponential incast phenomenon, we conduct a discrete-event network simulation with a real-world 128 × 128 MoE. Senders route their respective traffic matrices using independent, decen-tralized round-robin scheduling. Fig. 1 corroborates our fluid model for three different LB schemes (§2.4). Initially, during the first half of the epoch, net-work utilization remains balanced across the fabric as round-robin flows occupy diverse links. However, as the light and medium-load destination queues are fully depleted, senders progressively synchronize their remaining transmissions to-ward the heavy-tail expert. After about 𝑡 = 1, 200 𝜇 s , in the final 20% of the scheduling timeline, the aggregate ingress rate 𝜆 1 (𝑡 ) at the hot receiver exhibits a distinct exponential curve, spiking sharply until the link saturates, triggering massive queue build-ups that match our predicted 𝑄 𝑡𝑜𝑡𝑎𝑙 (𝑡 )
+
+trajectory and stalling the CCT. 
+
+## 4 Fair Scheduling for MoE 
+
+To overcome the exponential incast inherent to uncoordi-nated round-robin scheduling, we propose a globally pro-portional, fair scheduling mechanism designed specifically for Mixture of Experts (MoE) workloads. Our core insight is to transform the dynamic scheduling problem into a static rate-allocation framework that mathematically guarantees the prevention of fabric oversubscription. 
+
+Proportional Rate Allocation. Our approach relies on com-puting a normalized traffic matrix 𝑅 directly from the active demand matrix 𝐷 . Consider a concrete 3 × 3 example where three physical servers act as both senders and receivers, and the diagonals are null (signifying that intra-server traffic is offloaded to localized hardware like NVLink): 
+
+𝐷 = ©«
+
+− 1000 2000 800 − 2000 2000 1000 −
+
+ª®¬
+
+(2) In this traffic matrix, the third column represents the most heavily loaded bottleneck receiver (expert), accumulating a total incoming demand of 4000 tokens. To ensure that neither a physical sender’s uplink nor a receiver’s downlink is oversubscribed, we normalize the demand matrix by a scaling factor 𝑀 , defined as: 
+
+𝑀 = max max 
+
+> 𝑖
+
+∑︁ 𝑗 
+
+𝐷 𝑖 𝑗 , max 
+
+> 𝑗
+
+∑︁ 𝑖 
+
+𝐷 𝑖 𝑗 
+
+!
+
+(3) In our specific example, both the worst-case row sum and the worst-case column sum yield a maximum value of 
+
+𝑀 = 4000 . By dividing the demand matrix 𝐷 by this bounding factor 𝑀 , we derive the normalized rate matrix 𝑅 :
+
+𝑅 = 𝐷 
+
+4000 = ©«
+
+− 0.25 0.50.2 − 0.50.5 0.25 −
+
+ª®¬
+
+(4) By construction, this scaling ensures that the sum of every individual row and column in 𝑅 is strictly less than or equal to 1.0 (Í𝑗 𝑅 𝑖 𝑗 ≤ 1 and Í𝑖 𝑅 𝑖 𝑗 ≤ 1). If every sender 𝑖 bounds its transmission rate to receiver 𝑗 exactly to 𝑅 𝑖 𝑗 of the total link line rate, we achieve a fundamental structural guarantee: no individual network port can experience an incast, and fabric utilization remains balanced throughout the entire lifecycle of the MoE epoch. 
+
+> 4Incast-Free MoE Rate-Based Scheduling
+
+## 5 Implementation Feasibility 
+
+Implementation in a real NIC remains future work. However, we outline below how we plan to do it. 
+
+Enforcement via NVIDIA DOCA Congestion Control. 
+
+To enforce the precisely calculated rate weights 𝑅 𝑖 𝑗 directly at the hardware layer, we suggest to leverage the NVIDIA DOCA Congestion Control (DCC) framework integrated into modern BlueField Data Processing Units (DPUs) or Con-nectX SmartNICs. DOCA Congestion Control provides three distinct architectural advantages that map perfectly to our scheduling goals: (1) Fixed hardware rate limiting: It allows the host to programmatically bind each network flow to a highly granular, fixed transmission weight matching our cal-culated 𝑅 𝑖 𝑗 parameters. (2) Reactive traffic throttling: In the event of unforeseen transient background traffic, DCC auto-matically senses link-layer feedback (such as ECN markers) to dynamically scale down rates, providing fallback network stability. (3) Sub-microsecond API updates: The underlying hardware runtime exposes low-overhead memory mapping registers, making it possible to reconfigure active flow pacing configurations almost instantaneously. 
+
+Sub-10 𝜇 s scalability. A common pitfall of global matrix-based scheduling frameworks is the control-plane overhead required to update active network states. To demonstrate the scalability of our approach, we outline a fast runtime weight-updating scheme. Our scalability relies on two highly efficient, independent phases. First, finding the bounding fac-tor 𝑀 for an 𝑁 × 𝑁 matrix ( 𝑁 ≤ 1000 ) is executed rapidly because the matrix resides in high-speed near-compute mem-ory; consequently, this computation takes under 10 𝜇 s [ 6, 27 ]. Second, writing these calculated rates sequentially to the SmartNIC/DPU hardware memory lines is lightweight and bypasses heavy network handshakes. In addition, instead of writing each of 1,000 rates into a different memory line, we suggest to write all rates together at once into a single memory address. Then, each DOCA PCC flow can access this memory when deciding on its next rate, as already exists today. Writing these 1, 000 rates is expected to complete in under 10 𝜇 s. Given that typical MoE token routing intervals operate on significantly longer operational timescales, this configuration latency is practically negligible, demonstrat-ing that our fair-scheduling architecture scales efficiently to large-scale AI data center clusters. 
+
+## 6 Evaluation 
+
+Simulator and Topology. We simulate our framework us-ing htsim [ 2 ], chosen for its ability to scale to large datacen-ter networks and its existing implementation of transport and load-balancing protocols [ 15 ]. Specifically, we model a high-radix, non-blocking leaf-spine network fabric with 
+
+800 Gbps links. Senders transmit packets with payload size of 
+
+Figure 2: Comparison of the CCT inflation relative to a theoretical lower bound (assuming a constant 100% link utilization) under empirical MoE LLM routing traces across 64 × 64 (left) and 128 × 128 (right) GPUs matrices. 
+
+4, 096 bytes. As in FAST, we assume that groups of 8 physical servers leverage local NVLink for intra-node communication, yielding a modified traffic matrix that focuses only on traf-fic that doesn’t go through NVLink. We benchmark cluster scales from 64 × 64 to 512 × 512 GPUs. 
+
+Load-balancing. The simulator models three LB schemes: AR, OPS, and REPS (§2.4). 
+
+Workloads. To capture the precise traffic dynamics of mod-ern Mixture of Experts (MoE) infrastructures, our evaluation relies on two distinct dataset paradigms: 
+
+Real-world MoE routing workloads:. To anchor our framework in true production conditions, we extract trace datasets col-lected directly from the active routing phase of a production-grade MoE. They map the actual token-to-expert routing decisions, capturing real-world non-uniformities for 64 × 64 
+
+(Qwen2) and 128 × 128 matrices (Qwen3-235B). 
+
+DeepSeek-V3 parameterized synthetic workloads:. We gener-ated synthetic dense matrices skewed via a Zipfian distribu-tion ( 𝑠 = 0.25 , 0.5), replicating scenarios where tokens are dynamically routed to 1, 2, 4, or 8 experts. Token counts and payload sizes are parameterized directly from the DeepSeek-V3 architecture [12]. 
+
+Baselines. We evaluate our proposed rate-based scheduler against a baseline denoted Round-Robin with Congestion Con-trol (RR-NSCC) using the htsim simulator. The core differ-ence lies in how packets are queued and scheduled at the host: (1) under our proposed approach, each flow is assigned a specific, calculated transmission rate that dictates its pac-ing; (2) under the RR-NSCC baseline, flows are allowed to inject up to two packets into a shared NIC queue. Then, this shared queue employs a fairness mechanism that cyclically selects and transmits a single packet from each active flow in a round-robin order (default htsim behavior). 
+
+Collected workload. The macro evaluation results demon-strate a distinct advantage for our proposed rate-based fair scheduling framework in reducing the overall workload com-pletion time. Below, we analyze these performance gains  
+
+> 5E. Cohen et al.
+
+Figure 3: CCT inflation compared to an ideal lower bound (constant 100% link utilization) under heavily skewed Zipf distributions 𝑠 = 0.25 (left) and 𝑠 = 0.5 (right), evaluated across OPS, REPS, and AR routing configurations. 
+
+Figure 4: The queue-utilization trade-off: reactive NSCC over-corrects, dropping link utilization below 100% during active transmission and inflating CCT. Rate-based scheduling maintains full utilization. 
+
+across both real-world and synthetic traffic matrices, while illustrating the underlying network-level trade-offs. 
+
+Real-world MoE traces. We first evaluate our framework using real-world MoE traces. Specifically, we analyze ap-proximately 80 real-world MoE routing traffic matrices of size 64 × 64 . As illustrated in Fig. 2 (left), our rate-based ap-proach yields a pronounced and consistent reduction in CCT compared to the state-of-the-art RR-NSCC baseline. When scaling the network size to 128 × 128 (Fig. 2, right), our frame-work continues to outperform RR-NSCC, though the relative performance improvement is slightly less pronounced than in the 64 × 64 scenarios. This marginal narrowing of the gap is primarily attributed to a limitation in our empirical dataset; we had access to only a single, isolated traffic matrix for the 128 × 128 scale, making this specific data point less statistically representative of the broader workload distribu-tion. Nonetheless, the consistent advantage highlights the robustness of our approach on real-world workloads. 
+
+Sensitivity to skewness and number of nodes. To rigor-ously assess our framework under extreme and varied traffic conditions, we evaluated its performance using synthetic traffic matrices modeled after DeepSeek-style MoE patterns. As shown in Fig. 3, our rate-based scheduler delivers a clear and systematic advantage across all evaluated network sizes (ranging from 64 × 64 up to 512 × 512 nodes) and across all tested Zipf skewness factors ( 𝑠 = 0.5 and 𝑠 = 0.25 ). Even under severe skewness, our balanced allocation prevents the exponential incast that cripples standard Round-Robin scheduling, demonstrating that the theoretical design scales robustly with the network fabric. 
+
+The queue-utilization trade-off. To validate the physical mechanism driving these performance gains, we analyzed the link utilization over time using the real-world MoE 64 ×64 
+
+routing matrix. The results in Fig. 4 strongly corroborate our core theoretical premise. While the reactive NSCC baseline successfully prevents catastrophic buffer overflows by cap-ping queue occupancy, it does so at a steep cost: the reactive throttling heavily over-corrects, dropping link utilization significantly below 100% for extensive intervals during the active simulation phase. This transient starvation of the fab-ric’s bandwidth directly inflates the overall CCT. In sharp contrast, our rate-based scheduling framework maintains a near-perfect, consistently high utilization profile through-out the active transmission window, proving that proactive, fair rate computation eliminates the need for destructive, reactive throttling cycles. 
+
+## 7 Impact on Future Network Architectures 
+
+The shift from reactive, heuristic-based network scheduling to a proactive, proportional rate-allocation framework intro-duces several significant changes for large-scale AI fabrics. 
+
+Redefining the role of transport-layer congestion con-trol. Historically, data center networking has relied heavily on complex reactive transport-layer protocols (e.g., DCQCN, HPCC, or the emerging UEC NSCC standard) to handle traf-fic bursts. Our method suggests a paradigm shift: by pre-normalizing the traffic matrix at the application layer rela-tive to the physical capacity of the bottlenecks, the network fabric becomes inherently collision-free. This could signifi-cantly simplify the need for aggressive, fine-grained hard-ware congestion loops, reducing the computational overhead 
+
+> 6
+
+Incast-Free MoE Rate-Based Scheduling 
+
+and silicon real estate devoted to packet-throttling logic on future NICs and switches. 
+
+Enabling asymmetric and heterogeneous AI clusters. 
+
+Current distributed platforms typically assume homoge-neous hardware clusters (identical servers and NICs) to pre-vent slower paths from stalling the global synchronization barrier. Because our normalization scaling factor 𝑀 dynami-cally scales by worst-case demands, the algorithm can easily adapt to asymmetric NIC capacities. Future clusters could safely mix older 200 Gbps servers with newer 400 Gbps/800 Gbps server models, or feature unbalanced expert place-ments; our scheduling matrix would naturally compute op-timal proportional rates that ensure the slower hardware never creates an accidental incast bottleneck. 
+
+Mitigating the cost and tail-latency of buffer bloat. As network speeds scale to 1,600 Gbps and beyond, building high-speed on-chip switch buffers becomes prohibitively expensive and physically limited by silicon scaling. The ex-ponential incast highlighted above demonstrates that tradi-tional scheduling fills these buffers rapidly, leading to tail-latency degradation. By pacing flows proportionally so that the normalized ingress rate never exceeds 1, our algorithm significantly reduces switch queue depths. This could allow future data center switches to be designed with significantly smaller buffers, driving down the overall capital expenditure and power envelope of next-generation network hardware. 
+
+## References 
+
+[1] [n. d.]. Megatron-DeepSpeed. https://github.com/microsoft/Megatron-DeepSpeed. [2] 2025. htsim fork . https://github.com/smcclure20/csg-htsim [3] 2026. NVIDIA Collective Communications Library (NCCL). https: //developer.nvidia.com/nccl. [4] 2026. ROCm Communication Collectives Library (RCCL). https: //github.com/ROCm/rccl. [5] 2026. Ultra Ethernet Consortium. https://ultraethernet.org/. [6] Hamdy Abdelkhalik, Yehia Arafa, Nandakishore Santhi, and Abdel-Hameed Badawy. 2022. Demystifying the Nvidia Ampere Architecture through Microbenchmarking and Instruction-level Analysis. In arXiv preprint arXiv:2208.11174 .[7] D. Abts and J. Kim. 2022. High Performance Datacenter Networks .Springer International Publishing. [8] Garrett Birkhoff. 1946. Three observations on linear algebra. Uni-versidad Nacional de Tucumán. Revista. Serie A: Matemáticas y Física Teórica 5 (1946), 147–151. [9] T. Bonato, A. Kabbani, A. Ghalayini, M. Papamichael, M. Dohadwala, L. Gianinazzi, M. Khalilov, E. Achermann, D. D. Sensi, and T. Hoefler. 2025. 
+
+REPS: Recycled entropy packet spraying for adaptive load balancing and failure mitigation . arXiv:2407.21625 [cs.NI] https://arxiv.org/abs/2407 .21625 [10] ByteDance / Volcengine. 2026. veScale: Volcengine e-commerce Scale LLM Training Framework. https://github.com/volcengine/veScale. Accessed: July 2026. [11] Ultra Ethernet Consortium. 2026. Ultra Ethernet Specification v1.0.2. https://ultraethernet.org/wp-content/uploads/sites/20/2026/01/UE-Specification-1.0.2-1.pdf. [12] DeepSeek-AI. 2026. DeepEP: High-Performance MoE Communication Library. https://github.com/deepseek-ai/DeepEP. [13] A. Dixit, P. Prakash, Y. C. Hu, and R. R. Kompella. 2013. On the impact of packet spraying in data center networks. In IEEE INFOCOM .2130–2138. [14] Adithya Gangidi, Rui Miao, Shengbao Zheng, Sai Jayesh Bondu, Guilherme Goes, Hany Morsy, Rohit Puri, Mohammad Riftadi, Ashmitha Jeevaraj Shetty, Jingyi Yang, et al . 2024. RDMA over Ethernet for distributed training at Meta scale. In ACM SIGCOMM . 57–70. [15] Barak Gerstein, Mark Silberstein, and Isaac Keslassy. 2025. Making congestion control robust to per-packet load balancing in datacenters. https://arxiv.org/abs/2509.07907 arXiv:2509.07907. [16] J. Hu, J. Huang, W. Lv, Y. Zhou, J. Wang, and T. He. 2019. CAPS: Coding-based adaptive packet spraying to reduce flow completion time in data center. IEEE/ACM Transactions on Networking 27, 6 (2019), 2338–2353. [17] Albert Q Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch, Blanche Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Emma Bou Hanna, Florian Bressand, et al . 2024. Mixtral of experts. arXiv preprint arXiv:2401.04088 (2024). [18] Zewen Jin, Shengnan Wang, Jiaan Zhu, Hongrui Zhan, Youhui Bai, Lin Zhang, Zhenyu Ming, and Cheng Li. 2025. BigMac: A Communication-Efficient Mixture-of-Experts Model Structure for Fast Training and Inference. arXiv:2502.16927 [cs.LG] https://arxiv.org/abs/2502.16927 [19] Y. Le, R. Pan, P. Newman, J. Blendin, A. Kabbani, V. Jain, R. Sivaramu, and F. Matus. 2024. STrack: A reliable multipath transport for ai/ml clusters. arXiv preprint arXiv:2407.15266 (2024). [20] Yiran Lei, Dongjoo Lee, Liangyu Zhao, Daniar Kurniawan, Chan-myeong Kim, Heetaek block Jeong, Changsu Kim, Hyeonseong Choi, Liangcheng Yu, Arvind Krishnamurthy, Justine Sherry, and Eriko Nurvitadhi. 2026. FAST: An Efficient Scheduler for All-to-All GPU Communication. In Proceedings of the 23rd USENIX Symposium on Networked Systems Design and Implementation (NSDI 26) . USENIX Association, 2515–2531. [21] Xudong Liao, Yijun Sun, Han Tian, Xinchen Wan, Yilun Jin, Zilong Wang, Zhenghang Ren, Xinyang Huang, Wenxue Li, Kin Fai Tse, et al .2025. MixNet: A Runtime Reconfigurable Optical-Electrical Fabric for Distributed Mixture-of-Experts Training. In ACM SIGCOMM . 554–574. [22] Xinyi Liu, Yujie Wang, Fangcheng Fu, Xupeng Miao, Shenhan Zhu, Xiaonan Nie, and Bin Cui. 2025. NetMoE: Accelerating MoE training through dynamic sample placement. In ICML .[23] J. Lu, J. Gao, F. Feng, Z. He, M. Zheng, K. Liu, J. He, B. Liao, S. Xu, K. Sun, et al . 2025. Alibaba Stellar: A new generation RDMA network for cloud AI. In ACM SIGCOMM . 453–466. [24] NVIDIA. 2023. NVIDIA InfiniBand Adaptive Routing Technol-ogy—Accelerating HPC and AI Applications. https://www.amax .com/content/files/2023/12/NVIDIA-InfiniBand-Adaptive-Routing-Technology-Insights-Whitepaper.pdf. [25] NVIDIA. 2024. NVIDIA Spectrum-X Network Platform Architecture. https://resources.nvidia.com/en-us-networking-ai/nvidia-spectrum-x. [26] NVIDIA. 2026. Megatron-LM: Training Large Language Models with Model Parallelism. https://github.com/NVIDIA/Megatron- LM. Accessed: July 2026. [27] NVIDIA Corporation. 2026. CUDA C++ Programming Guide (Release 13.3) . NVIDIA Corporation. Published: June 25, 2026. [28] NVIDIA Corporation. 2026. NVIDIA DOCA Software Framework Docu-mentation . NVIDIA. https://docs.nvidia.com/doca/ Accessed: July 2026. [29] NVIDIA Corporation. 2026. NVIDIA NVLink and NVLink Switch. https://www.nvidia.com/en-eu/data-center/nvlink/. 7E. Cohen et al. 
+
+[30] Sundararajan Renganathan and Nick McKeown. 2025. Chronos: Prescheduled circuit switching for LLM training. In Proceedings of the 2nd Workshop on Networks for AI Computing . ACM, 89–97. [31] P. Rizk. 2023. Turbocharging Generative AI Workloads with NVIDIA Spectrum-X Networking Platform. https://developer.nvidia.com/blog/ turbocharging-ai-workloads-with-nvidia-spectrum-x-networking-platform/. [32] Chenchen Shou, Guyue Liu, Hao Nie, Huaiyu Meng, Yu Zhou, Yimin Jiang, Wenqing Lv, Yelong Xu, Yuanwei Lu, Zhang Chen, et al . 2025. InfiniteHBD: Building datacenter-scale high-bandwidth domain for LLM with optical circuit switching transceivers. In ACM SIGCOMM .1–23. [33] Ultra Ethernet Consortium. 2025. Ultra Ethernet Specification. https: //ultraethernet.org/. [34] Ultra Ethernet Consortium. 2025. Ultra Ethernet ™ Specification v1.0. https://ultraethernet.org/wp-content/uploads/sites/20/2025/06/UE-Specification-6.11.25.pdf. [35] M. Voloshin. 2023. Introduction to Congestion Control for RoCE . Tech. Rep. Broadcom Inc. https://docs.broadcom.com/doc/NCC-WP1XX [36] John von Neumann. 1953. A certain zero-sum two-person game equiv-alent to the optimal assignment problem. In Contributions to the Theory of Games (AM-28), Volume II . Princeton University Press, 5–12. [37] Yen-Chieh Wu, Cheng-Shang Chang, Duan-Shin Lee, and H Jonathan Chao. 2026. Dynamic Hierarchical Birkhoff-von Neumann De-composition for All-to-All GPU Communication. arXiv preprint arXiv:2602.22756 (2026). [38] J. Zhang, D. Zhang, and K. Huang. 2015. Improving datacenter through-put and robustness with Lazy TCP over packet spraying. Computer Communications 62 (2015), 23–33. 8

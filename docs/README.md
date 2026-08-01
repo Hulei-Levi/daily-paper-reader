@@ -6,29 +6,29 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-31
-- 运行时间：2026-07-31 21:23:21 UTC
+- 最新运行日期：2026-08-01
+- 运行时间：2026-08-01 20:05:13 UTC
 - 运行状态：成功
 - 本次总论文数：2
-- 精读区：2
-- 速读区：0
+- 精读区：0
+- 速读区：2
 
 ### 今日简报（AI）
-今日精读2篇高分论文，聚焦稀疏混合专家（MoE）路由机制的优化与多模态融合应用。  
-最值得关注的方向：一是提出基于条件模态风险的可信路由（TIER-MoE），提升生物医学分类可靠性；二是揭示路由中“相干重叠”比几何互补性更关键，为稀疏MoE设计提供新视角。  
-建议普通读者优先理解“路由决策如何影响专家协作”，后续可关注这两项方法在更广任务上的泛化验证。
-- 详情：[/202607/31/README](/202607/31/README)
+今日速读2篇论文，聚焦食品图像分割与MoE网络调度。  
+最值得关注的是DishSeg24k基准（7.0分），提供大规模食品分割数据与随机专家解码方法。  
+建议优先了解该基准的实用价值；对系统优化感兴趣者可关注Incast-Free调度（6.0分）。
+- 详情：[/202608/01/README](/202608/01/README)
 
 ### 精读区论文标签
-1. [TIER-MoE: Trust-Informed Expert Routing via Conditional Modality Risk for Multimodal Fusion in Biomedical Classification](/202607/31/2607.27289v1-tier-moe-trust-informed-expert-routing-via-conditional-modality-risk-for-multimodal-fusion-in-biomedical-classification)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：针对模态风险的专家路由机制与专家专门化
-2. [Beyond Geometric Complementarity: Coherent Overlap in Sparse Mixture-of-Experts Routing](/202607/31/2607.28308v1-beyond-geometric-complementarity-coherent-overlap-in-sparse-mixture-of-experts-routing)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：直接研究稀疏MoE中的专家专业化和路由一致性，提出专家子空间分离指数
+- 本次无精读推荐。
 
 ### 速读区论文标签
-- 本次无速读推荐。
+1. [DishSeg24k: A Large-Scale Benchmark for Food Segmentation with Stochastic Expert Decoding](/202608/01/2607.23070v1-dishseg24k-a-large-scale-benchmark-for-food-segmentation-with-stochastic-expert-decoding)  
+   标签：评分：7.0/10、query:moe-special
+   evidence：随机专家解码为查询式分割动态选择专家
+2. [Incast-Free MoE Rate-Based Scheduling](/202608/01/2607.26340v1-incast-free-moe-rate-based-scheduling)  
+   标签：评分：6.0/10、query:moe-special
+   evidence：针对MoE工作负载的调度框架，缓解路由带来的网络瓶颈
 
 
 <div class="dpr-home-promo-card">
