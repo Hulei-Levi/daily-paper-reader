@@ -1,0 +1,609 @@
+Title: From Expert Reduction to Behavioral Divergence: Tracing Numerical State through Sparse MoE Inference
+
+URL Source: https://arxiv.org/pdf/2607.28097v1
+
+Published Time: Fri, 31 Jul 2026 00:57:32 GMT
+
+Number of Pages: 32
+
+Markdown Content:
+# From Expert Reduction to Behavioral Divergence: Tracing Numerical State through Sparse MoE Inference 
+
+Tianyang Zhu 
+
+Independent Researcher 
+
+zty749@gmail.com 
+
+Abstract 
+
+Mathematically equivalent expert-reduction orders can produce observably different sparse-MoE executions. We isolate this effect in native DeepSeek-V4-Flash by freezing local MoE state and varying only aggregation semantics. Four schemes separate operand rep-resentation from accumulator precision. At one layer-5 fork, 720 A-mode orders yield 10 continuation basins; 720 B-mode orders form 360 exact structural classes and 11 basins. Un-der one Chinese prompt, the B classes split into 202 layoffs, 113 hiring, and 45 other contin-uations. Under maximum-L∞ B-branch selection, a 50-prompt exploratory breadth study finds cumulative text separation in 12, 24, and 36 prompts by 8, 16, and 32 tokens. Across the persistent trajectories, P32, A, and B change all 192 native-reference route trajectories per scheme; C preserves routes, token sequences, and texts. A separate 192-trajectory C check matches native MoE, post-mHC, next-router, and LM states bitwise. For one controlled B branch, exact post-mHC endpoint reconstruction reproduces the measured downstream tra-jectory. A complementary decode-boundary intervention reconstructs the branch ’s com-plete attention-persistent state (hereafter, full persistent state) from production using an exact FP64 additive delta. With the naturally generated next input unchanged, 301 down-stream post-mHC states, 301 full persistent state checkpoints, and 301 routes agree exactly over seven decode steps, as do predictions and text. These controls identify post-mHC as an intra-token state boundary and full persistent state as a cross-token continuation boundary. Identical emitted tokens need not imply identical autoregressive execution state: divergence can survive a token boundary and become visible later. Expert operand conversion, accu-mulator precision, and reduction order should form the numerical compatibility contract for sparse-MoE runtimes and hardware backends, not interchangeable kernel details. The re-sults establish controlled causal possibility, not deployment incidence; C ’s order invariance is limited to evaluated six-term states and schedules. 
+
+Keywords: sparse mixture of experts; floating-point reduction; numerical reproducibility; de-terministic inference; runtime conformance; persistent-state conformance 
+
+# 1 Introduction 
+
+Sparse MoE models reduce inference cost by routing each token to a small subset of experts. For a selected set of experts, the routed output is a weighted sum of expert contributions. The mathematical expression is permutation-invariant, but its floating-point implementation is not: different reduction orders can produce different finite-precision states even when the operands and gates are identical. In a static feed-forward network, a small numerical difference may remain behaviorally irrel-evant. A dynamic MoE decoder adds two discrete decision boundaries. The perturbed hidden state is consumed by later routers, whose top-k selection can change when a score margin is 1arXiv:2607.28097v1 [cs.LG] 30 Jul 2026 crossed. The resulting expert subgraph then feeds autoregressive greedy decoding, where a small logit difference can change the next token and all subsequent states. Thus, the reduc-tion order of an expert aggregation is not necessarily a low-level implementation detail: it can become a hidden part of the model ’s execution semantics. Autoregressive execution also contains a persistent state boundary distinct from both rout-ing and token selection. Even when two executions produce the same greedy token, numerical differences generated earlier in the forward pass can be written into layer-wise attention state and survive into later decode steps. The next token then starts from the same token embedding but consumes a different persistent execution state. This creates a mechanism for delayed out-put divergence: internal trajectories can remain different for several decode steps before their logit differences cross an argmax boundary. Consequently, backends that implement identical model graphs and weights but differ in expert operand conversion, accumulator precision, or reduction topology need not be behav-iorally compatible. Sparse-MoE backend qualification should therefore test not only final-token agreement but also persistent, layer-state, and routing conformance at internal state boundaries. This paper addresses three research questions: • RQ1 —Reduction semantics and behavioral basins. How do different same-mode re-duction orders produce numerical, route, and continuation bifurcations? Event direction, horizon-dependent breadth, and deterministic replay provide complementary evidence for this question. • RQ2 —Precision contract and compatibility. How do operand representation and accu-mulator precision separately affect native compatibility and order sensitivity? • RQ3 —State-boundary sufficiency and runtime conformance. Which internal state boundaries are sufficient to reproduce a controlled divergent trajectory? In particular, is the post-mHC endpoint sufficient within a decode forward, and is the full persistent state endpoint sufficient to reproduce the branch across subsequent token boundaries when the next input token is unchanged? We make three corresponding contributions: 1. We provide a trace-freeze-fork intervention that changes only expert aggregation seman-tics and maps the resulting post-mHC state space into continuation-text basins. A rep-resentative persistent trace separately observes a later routing boundary; event direction, breadth horizon, and exact replay characterize the behavioral structure of the branches. 2. We separate operand representation from accumulator precision using P32/C/A/B ab-lations and a same-mode canonical reference. C is stable over the evaluated states and schedules while preserving native-reference behavior. 3. We validate two state boundaries for one controlled branch. Exact post-mHC endpoint reconstruction reproduces the measured downstream intra-token trajectory, while exact reconstruction of the decode-boundary full persistent state reproduces the measured con-tinuation across subsequent decode steps under the same naturally generated next input token. These controls motivate a hierarchical runtime-conformance procedure spanning persistent state, layer state, routing, and operator-level execution. The scope is deliberately limited. The experiments establish that the perturbation can pro-duce routing and semantic bifurcations. They do not measure how often a real GPU, NPU, or distributed runtime naturally realizes each permutation. They also do not provide a frozen-route mediation control, an exact quantized-operand summation reference, or an end-to-end performance measurement. 22 Background, related work, and methodology 
+
+2.1 Runtime, model, and decoding protocol 
+
+All experiments use the native DeepSeek inference path in the Colibri project [15], without a Transformers reimplementation. The model name used in this paper is DeepSeek-V4-Flash 
+
+[12]. Prompts are passed as raw UTF-8 text, and decoding is greedy. We use DeepSeek-V4-Flash with the native Colibri runtime because it provides implementation-level control and direct instrumentation of expert aggregation, layer states, routing, and persistent decode state. The investigation originated from instrumentation of mHC propagation in this runtime. A useful property of the checkpoint is that each token activates six routed experts, making all 6! = 720 cross-expert reduction orders tractable for exhaustive enumeration. The project primarily supports the DSpark execution path [14]. Because the standard checkpoint is evaluated through the non-DSpark path in this study, the command-line flag 
+
+--no-dspark is required as an explicit mode switch. It selects non-DSpark execution; it does not denote a different model name. This distinction is important because DeepSeek-V4-Flash 
+
+identifies the checkpoint/model, whereas DSpark and non-DSpark identify runtime execution paths. All runs use one native-Windows CPU host. The runtime streams routed-expert weights from local storage and executes the evaluated path on the CPU. Full hardware, memory, com-piler, build-flag, affinity, and explicit-thread replay details are reported in Appendix A.2. The study uses two prompt groups. The depth cases are “why the sheep ”,“朋友昨天打来 电话” , and “Morning light filled the room ”. The breadth group contains 25 English and 25 Chinese prompts and is used only as an exploratory check that the phenomenon is not confined to one prompt. Persistent trajectories generate eight tokens. For each prompt and request seed, a deter-ministic layer-static permutation is selected independently for each MoE layer and then reused throughout that request. The four aggregation schemes share the same prompt, request seed, experiment seed, and layer-by-layer schedule. Thus 3 prompts × 64 request seeds define 192 paired prompt-schedule conditions, each evaluated under four schemes: 
+
+3 prompts × 64 schedules per prompt × 4 schemes = 768 trajectories .
+
+Here a trajectory means one scheme-conditioned end-to-end eight-token greedy continua-tion with its route and text records, not one independent permutation or one token. All 768 can-didate rows completed successfully and report eight generated tokens. The three production-reference baselines, one per prompt, are comparison runs and are not included in 768; counting them gives 771 native runs for the persistent protocol. 
+
+2.2 Background and execution semantics 
+
+2.2.1 Sparse MoE execution 
+
+The tested checkpoint routes each token to six routed experts and includes one shared expert. For selected expert i, let Ei(x) denote its expert output and gi its router gate. The routed contri-bution is 
+
+vi = giEi(x).
+
+3The routed contributions are reduced into a routed MoE output, after which the shared-expert output is merged. The resulting MoE output is passed to the rest of the block and is therefore part of the hidden-state trajectory, not a terminal statistic. 
+
+2.2.2 mHC propagation, persistent state, and decision boundaries 
+
+Within one decode forward, the mHC state carries the effect of an MoE perturbation into later layers. At attention boundaries, the resulting layer-wise states also update persistent execution state that is reused by later decode steps. This distinguishes three boundary types: 1. Latent state boundary: post-mHC state within the current forward. 2. Persistent state boundary: attention state retained across decode steps. 3. Decision boundaries: router top-k selection and LM-head argmax. A perturbation can cross the first two boundaries without crossing the token decision bound-ary. Thus identical emitted tokens do not imply identical persistent execution states. A route difference is also not automatically a token or semantic difference. 
+
+2.2.3 Native reference aggregation path 
+
+The controlled probe makes the rounding points explicit. The captured gate-weighted terms are represented as FP32 software values vi; their BF16 roundings are denoted by ̂ vi = RBF16 (vi).Gate multiplication occurs before this controlled term-rounding step. The routed reduction is accumulated in an FP32 container, with scheme-specific rounding after each addition. The shared-expert forward path returns a BF16-rounded output, which is added only af-ter the routed sum. All four controlled schemes merge the same shared operand in the same fixed order, and the final merged output is converted with the runtime’s BF16 rounding opera-tion. Thus, the schemes vary only the routed-term and routed-accumulator semantics specified below. The runtime implements R_BF16 in software. For finite FP32 values it adds the bit-level bias 0x7fff+lsb_retained and clears the low 16 mantissa bits, which is round-to-nearest, ties-to-even; this conversion does not depend on the host floating-point rounding mode. NaN and infinity skip the finite-value bias and have their low 16 bits cleared. FP32 accumulation uses componentwise C float additions in the compiled native path. The cross-expert recurrence con-tains a standalone addition, so it has no cross-term fused multiply-add; gate multiplication has already occurred before the captured term. The tested build uses -O3-march=x86-64-v3 and does not use -ffast-math . FTZ/DAZ is not explicitly configured or recorded, and subnormal incidence was not instrumented. The structural B proof below is consequently restricted to the observed finite, non-NaN/non-infinite operands and the stated software BF16 rounding rule. 
+
+2.2.4 Measurement hierarchy 
+
+We report five layers of equivalence: 1. Operator/local numerical state: MoE aggregation output and related intermediates. 2. Layer state: post-attention and post-mHC states where instrumented. 3. Persistent state: full persistent state at a decode boundary. 44. Discrete behavior: router selections and greedy token IDs. 5. Semantic behavior: continuation text and event direction. Different internal routes can retain the same argmax token or later reconverge. Basin propor-tions are measured under the experimental permutation or seed measure; they are not normal model posterior probabilities and do not estimate real runtime incidence. 
+
+2.3 Related work 
+
+Recent LLM-inference studies show that numerically different execution environments can yield different outputs even under nominally deterministic decoding. Yuan et al. identify batch size, GPU count and version, and numerical precision as sources of inference nondeterminism [1]. Chodavarapu and Xu show that KV-cached and cache-free autoregressive paths can diverge because they realize different low-precision accumulation paths [2]. That result moti-vates attention to cross-token state. Our controlled experiment asks a complementary question: after a locally isolated expert-reduction fork, can the branch continuation be reconstructed solely by restoring the full persistent state endpoint while leaving subsequent execution unmodified? We use direct endpoint reconstruction rather than infer persistence only from cache-on/cache-off behavioral differences. At the software-system level, CRADLE compares multiple framework backends and localizes propagated inconsistencies [8], while NNSmith uses differential testing against reference backends to find deep-learning compiler bugs [9]. These works motivate cross-environment auditing, but do not isolate cross-expert permutation while holding a local MoE state fixed. For MoE models, MoQE studies the interaction between expert robustness and low-bit quan-tization [3], while value-and-structure alignment explicitly targets quantization-induced top-k routing changes [4]. This literature establishes that small numerical perturbations can interact with sparse routing. Distributed MoE systems additionally make expert dispatch and com-bine first-class runtime operations: DeepSpeed-MoE develops optimized inference and expert-parallel execution [10], and DeepEP supplies low-precision all-to-all dispatch/combine kernels [11]. Our intervention asks a narrower complementary question: with the selected experts, gates, expert outputs, shared output, and prefix state held fixed, how much behavior can be attributed to permutation-equivalent cross-expert reduction semantics alone? A separate numerical-computing literature develops reproducible or exact summation through fixed accumulators, superaccumulators, and deterministic parallel reductions [5, 6, 7]. We do not propose an exact summation algorithm. Instead, P32/C/A/B expose which operand and accumulator contract matches the native reference, and the B quotient removes a provable first-pair symmetry before branch enumeration. The contribution is therefore a controlled link from reduction semantics to MoE state, later routing where measured, and greedy continuation, rather than a new general-purpose reduction primitive. The evaluated checkpoint and state boundary follow the DeepSeek-V4 technical report [12] and the mHC architecture introduced by Xie et al. [13]. DSpark is a speculative-decoding system [14], not a model variant; the experiments use the checkpoint through Colibri’s native non-DSpark execution path [15]. These sources define the model and software context, whereas the present work studies the numerical semantics of one runtime’s cross-expert combine. 52.4 Experimental protocols 
+
+2.4.1 Single-layer trace-freeze-fork protocol 
+
+At the selected MoE position, the prompt prefix, token position, fork layer, selected expert IDs, gate values, six weighted expert terms, shared-expert output, and full persistent state are held fixed. Only the permutation or aggregation scheme at that one MoE aggregation changes. After the fork, downstream mHC propagation, attention, routing, and greedy decoding evolve nor-mally. This protocol is used for the “why the sheep ”study, the Chinese event-direction study, and the A/B permutation and equivalence-class studies. For a permutation π, the routed aggregation is evaluated as 
+
+a0 = +0 ,aj+1 = Accumulate (aj , v πj
+
+) .
+
+2.4.2 Post-mHC state-substitution control 
+
+To test whether the downstream effect of the single-layer reduction intervention is fully captured by its post-mHC endpoint, we use one already catalogued “why the sheep ”scheme-B class (class 135) at layer 5. At the fork, both the unmodified native-reference (production) post-mHC state HP and the selected B post-mHC state HB are captured after the normal BF16 round trip, and the endpoint perturbation is defined as 
+
+∆H = HB − HP .
+
+In a second process, reduction probing and forking are disabled. The runtime follows the native-reference path and performs a literal FP32 H_P += ∆H once, after FFN hc_post and its BF16 round trip at the identical layer and decode position. Before addition, the runtime requires the native-reference state to match the captured HP bitwise; after addition, it requires the reconstructed state to match HB bitwise. It does not copy HB over the result. The decode-only fork occurs while consuming the first emitted token (token 477, position 3), not before that token is emitted from the prompt-prefill state. We generate nine driver tokens so that the first eight emitted tokens are each processed by a decode forward. From the injection boundary onward we compare every post-mHC state (339 vectors of 16,384 FP32 values). We also compare all 344 router selections across the eight decode forwards, generated token IDs, and generated text. The eight processed decode inputs yield 8 × 43 = 344 route checkpoints. Because injection follows the layer-5 post-mHC endpoint of the first forward, the post-mHC comparison includes that endpoint and layers 6 –42 plus seven complete forwards: 38 + 7 ×
+
+43 = 339 checkpoints. Thus this is an endpoint state-substitution control for one single-layer branch, not a claim that an operand-level B reduction is equivalent to arbitrary hidden-state noise or that a persistent B schedule can be collapsed into one perturbation. The endpoint-gated trace does not include layers preceding the layer-5 fork in its first de-code forward. We therefore run a separate two-process pre-fork control at the same position: one process replays the B branch and the other uses probe-disabled native-reference execution. Trace mode records the post-mHC states at layers 0 –4, before either execution reaches the in-tervention boundary, and compares their metadata, FP32 bytes, maximum absolute difference, and SHA-256 fingerprints. 6Figure 1: Two complementary endpoint controls for one B class. Exact post-mHC reconstruc-tion matches the branch endpoint and downstream trajectory, establishing an intra-token state boundary. At the following decode boundary, exact FP64 additive reconstruction of the full persistent state matches the branch endpoint; under the same independently generated next in-put token, 301/301 downstream post-mHC states, 301/301 full persistent state checkpoints, and 301/301 routes agree over seven later decode steps, as do the driver predictions and generated text. The control changes the endpoint, not subsequent execution. 
+
+2.4.3 Decode-boundary persistent-state substitution control 
+
+To test how the controlled reduction-path difference survives across token boundaries, we per-form a second endpoint reconstruction on the same B class 135. The intervention is placed at the decode boundary after position 3 has completed all 43 layers. The full persistent state is all floating-point runtime state retained by the attention subsys-tem for subsequent decode steps. In the evaluated runtime it comprises window KV, active compressed KV, compressor state, and indexer state, serialized in layer order under the same logical layout. Allocation padding and pointers are excluded. The position-3 endpoint contains 5,883,008 FP32 values. Let SP and SB denote the production and B-branch endpoints. We define 
+
+∆S = SB − SP .
+
+A third process follows production through position 3 and adds ∆S to its full persistent state. Although both endpoints are FP32, subtracting them in FP32 can discard low bits needed to recover the target after subsequent addition: a literal FP32 delta reconstructs only 10/43 layer 7states bitwise. We therefore compute ∆S in FP64 from the FP32 endpoints, add in FP64, and cast the reconstructed endpoint back to its runtime FP32 representation. This recovers all 43 layer states bitwise. The runtime requires the pre-add state to match SP and the post-add state to match SB ; it does not copy SB into active state. The FP64 delta is only an exact intervention representation. It is not a compact checkpoint format, and its success does not imply that the branch endpoint contains less information than a directly stored endpoint. Given SP , the exact delta is informationally sufficient to specify SB ;the control tests endpoint sufficiency, not compression. Injection occurs after position 3 has completed, so it cannot alter that forward or its already completed prediction. Branch and production must first independently select the same next driver token; no token is forced. Starting with position 4, seven subsequent decode inputs are executed while comparing every recorded post-mHC checkpoint, full persistent state check-point, router selection, predicted token ID, and generated text. The result concerns the full persistent state, not the most recent window-KV row alone. The seven post-injection decode inputs yield 7 × 43 = 301 layer checkpoints for each post-mHC, full persistent state, and route comparison. 
+
+2.4.4 Long-form event-direction extension 
+
+For the Chinese prompt “朋友昨天打来电话” , we select ten scheme-B branches by deterministic stratified random sampling from the structural classes, using the recorded selection seed and drawing five branches from each provisional event direction. No qualitative content criterion is used to choose among eligible branches. The sampled fork is at layer 5, and each branch is extended from the original eight-token trace to 64 generated tokens. The rule-based coding used for sample selection assigned 202 classes to layoffs, 110 to hiring, and 48 to other continuations. Human consensus later corrected three other classes to hiring , yielding 202 layoffs, 113 hiring, and 45 other classes. The sample itself is a deterministic stratified sample, not an event-rate estimate. The annotation units are the six unique exact eight-token continuations, not the 360 struc-tural classes. Exact duplicate strings are collapsed before annotation, and the resulting labels are subsequently expanded to the classes by exact-text mapping through a recorded branch-to-item table. The blind form asks for hiring , layoffs , or other , where other includes indetermi-nate or incomplete continuations that do not explicitly establish either workforce direction. It omits branch IDs, branch frequencies, class multiplicities, and provisional labels. A disagree-ment would leave the consensus field blank pending adjudication; none occurred. The artifact retains two completed annotation columns but no annotator-identity or language-background metadata; we therefore do not claim that it independently verifies those attributes. 
+
+2.4.5 Persistent layer-static protocol 
+
+For each prompt and request seed, a deterministic permutation is selected independently for every MoE layer and reused at all token positions in that request. The four schemes share the prompt, request seed, experiment seed, and layer-by-layer schedule. Pairing controls the layer-wise permutation schedule, not the downstream expert operands after trajectories have diverged. After divergence, hidden states, selected experts, gates, and weighted terms are not shared. As defined in Section 2.1, the protocol has 192 paired prompt-schedule conditions and 768 scheme-conditioned eight-token trajectories. Three prompt-level native-reference baselines are additional and excluded. 82.4.6 Same-mode canonical reference protocol 
+
+The canonical reference fixes an identity permutation for each aggregation scheme and each of the three depth prompts. It separates a shift caused by changing the aggregation scheme from within-mode order sensitivity. The canonical experiment therefore contains 3 prompts ×
+
+4 schemes = 12 eight-token trajectories. 
+
+Protocol State scope Intervention scope Schedules or branches Length 
+
+Single-layer permutation One fixed to-ken/layer state One MoE aggrega-tion All A permutations / B structural classes 8 tokens Post-mHC substitution One fixed B-class endpoint One additive post-mHC perturbation B class 135 versus native reference + exact end-point delta 8 processed de-code tokens; 9driver outputs Persistent-state substi-tution Complete position-3 decode boundary across 43 layers Exact FP64 additive full-state reconstruc-tion B class 135 versus native reference + exact end-point delta 7 subsequent decode inputs; 9driver outputs Event-direction extension One fixed Chinese fork One MoE aggrega-tion 10 selected B classes 64 tokens Persistent in-tervention Full request Every MoE layer 64 seeds/prompt; 192 paired prompt-schedules × 4 schemes 8 tokens Canonical reference Full request Every MoE layer Identity order 8 tokens 
+
+2.4.7 Prompt and fork selection status 
+
+The depth prompts and layer-5 fork are exploratory discovery cases; no prospective prereg-istration or held-out selection record exists for them. Layer 5 is hard-coded uniformly in the single-layer and breadth scripts and was not optimized separately for each prompt. FORK_ TOKEN=-1 means the first eligible decode-only event is selected at runtime, not that a token ID was chosen in advance. The native logs report fork token IDs 477 for “why the sheep ”and 303 for “朋友昨天打来电话” . Persistent and canonical experiments have no local fork because they apply their schedule at every MoE layer. 
+
+Prompt set Source and status Single-layer fork Persistent/canonical use 
+
+“why the sheep ” Exploratory depth case Layer 5; logged fork to-ken 477 Included; no local fork 
+
+“朋友昨天打来电话” Catalog ID 41; ex-ploratory depth/event case Layer 5; logged fork to-ken 303 Included; no local fork 
+
+“Morning light filled the room ”
+
+Catalog ID 4; ex-ploratory depth case Not used Included; no local fork 50-prompt breadth set Fixed prompt_ breadth_50.tsv ; ex-ploratory Layer 5; first eligible decode-only event; inject maximum-L∞ Bbranch Not used 
+
+The breadth file was fixed as the batch input before the run and contains 25 English and 25 Chinese prompts: 40 ordinary natural prompts and 10 specially constructed sensitivity can-didates. The script validates this composition, uses experiment seed 20260722, performs no 9adaptive prompt substitutions, and enumerates 360 B structural classes at each captured state before injecting the maximum-L∞ branch. The bilingual subsets were not matched by token count, so language counts are descriptive rather than a controlled cross-language comparison. 
+
+2.5 Four aggregation schemes 
+
+Let vi = gi Ei(x), let ̂ vi = RBF16 (vi), and let RFP32 denote the FP32 container update used by the controlled probe. For a permutation π, the four schemes are:                 
+
+> Scheme Expert operand Cross-expert accumula-tor Purpose
+> P32 FP32 terms FP32 Counterfactual higher-operand-precision control CBF16-rounded terms, exactly promoted to FP32 FP32 Native-like operands with protected accumu-lation AFP32 terms BF16 round after every addition Accumulator-precision control BBF16-rounded terms BF16 round after every term and addition BF16-native aggregation control
+
+More explicitly, with a zero initial accumulator: P32 : a0 = +0 FP32 , aj+1 = RFP32 
+
+(aj + vπj
+
+) ,
+
+C : a0 = +0 FP32 , aj+1 = RFP32 
+
+(aj + FP32 (̂ vπj )) ,
+
+A : a0 = +0 BF16 , aj+1 = RBF16 
+
+(FP32 (aj ) + vπj
+
+) ,
+
+B : a0 = +0 BF16 , aj+1 = RBF16 
+
+(FP32 (aj ) + FP32 (̂ vπj )) .
+
+The distinction between P32 and C is essential. C does not preserve the original FP32 expert terms; it first rounds each term to BF16 and then represents that BF16 value exactly in FP32 for accumulation. Scheme C is not introduced as a new exact-summation algorithm. It specifies a BF16-operand/FP32-accumulator execution contract that matches the native reference path over all evaluated states. Let s denote the shared-expert output returned by the native forward path; s is already BF16-rounded and represented exactly in the FP32 software container. Every scheme applies the same shared-expert merge after the routed reduction: 
+
+ym = RBF16 (am 
+
+> 6
+
++ FP32 (s)) , m ∈ { P32 , C, A, B}.
+
+The B implementation redundantly applies RBF16 to s before this merge. Because s is already BF16-rounded, that operation is bitwise idempotent and does not change the shared operand. The equations specify the controlled probe contract rather than a universal hardware floating-point semantics. 
+
+2.6 Single-layer permutation and equivalence classes 
+
+The single-layer intervention enumerates all 720 permutations for A. For B, the 720 raw per-mutations contain a structural symmetry. If the BF16-rounded terms are x1, . . . , x 6 and x ⊕ y
+
+denotes BF16-rounded addition, then 10 0 ⊕ xi = xi.
+
+and 
+
+xi ⊕ xj = xj ⊕ xi.
+
+Consequently, swapping the first two operands leaves the second-step accumulator bitwise unchanged, after which the suffix is identical. Under the tested finite operands, fixed BF16 rounding, componentwise addition, zero initialization, and no NaN/Inf or special signed-zero classification, B therefore has 720 / 2 = 360 exact structural equivalence classes. The experiment reports raw permutation count, structural class count, and observed unique MoE outputs sepa-rately. The class-weighted and raw-permutation-weighted basin proportions coincide because each class contains exactly two raw permutations and no additional collisions were observed. 
+
+2.7 Native reference and same-mode canonical references 
+
+We use two references for different questions. The native reference Y_ref tests whether a replay preserves the behavior of the unmodified reference path. The same-mode canonical reference Y_(m, π0) fixes an identity permutation π0 for each aggregation scheme m. Within-mode order sensitivity is measured as 
+
+Dorder (m, π ) = D(Ym,π , Y m,π 0 ) .
+
+This separates a shift caused by changing the aggregation scheme from a shift caused by changing the order within that scheme. 
+
+2.8 Reproducibility and artifact scope 
+
+The artifact includes scripts, raw-result indices, derived support tables, annotation records, and hash-based replay manifests; Appendix A provides the complete index. The runtime records prompt IDs, modes, seeds, layer schedules, route traces, token IDs and hashes, generated text, exit codes, and log paths. The replay manifest additionally fixes the explicit thread configuration and records runtime, checkpoint, tokenizer, compiler, host, and affinity metadata. Raw logs, complete tensors, route traces, and model files remain external to the paper-facing support set. Ordered token IDs are authoritative for continuation equality. Generated text is parsed as a marker-delimited multi-line record: an earlier single-line extractor truncated embedded new-lines and undercounted extended-breadth text separation. The corrected Python analysis also joins staged runs by stable prompt ID so repeated later-horizon rows are not counted as new events. The breadth protocol disables direct next-router comparison and is consequently re-ported as post-mHC and text separation, not route divergence. 
+
+# 3 Results 
+
+3.1 Native-reference replay correctness 
+
+The native-reference replay check covers 13 prompts. Every replay preserves the reference route trajectory, greedy token sequence, and generated text, with c_moe_max_abs = 0. This estab-11 lishes that later differences are not caused by a broken prompt or replay harness. The unmodi-fied native reference is therefore checked before interpreting any aggregation perturbation. 
+
+3.2 A single reduction intervention creates state-to-text basins 
+
+In the “why the sheep ”single-layer experiment, A enumerates 720 raw permutations and pro-duces 10 distinct continuation texts. B covers 720 raw permutations through 360 exact structural classes and produces 11 distinct texts. Every evaluated branch yields a post-mHC state differ-ent from the native reference: 720/720 A permutations and 360/360 B structural classes, with the same number of distinct post-mHC states. Direct next-router comparison was disabled in these sweeps, so this experiment does not assign a route-divergence label to every branch. The large numerical branch space nevertheless compresses into a much smaller set of text basins.                
+
+> Scheme Raw permutations Exact structural classes Distinct MoE outputs Distinct post-mHC states Distinct texts
+> A720 720 720 720 10 B720 360 360 360 11
+
+Formally, for a branch set Π_m and a text map f: Π_m → T, the basin of text t is B_t = f￿¹(t), and its reported volume is |B_t| under the relevant permutation or class measure. In this sweep it is specifically post-mHC-state-to-text basin compression: many distinct internal states map to the same continuation. The persistent experiment below separately measures complete route trajectories. Basin volume is not a posterior probability, a geometric volume, or an estimate of deployment frequency. 
+
+3.2.1 Representative persistent-schedule numerical-to-text propagation trace 
+
+This subsection reports a separate persistent layer-static experiment, not the layer-5 single-layer fork used in Section 3.2.2. To display the propagation chain directly, we reran one already cata-logued persistent condition: “why the sheep ”, scheme B, request seed 0. The native reference and candidate use the same prompt and checkpoint. Scheme-B reduction semantics are active at every MoE layer under the deterministic layer-static schedule already represented in the per-sistent table; this is not a post hoc schedule search. At the last prompt position (position 2), the trace captures the layer-2 MoE and mHC outputs, the layer-3 router scores and selected experts, and the first LM logits. Route and token logging then continues through all eight generated to-kens. 
+
+Stage Native reference B, seed 0 Observed difference 
+
+Layer-2 MoE output Captured FP32 vector Captured FP32 vector Not bitwise equal; max L∞ =0.0375366211 Layer-2 post-mHC state Captured FP32 vector Captured FP32 vector Not bitwise equal; max L∞ =0.0307998657 Layer-3 router top-6 {44, 93, 172, 174, 202, 225}; rank-6/7 mar-gin 0.00335884094 top-6 {44, 93, 143, 172, 174, 202}; rank-6/7 mar-gin 0.000484466553 Score max L∞ = 0.01445961; the selected-expert set changes by one entry: 143 enters and 225 leaves First-position LM logits argmax token 477; rank-1/2 margin 0.382600784 argmax token 477; rank-1/2 margin 0.446601868 Max L∞ = 0.626680374, but the first greedy token is unchanged First changed generated to-ken ordinal 5: token 11885 ordinal 5: token 5477 The first four generated token IDs agree; the fifth differs 
+
+12 Stage Native reference B, seed 0 Observed difference 
+
+> Eight-token continuation
+> “are not in the fold. The sheep ”“are not in the pen. The sheep ”
+> Different greedy continuation
+
+This representative trace exhibits the beginning and visible end of the propagation sequence: numerical MoE difference → post-mHC difference → later route difference →
+
+delayed token/text difference. The persistent-state reconstruction in Section 3.2.3 supplies a complementary intervention on the previously unobserved cross-token link: latent divergence 
+
+→ decode-boundary persistent-state divergence → continued latent/route divergence. These boundaries must be reported separately: the layer-3 route changes before the first LM argmax, while the greedy sequence does not separate until generated-token ordinal 5. The trace does not establish that routing is the unique causal mediator, because no frozen-route control is performed. 
+
+3.2.2 Exact post-mHC endpoint substitution reproduces the tested downstream trajectory 
+
+For “why the sheep ”B class 135, the native-reference state captured inside the probe run matches the state from the probe-disabled native-reference run bitwise at layer 5, position 3. Literal FP32 addition of the stored endpoint difference ∆H, whose maximum absolute component is 0.001953125, reconstructs the B post-mHC endpoint bitwise; the maximum reconstruction error is zero across all 16,384 values. In the separate pre-fork control, the B replay and probe-disabled native-reference replay are bitwise identical at all five preceding post-mHC checkpoints (layers 0 –4, using zero-based layer indices). Each checkpoint contains 16,384 FP32 values, all five maximum absolute differences are zero, and the paired SHA-256 fingerprints agree. This measures rather than assumes that the two executions enter the layer-5 fork from the same earlier-layer trajectory in that decode forward. After that boundary, the B-reduction run and the native-reference-plus-∆H run remain bit-wise identical for all 339 recorded post-mHC vectors spanning the rest of the first decode for-ward and seven complete subsequent decode forwards. All 344 compared router selections, all nine driver token IDs, and generated text also agree exactly. Nine outputs are used only to process eight emitted tokens; the ninth is the prediction produced after processing the eighth token.                               
+
+> Control segment Compared executions Measured coverage Result
+> Pre-fork trajectory B replay versus probe-disabled native refer-ence Position 3, layers 0–4post-mHC 5/5 vectors bitwise iden-tical; maximum L∞= 0 Intervention endpoint Captured Bendpoint versus native HP+∆H
+> Position 3, layer 5 post-mHC 16,384/16,384 FP32 val-ues bitwise identical; re-construction error = 0 Post-boundary latent trajectory B branch versus native reference + ∆H
+> Layer-5 endpoint, layers 6–42, and seven com-plete later forwards 339/339 post-mHC vec-tors bitwise identical; every maximum L∞=0Routing and visible out-puts Same pair over the com-plete measured horizon 344 route checkpoints, nine recorded driver predictions, and gener-ated text Exact agreement
+
+13 This verifies the expected state-equivalence claim for one fixed single-layer branch: once the same post-mHC endpoint is reached with the same prefix and matched full persistent state, the measured deterministic downstream execution is identical over the evaluated horizon. It does not establish equivalence for an injection at the prompt-last state before token 477, for an analytically propagated pre-round MoE delta, or for persistent B interventions that introduce new perturbations later. 
+
+3.2.3 Exact decode-boundary persistent-state reconstruction reproduces the branch contin-uation 
+
+At the decode boundary after position 3, the B-class and production full persistent endpoints differ in 131,444 of 5,883,008 FP32 values. All nonzero differences occur in the 37 downstream layers 6 –42; layers 0 –5 remain bitwise identical, and the maximum absolute component differ-ence is 1.0. This topology is consistent with the layer-5 fork occurring after that layer ’s attention state has already been committed. A literal FP32 encoding of ∆S reconstructs only 10/43 layer records bitwise. In contrast, the FP64-encoded difference reconstructs all 43 layer records bitwise. The injected runtime independently verifies exact production and branch endpoints before and after addition; the captured B endpoint is not copied into active state. The branch and production runs predict the same next driver token at this boundary, with-out forcing it. From that shared token onward, the B run and the production-plus-∆S run are bitwise identical for all 301 recorded post-mHC states and all 301 subsequent full persis-tent state checkpoints over seven decode inputs. All 301 compared router selections, all nine recorded driver predictions, and the generated text also agree. The nine predictions comprise one prompt-prefill prediction, the position-3 prediction completed before injection, and seven predictions produced by the post-injection forwards. Only the last seven fall within the inter-vention ’s causal horizon; all nine are reported as a whole-run consistency check. The un-modified production continuation differs from the branch continuation, confirming that the reconstructed trajectory is not merely the native-reference trajectory. For this branch and measured horizon, the reconstructed full persistent state endpoint is continuation-equivalent to the B endpoint at the evaluated decode boundary, conditional on the independently matching next token and deterministic execution environment. This estab-lishes endpoint sufficiency, not uniqueness of computation history: different prior computa-tions could in principle reach the same endpoint. It does not show that ∆S can change a pre-diction completed before injection, that FP32 deltas are generally reversible, or that a window-KV-only view is sufficient. 
+
+3.3 Opposing event-direction continuations 
+
+For “朋友昨天打来电话” , the B full-branch output contains 360 structural classes. The two annotation columns collected from the blind six-item form agree on all six unique continuations (6/6; Cohen ’s kappa = 1.0). Given the very small item count, kappa is reported descriptively rather than as strong statistical evidence. The six consensus labels are then expanded by exact-text mapping to the 360 classes, assigning 202 to layoffs, 113 to hiring, and 45 to other. Those mapped class rows are basin-volume accounting, not 360 independent annotation units. No disagreement required adjudication. Relative to the provisional rule, branches 95, 119, and 244 move from other to hiring . The class counts are not model probabilities or real-hardware frequencies. To test whether the direction persists beyond a short prefix, we randomly sampled five lay-offs classes and five hiring classes within their respective direction strata, using selection seed 14 20260723. Thus, the ten branches were not chosen after inspecting their long-form stories. The branch intervention remained B mode at layer 5 with the original prompt and fork settings; only the generation limit was increased from 8 to 64 tokens.                
+
+> Branch Direction Chinese continuation English translation
+> 270 layoffs ，说他们公司要裁员，他可能被裁掉，心 里很烦。我劝他，现在经济不景气，很多 公司都在裁员，你被裁了，正好可以休息 一段时间，再找新的工作。他听了我的话， 心情好多了。
+> ..., saying that his company was go-ing to lay people off and that he might lose his job. He was very upset. Iadvised him that the economy was weak and many companies were lay-ing people off; if it happened, he could take a break and then find an-other job. He felt much better after hearing this. 243 hiring ，说他们公司要招人， 问我要不要去。 我还 在考虑，毕竟现在的工作也还行，但那边 给的待遇确实不错。 “哦？什么公司？ ”“一 家做人工智能的初创公司，老板是海归， 技术挺厉害的。 ”
+> ..., saying that his company was hir-ing and asking whether I wanted to join. I was still considering it because my current job was fine, although the compensation there was attractive.
+> “What company? ”“An AI startup; the founder returned from overseas and is technically very strong. ”
+
+All ten randomly sampled branches produced 64-token continuations. Each of the five lay-offs samples retained explicit workforce-contraction language, and each of the five hiring sam-ples retained explicit workforce-expansion language. All ten continuations are textually dis-tinct; beyond the shared hiring or layoffs direction, each follows a distinct narrative develop-ment, with branch-specific dialogue, situational details, and emotional framing. Appendix B.1 reports all ten complete streamed continuations; the two bilingual rows above illustrate the ran-domly sampled set rather than additional annotation units. These branches exhibit an event-polarity bifurcation under an underdetermined prompt: the same entity and time frame receive opposite workforce-direction continuations. The six-item annotation and 10-trajectory extension support the opposing event-direction interpretation under the controlled B-class measure; they are not a large-sample semantic evaluation. 
+
+3.4 Deterministic replay of long-form branches 
+
+To exclude run-to-run nondeterminism as an explanation for long-form narrative variation, we replayed the ten stratified-random scheme-B branches twice using identical prompt, fork layer, equivalence class, reduction schedule, model checkpoint, and runtime configuration. All 20 native runs completed successfully and generated 64 tokens. Each of the ten replay pairs pro-duced an identical token-ID sequence and matching SHA-256 digest. Thus, the observed dif-ferences across long-form continuations are branch-conditioned and reproducible rather than consequences of uncontrolled decoding randomness. The comparison uses ordered token IDs and the SHA-256 hash of their canonical comma-joined sequence, which is stricter than text equality. Appendix B.2 gives the replay summary; Appendix A identifies the complete pair and environment metadata. This establishes exact replayability for the tested 64-token horizon and the ten fixed branch conditions. It does not prove invariant behavior for the full 360-class space, arbitrary future checkpoints, changed hardware, changed thread counts or compilers, cross-model branch IDs, or all longer generation lengths. 15 Figure 2: Panel a compares normalized continuation-basin rank-frequency profiles for the “why the sheep ”fork; point labels retain the exact A-permutation and B-structural-class counts. In panel b, the Chinese-prompt experiment first reduces 720 raw B permutations to 360 structural classes by the first-two-operand symmetry quotient. Alluvial widths begin only at the 360-class measure and continue through six unique eight-token strings to the final-consensus layoffs, hiring, and other volumes. Unique items are colored by their consensus labels, making the 110 + 3 = 113 hiring classes explicit. 
+
+3.5 Exploratory breadth 
+
+Across the fixed 50-prompt breadth set, every prompt has 360 distinct B post-mHC branch states and all 360 differ from the native-reference post-mHC state. Direct next-router comparison was disabled, so these 50/50 cases are post-mHC separation rather than measured route divergence. At eight tokens, at least two distinct continuation texts occur for 12/50 prompts. These cases include 6/25 English and 6/25 Chinese prompts, with 9/40 ordinary prompts and 3/10 specially constructed prompts. After deduplicating repeated later-horizon rows by prompt ID, the cumulative result for the original fixed cohort is:     
+
+> Horizon Cumulative separated
+> 8 tokens 12/50 16 tokens 24/50 32 tokens 36/50
+
+Separation is horizon dependent in this staged exploratory cohort. The increasing cumu-lative count means that a longer greedy continuation reveals differences not visible at eight tokens; it is not a per-token probability estimate or a comparison of three independent cohorts. These counts remain an exploratory breadth check, not a systematic language comparison. Ap-pendix B.3 reports stage membership, repeated rows, language/prompt-type breakdowns, and the multi-line parsing correction. Future runtime studies could estimate horizon-dependent hazards with preregistered co-horts and survival analyses designed for survivor conditioning, unequal horizon intervals, and prompt heterogeneity. 16 3.6 Persistent and same-mode reference axes 
+
+The persistent experiment uses 64 paired layer-static schedules for each of three prompts and four schemes. All 768 scheme-conditioned trajectories exit successfully and generate eight to-kens; the three native-reference baselines are separate. The same-mode canonical experiment adds one identity-order trajectory per prompt and scheme. Aggregating over prompts gives two reference axes:                      
+
+> Scheme Native route Native token sequence Canonical route Canonical token sequence
+> P32 192/192 161/192 192/192 115/192 C0/192 0/192 0/192 0/192 A192/192 178/192 192/192 123/192 B192/192 172/192 192/192 114/192
+
+The native columns compare random schedules with the production native reference; the canonical columns compare the same schedules with the identity-order trajectory of their own scheme. C is stable on both axes and is also native-compatible. P32, A, and B exhibit both a route/token-sequence shift from the native reference and within-mode order sensitivity. Route divergence is saturated for those three schemes, whereas token divergence is lower and not monotonically ordered, showing that changed route trajectories can reconverge to the same or-dered token-ID sequence. Raw text is not used for this table because collection-only leading whitespace would create false differences. Appendix B.4 gives the per-prompt and canonical-baseline detail. The separate C intermediate check covers 3 prompts × 64 schedules = 192 first-generation trajectories. The MoE aggregation output, post-mHC state, next-router scores, and prefill LM logits are bitwise identical to the native reference in every case, with zero missing records and maximum L∞ distance 0. Together with the persistent and canonical results, this supports the scoped claim that C is empirically order-invariant while preserving the native-reference outputs for the evaluated six-term states and schedules. It does not establish exact summation, universal BF16 stability, or invariance under untested layers, states, schedules, or hardware topologies. Appendix B.5 gives the complete per-prompt intermediate summary. 
+
+# 4 Discussion 
+
+4.1 Reduction order as execution semantics 
+
+The results support a runtime-level interpretation of expert aggregation. The reduction order is mathematically invisible over real numbers but becomes observable when finite-precision aggregation changes a state near a router or token decision boundary. For a dynamic MoE de-coder, a backend migration or kernel fusion can therefore alter the effective execution semantics even when the model graph and weights are unchanged. 
+
+4.2 From local numerical divergence to delayed token divergence 
+
+Together, the representative trace and two reconstruction controls establish the measured prop-agation sequence      
+
+> reduction semantics →intra-token latent divergence
+> →later layer/route divergence →decode-boundary persistent-state divergence
+
+17 Figure 3: Panel a reports the identity-order scheme shift against three production-native prompt baselines. Panel b reports random-order divergence against both the native reference and each scheme ’s identity order over 192 paired trajectories per scheme; lower is better. The sepa-rately grouped C numerical check has 0/192 mismatches across captured MoE, post-mHC, next-router, and LM states. Intermediates were not captured for P32, A, or B.    
+
+> →cross-token latent/route divergence →delayed token difference
+
+Routing is an observed discrete boundary but is not established as the unique causal media-tor because no frozen-route intervention is performed. The persistent-state control addresses a different question: how a numerical divergence can survive a token boundary even when both executions emit the same next token. For the evaluated branch, reconstructing the full persistent state endpoint is sufficient to reproduce the measured continuation. 
+
+4.3 Why P32 is not a ground truth 
+
+P32 uses higher-precision expert operands, but that changes the values entering the aggrega-tion. C preserves the native-reference BF16 operand semantics and changes only the cross-expert accumulator precision. The contrast between P32 and C shows that numerical com-patibility is not obtained merely by increasing the precision of every intermediate. Semantic compatibility requires both operand semantics and accumulation semantics to be specified. 
+
+4.4 Runtime and hardware implications 
+
+The direct design implication is conditional. If several expert units produce partial results and a combine unit accumulates them in arrival order with low-precision sequential rounding, then completion order can become reduction order. This condition is distinct from a fixed software 18 permutation and from a deterministic but hardware-specific reduction tree. A distributed or near-memory implementation can reduce this risk with BF16 expert compute plus an FP32 or guard-bit cross-expert accumulator, a fixed partial-sum tree, or deterministic merge semantics. Adaptive protection for small router margins is left as future work rather than treated as an evaluated intervention. This experiment does not simulate analog compute noise, packet timing, or a specific CiM array. It controls the numerical semantics of the cross-expert merge and should therefore be presented as a design implication rather than a hardware measurement. 
+
+4.5 From endpoint sufficiency to hierarchical conformance 
+
+The two reconstruction controls identify complementary state boundaries. Post-mHC state pro-vides a layer- and token-indexed boundary for local intra-forward diagnosis. Full persistent state provides a decode-boundary checkpoint for cross-token continuation. In the evaluated branch, exact reconstruction at either boundary reproduces the measured downstream trajec-tory from that boundary onward. This suggests that runtime conformance need not begin with invasive operator-level tensor dumps. A candidate backend can first expose a canonical fingerprint of its full persistent state at the decode boundary before the divergent prediction. If that fingerprint differs from the ref-erence, the difference can be bisected by persistent-state component and layer before enabling layer-indexed post-mHC tracing. The first post-mHC mismatch localizes the first observed state divergence to the interval after the last matched checkpoint; operator traces can then inspect the relevant attention, routing, expert, conversion, reduction, normalization, or residual computa-tions in that interval. In the controlled experiments here, that search terminates at the expert-reduction operator.               
+
+> Level Compared object Diagnostic purpose
+> L0 Token / text Detect visible behavioral divergence L1 Logits / top-k margins Detect pre-token decision divergence L2 Full persistent state Detect cross-token state divergence L3 Layer-indexed post-mHC /post-attention state Localize the first observed divergent layer L4 Relevant operator intermedi-ates Identify the divergent operator or numerical contract
+
+This hierarchy is not a claim that every token mismatch must originate in previously di-vergent persistent state. If the full persistent state and all other specified inputs entering the divergent token are identical, the first observed difference is generated inside the current for-ward and diagnosis can begin directly with layer-state comparison. Conversely, a persistent-state mismatch identifies a divergent decode boundary but not necessarily the earliest differing hidden intermediate. Bitwise fingerprints require a canonical serialization contract specifying component schema, tensor identity, logical shape, dtype, element order, byte order, signed-zero handling, NaN canonicalization, token/layer coordinates, padding exclusion, and hash algorithm. The hashed record must also bind the model and checkpoint identity, tokenizer and prompt prefix, se-quence position, and decoding configuration. For composite persistent state, the schema must additionally define the identity and order of window KV, compressed KV, compressor state, indexer state, and associated sequence metadata. A backend with a different internal layout must materialize the same canonical byte sequence before comparison. 19 A bitwise match does not prove that two backends used the same computation path; it es-tablishes observational equivalence at a compared boundary. The present evidence validates endpoint sufficiency of post-mHC state and full persistent state for one single-layer B class in one native runtime and motivates, but does not validate, the proposed cross-backend proce-dure. Coverage across devices, tolerance rules for non-bitwise backends, and checkpoint den-sity remain open validation questions. 
+
+# 5 Limitations and future work 
+
+Our experiments cover one checkpoint and one native runtime. DeepSeek-V4-Flash was chosen because the implementation provides the internal control required for exact intervention and replay; quantitative sensitivity should not be assumed to transfer unchanged to other MoE archi-tectures or runtimes. The study covers six-term expert aggregation and a finite set of prompts, layers, states, and reduction schedules. It does not measure the incidence of these permutations on real GPU/NPU backends, perform frozen-route mediation, construct an exact quantized-operand reference, measure C ’s runtime overhead, or test token-dynamic schedules. The persistent-state reconstruction is demonstrated for one controlled branch and one decode boundary; it is not evidence that all numerical divergences are carried by the same persistent-state components. It establishes endpoint sufficiency, not uniqueness: distinct com-putation histories may converge to the same full persistent state endpoint. The FP64 additive delta is an exact intervention representation rather than a compact checkpoint encoding, so no compression or storage-efficiency claim is made. The full persistent state is a runtime-specific collection, not shorthand for conventional K/V tensors on other architectures, and the exact result is conditional on an independently matching next token. The extended breadth result is a staged, selection-conditioned cohort rather than three inde-pendent 50-prompt experiments, so its cumulative counts are descriptive rather than probability estimates. The collection audit also exposes two practical failure modes for future runtime stud-ies: generated text may span lines even when the token count is correct, and later horizon files may repeat earlier events. Robust tooling should preserve raw logs, use token IDs or marker-delimited multi-line extraction, key records by stable prompt IDs, and distinguish new from repeated divergences before computing cumulative counts. 
+
+5.1 Claim ledger for deterministic replay              
+
+> Claim Evidence Scope limitation
+> The tested branches can be replayed token-exactly. 10 fixed branches ×2 runs; 10/10 token-ID and SHA-256 pairs agree. Current checkpoint, native runtime, hard-ware, and execution configuration. Branch-to-branch narrative differ-ences are not ordinary run-to-run randomness. Each branch is stable under replay while the ten branch outputs dif-fer. Does not prove replay for every possible branch or bitwise replay across hardware.
+
+Accordingly, we do not claim that all 360 branches are necessarily reproducible, that changed hardware, thread counts, or compilers preserve bitwise output, that branch IDs remain valid across model versions, that all longer generations remain permanently deterministic, or that 20 replay has established cross-platform determinism. The precise claim is exact replayability of ten representative branches, each run twice, in the same native runtime execution environment. The event-direction artifact contains rule-based provisional labels, two completed annota-tion columns, and ten extended representatives. The released table verifies label complete-ness and agreement for six unique items, but does not retain annotator-identity or language-background metadata. The larger layoffs basin should be interpreted only as a larger basin under the controlled permutation measure. It is not a corpus frequency, posterior probability, or prediction of deployment behavior. The replay audit is likewise limited to exact repeatability of the tested 64-token trajectories. 
+
+# 6 Conclusion 
+
+Controlled changes to sparse-MoE expert reduction order can select different deterministic ex-ecution trajectories. In the tested DeepSeek-V4-Flash native runtime, single-layer post-mHC states compress into a smaller set of continuation-text basins, while the persistent experiment exhibits route and text trajectory divergence. The B-mode event-direction extension produces distinct hiring and layoffs continuations under one underdetermined prompt. The paired re-play audit shows that these long-form differences are reproducible for ten stratified-random branches under the same native execution environment. Scheme C further matches the native-reference path at the evaluated numerical, route, and text levels, supporting BF16 operand se-mantics with FP32 accumulation as a scoped stabilization contract. For the evaluated branch, the propagation chain can be followed from the controlled re-duction through post-mHC state, later routing, and the full persistent state before becoming visible as a delayed token difference. Exact reconstruction at both the post-mHC and persistent-state boundaries reproduces the measured downstream trajectory. Post-mHC state is therefore a useful intra-token conformance boundary, whereas full persistent state provides a practical first-line boundary for cross-token runtime diagnosis. These results motivate treating numerical conformance as a hierarchy of state-transition contracts rather than only an output-level test. Practical backend qualification can begin with decode-boundary persistent-state fingerprints and progressively localize disagreements through layer states, routing, and operator-level arithmetic. The proposed procedure remains subject to matched state and deterministic execution and is not cross-backend validated here. For runtime and hardware designers, the practical implication is to specify cross-expert operand representation, accumulator precision, and merge ordering explicitly, and to validate backend migrations against numerical, routing, and token-level reference behavior. The staged breadth extension further shows that cumulative text separation can increase substantially with generation horizon even after a short continuation remains identical. These findings are execution-environment specific and do not establish universal cross-platform de-terminism or real deployment frequencies. 
+
+# A Artifact and reproducibility manifest 
+
+This appendix identifies the paper-facing artifacts needed to audit every reported count. Com-mands are run from the repository root with an explicit --model-path ; raw logs and model files remain outside the repository. The complete command lines and collection cautions are given in docs/experiments/v4-paper-reproducibility.md .21 A.1 Protocol index 
+
+Protocol Prompt or selec-tion input Seed or schedule Python entry point Paper-facing out-put 
+
+Native replay 13 fixed replay prompts Native order Runtime replay audit Section 3.1 counts Single-layer A/B fork 
+
+whythesheep , layer 5A: 720 permutations; B: 360 structural classes 
+
+tools/run_v4_ branch_sweep.py basin_counts.tsv 
+
+Post-mHC substitution 
+
+whythesheep , Bclass 135, layer 5 5 pre-fork layer checkpoints; 8 pro-cessed decode inputs 
+
+tools/run_v4_mhc_ equivalence.py mhc_ equivalence_ summary.tsv ,
+
+mhc_prefork_ equivalence.tsv ,
+
+mhc_ equivalence.tsv 
+
+Persistent-state substi-tution 
+
+whythesheep , Bclass 135, position 3 boundary 7 subsequent decode inputs 
+
+tools/run_v4_kv_ equivalence.py kv_equivalence_ summary.tsv ,
+
+kv_equivalence_ layers.tsv , kv_ equivalence.tsv 
+
+Event direc-tion 
+
+￿￿￿￿￿￿￿￿ , layer 5 10 selected B classes; two 64-token runs each 
+
+tools/run_v4_event_ direction_replay.py event_direction_ counts.tsv ,
+
+replay_ branches.tsv ,
+
+replay_pairs.tsv 
+
+Breadth prompt_breadth_ 50.tsv 
+
+Staged 8/16/32-token horizons 
+
+tools/run_v4_ prompt_breadth.py ,
+
+tools/recompute_v4_ breadth_text_stats. py breadth_ summary.tsv 
+
+Persistent Three depth prompts Seed 20260722; 64 paired layer-static schedules per prompt 
+
+tools/run_v4_ persistent_random.py persistent_ ablation.tsv 
+
+Same-mode canonical Three depth prompts Identity order in each scheme 
+
+tools/run_v4_ canonical_reference. py canonical_ reference.tsv 
+
+C intermedi-ate Three depth prompts Seed 20260722; 64 C schedules per prompt 
+
+tools/run_v4_ intermediate_check. py c_intermediate_ summary.tsv ,
+
+propagation_ trace.tsv 
+
+All paper-facing filenames in the last column are relative to docs/experiments/ v4-paper-support/ . The support README defines their columns and maps each table to the corresponding result section. The principal schemas record protocol identifiers and denominators, divergence or bitwise-equality counts, L∞ summaries where applicable, and immutable SHA-256 values for token sequences or mHC states. Full token sequences, tensors, route traces, long continuations, native logs, and model shards are intentionally excluded. 
+
+A.2 Environment and identity 
+
+22 Component Evaluated configuration          
+
+> CPU AMD Ryzen AI MAX+ 395, 16 cores / 32 hardware threads Installed GPU AMD Radeon 8060S; not used by the evaluated runtime path System memory 128 GiB Runtime memory option --ram32 ; planner budget, not an OS-enforced RSS limit Operating system Windows 11 x64, NT 10.0.26200 Toolchain MSYS2 UCRT64 GCC 16.1, target x86_64-w64-mingw32
+> Compile flags -O3-march=x86-64-v3-fopenmp ; no fast-math flag Evaluated execution Native Windows CPU runtime; weights and compute streams remain on CPU
+
+General collection runs inherited the operating-system scheduler and did not pin threads. The deterministic 64-token replay alone fixed OMP_NUM_THREADS=32 ,
+
+OMP_DYNAMIC=FALSE , and PIPE_WORKERS=8 ; these settings must not be inferred for the other protocols. replay_environment.tsv records that replay configuration together with CPU/OS identity, affinity policy, runtime commit and binary SHA-256, checkpoint revision and manifest SHA-256, and tokenizer-file SHA-256 values. These hashes identify the tested environment without redistributing the checkpoint or tokenizer. Raw outputs may be placed in any external directory; their location is not part of the experimental semantics. 
+
+A.3 Audit boundary 
+
+The paper-support directory is sufficient to verify the published aggregate claims, but not to rerun native inference by itself. A full rerun additionally requires the checkpoint, compiled runtime, prompt and branch inputs, and an external output directory. The breadth audit treats the corrected multi-line reanalysis files as authoritative and deduplicates later-stage events by stable prompt ID. The Python claim-audit script checks the support tables and available root results before submission. 
+
+A.4 Complete paper-facing file index 
+
+Collection and verification entry points: • tools/run_v4_branch_prompt.py 
+
+• tools/run_v4_branch_sweep.py 
+
+• tools/run_v4_prompt_breadth.py 
+
+• tools/recompute_v4_breadth_text_stats.py 
+
+• tools/run_v4_persistent_random.py 
+
+• tools/run_v4_canonical_reference.py 
+
+• tools/run_v4_intermediate_check.py 
+
+• tools/run_v4_mhc_equivalence.py 
+
+• tools/run_v4_kv_equivalence.py 
+
+• tools/run_v4_event_direction_confirmation.py 
+
+23 • tools/run_v4_event_direction_replay.py 
+
+• tools/apply_v4_event_direction_annotations.py 
+
+• tools/score_v4_event_direction_annotation.py 
+
+• tools/audit_v4_paper_claims.py 
+
+• tools/build_v4_paper_pdf.py 
+
+Annotation, prompt, and raw-result indices used by the paper: • prompt_breadth_50.tsv 
+
+• v4_event_direction_annotation.tsv 
+
+• v4_event_direction_annotation_unique_blind.csv 
+
+• v4_event_direction_annotation_unique_map.csv 
+
+• v4_event_direction_random5_64.tsv 
+
+• v4_prompt_breadth_50_B_recomputed.tsv 
+
+• v4_prompt_breadth_50_B_no_text_diff_16_recomputed.tsv 
+
+• v4_prompt_breadth_50_B_no_text_diff_32_recomputed.tsv 
+
+Derived support tables, all under docs/experiments/v4-paper-support/ :• basin_counts.tsv 
+
+• basin_rank_frequency.tsv 
+
+• breadth_summary.tsv 
+
+• c_intermediate_summary.tsv 
+
+• canonical_reference.tsv 
+
+• event_direction_counts.tsv 
+
+• event_direction_unique_continuations.tsv 
+
+• human_annotation_agreement.tsv 
+
+• human_annotation_confusion.tsv 
+
+• mhc_equivalence.tsv 
+
+• mhc_prefork_equivalence.tsv 
+
+• mhc_equivalence_summary.tsv 
+
+• kv_equivalence.tsv 
+
+• kv_equivalence_layers.tsv 
+
+• kv_equivalence_summary.tsv 
+
+24 • persistent_ablation.tsv 
+
+• propagation_trace.tsv 
+
+• replay_branches.tsv 
+
+• replay_environment.tsv 
+
+• replay_pairs.tsv 
+
+• README.md 
+
+Protocol documentation: • docs/experiments/v4-paper-reproducibility.md 
+
+• docs/experiments/v4-breadth-16-32-verification.md 
+
+# B Extended result tables 
+
+B.1 Complete 64-token event-direction continuations 
+
+The main text shows one bilingual layoffs example and one bilingual hiring example. The com-plete set of ten stratified-random branch continuations follows. Each row is one completed 64-token generation; the direction label is the human consensus mapped from its exact eight-token prefix. 
+
+Branch Direction Complete streamed continuation 
+
+230 layoffs ，说他们公司要裁员，他担心自己会被裁掉。我问他，你觉得自己会被裁掉 吗？他说，我工作能力很强，应该不会被裁掉。我说，那你担心什么？他说， 我担心万一被裁掉怎么办。我说，万一被裁掉，那就再找一份工作 
+
+241 layoffs ，说他们公司要裁员，他担心自己会被裁掉，所以想让我帮他出出主意。我问 他： “你平时工作表现怎么样？ ”他说： “还可以吧，就是有时候会迟到早退。 ”我说： “那你觉得公司会留一个经常迟到早退的员工吗？ ”他沉默了一会儿， 
+
+156 layoffs ，说他们公司要裁员，他担心自己会被裁掉。我问他，你担心什么？他说，我 担心自己找不到工作。我说，你担心找不到工作，那你就去找工作啊。他说， 我担心找不到工作，所以我不敢去找工作。我说，你不敢去找工作，那你就等 着
+
+343 layoffs ，说他们公司要裁员，他担心自己会被裁掉。我问他，你觉得自己会被裁掉 吗？他说，我觉得自己很危险。我问他，为什么？他说，我们公司是做传统媒 体的，现在新媒体冲击很大，公司业绩不好，肯定要裁人。我问他，那你有没 有想过 
+
+270 layoffs ，说他们公司要裁员，他可能被裁掉，心里很烦。我劝他，现在经济不景气， 很多公司都在裁员，你被裁了，正好可以休息一段时间，再找新的工作。他听 了我的话，心情好多了。 
+
+243 hiring ，说他们公司要招人，问我要不要去。我还在考虑，毕竟现在的工作也还行， 但那边给的待遇确实不错。 ”“哦？什么公司？ ”“一家做人工智能的初创公司， 老板是海归，技术挺厉害的。 ”
+
+35 hiring ，说他们公司要招人，问我要不要过去。我还在考虑，毕竟现在的工作也还不 错。 ”林雪儿道： “那你自己考虑吧，反正你做什么决定，我都支持你。 ”两人 聊着天，不知不觉就到了林雪儿家楼下 
+
+135 hiring ，说他们公司要招人，问我要不要过去。我还在考虑，毕竟现在的工作也还不 错。 ”“哦，那你自己考虑吧。 ”两人有一搭没一搭的聊着，不知不觉就到了下 班时间。林雪收拾 
+
+25 Branch Direction Complete streamed continuation 
+
+277 hiring ，说他们公司要招人，问我要不要去。我考虑了一下，觉得还是去试试看。毕 竟，现在的工作虽然稳定，但发展空间有限。 ”“嗯，有想法是好的。不过，你 也要考虑清楚，不要轻易放弃现在的工作。 ”
+
+322 hiring ，说他们公司要招人，问我要不要过去。我还在考虑，毕竟现在的工作也还不 错。 ”“那挺好的，多一个选择总是好的。 ”两人聊着，不知不觉就到了小区门 口。林知意停下脚步，看着 
+
+B.2 Deterministic replay summary 
+
+Quantity Result 
+
+Selected branches 10 Runs per branch 2Successful executions 20/20 Generated length 64 tokens per run Exact ordered token-ID agreement 10/10 branch pairs Token-sequence SHA-256 agreement 10/10 branch pairs Replay-metadata consistency 10/10 branch pairs 
+
+26 Branch  Expected basin  Runs  Tokens/run  Token IDs exact  SHA-256 exact  Metadata consistent  Both exit zero 
+
+> 35  hiring  2 64  yes  yes  yes  yes 135  hiring  2 64  yes  yes  yes  yes 156  layoffs  2 64  yes  yes  yes  yes 230  layoffs  2 64  yes  yes  yes  yes 241  layoffs  2 64  yes  yes  yes  yes 243  hiring  2 64  yes  yes  yes  yes 270  layoffs  2 64  yes  yes  yes  yes 277  hiring  2 64  yes  yes  yes  yes 322  hiring  2 64  yes  yes  yes  yes 343  layoffs  2 64  yes  yes  yes  yes
+
+27 replay_pairs.tsv gives the per-branch outcomes and immutable identifiers; replay_ environment.tsv gives the common explicit-thread environment. These results establish repeatability only for the ten randomly sampled branches under that environment, not for all 360 classes or across backends. 
+
+B.3 Breadth stage accounting                     
+
+> Horizon At risk at stage start New separated Cumulative separated Saved-file text differences Repeated prior events
+> 8 tokens 50 12 12/50 12 016 tokens 38 12 24/50 12 032 tokens 26 12 36/50 17 5
+
+At eight tokens the 12 separated prompts comprise 6/25 English and 6/25 Chinese prompts, or 9/40 ordinary and 3/10 specially constructed prompts. The 16- and 32-token stages carry forward only survivors, so those stages are not independent 50-prompt cohorts. Five rows in the 32-token saved file were already separated at 16 tokens and are excluded from the new-event count. The initial single-line parser undercounted multi-line generations; the marker-delimited recomputation recovered 12 rather than 7 separations at 16 tokens and 17 rather than 3 saved-file differences at 32 tokens. All audited logs report the requested generated-token count. 
+
+B.4 Persistent and canonical per-prompt detail 
+
+Prompt Scheme Native route diver-gence Native token-sequence diver-gence Unique continua-tions 
+
+“why the sheep ” P32 64/64 59/64 4
+
+“why the sheep ” C 0/64 0/64 1
+
+“why the sheep ” A 64/64 58/64 8
+
+“why the sheep ” B 64/64 61/64 10 
+
+“朋友昨天打来电 话” 
+
+P32 64/64 39/64 8
+
+“朋友昨天打来电 话” 
+
+C 0/64 0/64 1
+
+“朋友昨天打来电 话” 
+
+A 64/64 60/64 10 
+
+“朋友昨天打来电 话” 
+
+B 64/64 54/64 8
+
+“Morning light filled the room ”
+
+P32 64/64 63/64 9
+
+“Morning light filled the room ”
+
+C 0/64 0/64 1
+
+“Morning light filled the room ”
+
+A 64/64 60/64 10 
+
+“Morning light filled the room ”
+
+B 64/64 57/64 9
+
+28 Scheme Canonical vs. native token se-quence Canonical vs. na-tive route Random vs. canonical token sequence Random vs. canonical route 
+
+P32 2/3 3/3 115/192 192/192 C 0/3 0/3 0/192 0/192 A 3/3 3/3 123/192 192/192 B 3/3 3/3 114/192 192/192 
+
+B.5 Complete C intermediate summary 
+
+29 Prompt  Schedules  Missing records  MoE max  L∞ post-mHC max  L∞ Router max  L∞ LM max  L∞ All  captured  values bitwise identical 
+
+> “why the sheep ” 64  0 0 0 0 0 yes
+> “朋友昨天打来电话”  64  0 0 0 0 0 yes
+> “Morning light filled the room ”
+> 64  0 0 0 0 0 yes
+
+30 References 
+
+[1] Jiayi Yuan, Hao Li, Xinheng Ding, Wenya Xie, Yu-Jhe Li, Wentian Zhao, Kun Wan, Jing Shi, Xia Hu, and Zirui Liu. “Understanding and Mitigating Numerical Sources of Nondeter-minism in LLM Inference. ”arXiv:2506.09501v2, 2025. https://arxiv.org/abs/2506.09501 .[2] Ranjith Chodavarapu and Lei Xu. “The Illusion of Equivalence: Systematic FP16 Diver-gence in KV-Cached Autoregressive Inference. ”arXiv:2604.15409v1, 2026. https://arxiv. org/abs/2604.15409 .[3] Young Jin Kim, Raffy Fahim, and Hany Hassan Awadalla. “Mixture of Quantized Experts (MoQE): Complementary Effect of Low-bit Quantization and Robustness. ”
+
+arXiv:2310.02410v1, 2023. https://arxiv.org/abs/2310.02410 .[4] Hancheol Park, Geonho Lee, Tairen Piao, and Tae-Ho Kim. “Value-and-Structure Alignment for Routing-Consistent Quantization of Mixture-of-Experts Models. ”
+
+arXiv:2606.05688v1, 2026. https://arxiv.org/abs/2606.05688 .[5] James Demmel, Willow Ahrens, and Hong Diep Nguyen. “Efficient Reproducible Float-ing Point Summation and BLAS. ”Technical Report UCB/EECS-2016-121, University of California, Berkeley, 2016. https://www2.eecs.berkeley.edu/Pubs/TechRpts/2016/ EECS-2016-121.html .[6] Radford M. Neal. “Fast Exact Summation Using Small and Large Superaccumulators. ”
+
+arXiv:1505.05571v1, 2015. https://arxiv.org/abs/1505.05571 .[7] Caroline Collange, David Defour, Stef Graillat, and Roman Iakymchuk. “Numerical Re-producibility for the Parallel Reduction on Multi- and Many-Core Architectures. ”Parallel Computing 49 (2015): 83 –97. https://doi.org/10.1016/j.parco.2015.09.001 .[8] Hung Viet Pham, Thibaud Lutellier, Weizhen Qi, and Lin Tan. “CRADLE: Cross-Backend Validation to Detect and Localize Bugs in Deep Learning Libraries. ”Proceedings of the 41st International Conference on Software Engineering, 2019, pp. 1027 –1038. https://doi. org/10.1109/ICSE.2019.00107 .[9] Jiawei Liu, Jinkun Lin, Fabian Ruffy, Cheng Tan, Jinyang Li, Aurojit Panda, and Lingming Zhang. “NNSmith: Generating Diverse and Valid Test Cases for Deep Learning Compil-ers. ”Proceedings of ASPLOS 2023, 2023. https://doi.org/10.1145/3575693.3575707 .[10] Samyam Rajbhandari, Conglong Li, Zhewei Yao, Minjia Zhang, Reza Yazdani Aminabadi, Ammar Ahmad Awan, Jeff Rasley, and Yuxiong He. “DeepSpeed-MoE: Advancing Mixture-of-Experts Inference and Training to Power Next-Generation AI Scale. ”Proceed-ings of Machine Learning Research 162 (ICML 2022): 18332 –18346. https://proceedings. mlr.press/v162/rajbhandari22a.html .[11] Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. “DeepEP: An Efficient Expert-Parallel Communication Library. ”Software repository, 2025. https://github.com/deepseek-ai/DeepEP .[12] DeepSeek-AI et al. “DeepSeek-V4: Towards Highly Efficient Million-Token Context Intel-ligence. ”arXiv:2606.19348v1, 2026. https://arxiv.org/abs/2606.19348 .[13] Zhenda Xie, Yixuan Wei, Huanqi Cao, Chenggang Zhao, Chengqi Deng, Jiashi Li, Damai Dai, Huazuo Gao, Jiang Chang, Liang Zhao, Shangyan Zhou, Zhean Xu, Zhengyan Zhang, Wangding Zeng, Shengding Hu, Yuqing Wang, Jingyang Yuan, Lean Wang, and Wen-feng Liang. “mHC: Manifold-Constrained Hyper-Connections. ”arXiv:2512.24880v2, 2026. 
+
+https://arxiv.org/abs/2512.24880 .31 [14] Xin Cheng et al. “DSpark: Confidence-Scheduled Speculative Decoding with Semi-Autoregressive Generation. ”arXiv:2607.05147v1, 2026. https://arxiv.org/abs/2607. 05147 .[15] Whale Agent Lab. “Colibri: Native Inference Runtime. ”Software repository, 2026. https: //github.com/whale-agent-lab/colibri .32

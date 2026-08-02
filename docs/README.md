@@ -6,29 +6,26 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-08-01
-- 运行时间：2026-08-01 20:05:13 UTC
+- 最新运行日期：2026-08-02
+- 运行时间：2026-08-02 21:18:42 UTC
 - 运行状态：成功
-- 本次总论文数：2
-- 精读区：0
-- 速读区：2
+- 本次总论文数：1
+- 精读区：1
+- 速读区：0
 
 ### 今日简报（AI）
-今日速读2篇论文，聚焦食品图像分割与MoE网络调度。  
-最值得关注的是DishSeg24k基准（7.0分），提供大规模食品分割数据与随机专家解码方法。  
-建议优先了解该基准的实用价值；对系统优化感兴趣者可关注Incast-Free调度（6.0分）。
-- 详情：[/202608/01/README](/202608/01/README)
+今日精读聚焦稀疏MoE推理，以9.0高分论文揭开专家缩减与行为分歧间的数值演化谜题。  
+核心看点：稀疏混合专家模型在推理时如何通过数值状态追踪，导致专家行为出现分歧，值得深入理解其机理。  
+建议普通读者从“专家缩减为何引发行为分化”切入，先掌握MoE稀疏推理的数值追踪框架，再探索实际应用影响。
+- 详情：[/202608/02/README](/202608/02/README)
 
 ### 精读区论文标签
-- 本次无精读推荐。
+1. [From Expert Reduction to Behavioral Divergence: Tracing Numerical State through Sparse MoE Inference](/202608/02/2607.28097v1-from-expert-reduction-to-behavioral-divergence-tracing-numerical-state-through-sparse-moe-inference)  
+   标签：评分：9.0/10、query:moe-special
+   evidence：直接研究稀疏专家混合推理及专家约简顺序
 
 ### 速读区论文标签
-1. [DishSeg24k: A Large-Scale Benchmark for Food Segmentation with Stochastic Expert Decoding](/202608/01/2607.23070v1-dishseg24k-a-large-scale-benchmark-for-food-segmentation-with-stochastic-expert-decoding)  
-   标签：评分：7.0/10、query:moe-special
-   evidence：随机专家解码为查询式分割动态选择专家
-2. [Incast-Free MoE Rate-Based Scheduling](/202608/01/2607.26340v1-incast-free-moe-rate-based-scheduling)  
-   标签：评分：6.0/10、query:moe-special
-   evidence：针对MoE工作负载的调度框架，缓解路由带来的网络瓶颈
+- 本次无速读推荐。
 
 
 <div class="dpr-home-promo-card">
