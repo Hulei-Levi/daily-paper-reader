@@ -6,26 +6,35 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-08-02
-- 运行时间：2026-08-02 21:18:42 UTC
+- 最新运行日期：2026-08-03
+- 运行时间：2026-08-03 21:41:07 UTC
 - 运行状态：成功
-- 本次总论文数：1
-- 精读区：1
-- 速读区：0
+- 本次总论文数：5
+- 精读区：2
+- 速读区：3
 
 ### 今日简报（AI）
-今日精读聚焦稀疏MoE推理，以9.0高分论文揭开专家缩减与行为分歧间的数值演化谜题。  
-核心看点：稀疏混合专家模型在推理时如何通过数值状态追踪，导致专家行为出现分歧，值得深入理解其机理。  
-建议普通读者从“专家缩减为何引发行为分化”切入，先掌握MoE稀疏推理的数值追踪框架，再探索实际应用影响。
-- 详情：[/202608/02/README](/202608/02/README)
+今日精读聚焦参数高效MoE，两篇高分论文分别统一医学图像分类与隐式神经表示分类；速读覆盖医学OCT/OCTA异常检测、推荐生成检索及多模态冲突路由。最值得关注MoE在医学影像与权重空间分类中的高效适配，其中《MoPET》达9.0分。建议普通读者优先精读这两篇高分MoE论文，并关注其与速读中ReMoE的医学场景互补性。
+- 详情：[/202608/03/README](/202608/03/README)
 
 ### 精读区论文标签
-1. [From Expert Reduction to Behavioral Divergence: Tracing Numerical State through Sparse MoE Inference](/202608/02/2607.28097v1-from-expert-reduction-to-behavioral-divergence-tracing-numerical-state-through-sparse-moe-inference)  
+1. [MoPET: Parameter-Efficient Mixture-of-Experts for Unified Medical Image Classification](/202608/03/2607.29462v1-mopet-parameter-efficient-mixture-of-experts-for-unified-medical-image-classification)  
    标签：评分：9.0/10、query:moe-special
-   evidence：直接研究稀疏专家混合推理及专家约简顺序
+   evidence：提出MoPET，一种使用学习式稀疏路由和低秩专家的稀疏混合专家模型
+2. [Weight-Space Mixture-of-Experts for Implicit Neural Representation Classification](/202608/03/2607.29463v1-weight-space-mixture-of-experts-for-implicit-neural-representation-classification)  
+   标签：评分：9.0/10、query:moe-special
+   evidence：提出基于条件计算的分层混合专家Transformer
 
 ### 速读区论文标签
-- 本次无速读推荐。
+1. [ReMoE: Report-Guided Mixture-of-Experts for Multimodal OCT/OCTA Anomaly Detection](/202608/03/2607.29039v1-remoe-report-guided-mixture-of-experts-for-multimodal-octocta-anomaly-detection)  
+   标签：评分：7.0/10、query:moe-special
+   evidence：提出报告引导的混合专家模型ReMoE，应用于多模态OCT/OCTA异常检测
+2. [Multi-Decoder OneRec: Controllable Generative Retrieval for Multi-Objective Industrial Recommendation](/202608/03/2607.26500v1-multi-decoder-onerec-controllable-generative-retrieval-for-multi-objective-industrial-recommendation)  
+   标签：评分：6.0/10、query:moe-special
+   evidence：为每个目标使用独立的参数高效LoRA专家，体现专家专业化
+3. [CAER: Conflict-Aware Evidence Routing with Dual Prefix Experts for Multimodal Large Language Models](/202608/03/2607.28991v1-caer-conflict-aware-evidence-routing-with-dual-prefix-experts-for-multimodal-large-language-models)  
+   标签：评分：6.0/10、query:moe-special
+   evidence：在多模态大语言模型中使用双前缀专家和基于片段的证据路由器进行冲突感知生成
 
 
 <div class="dpr-home-promo-card">
