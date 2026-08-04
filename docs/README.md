@@ -6,35 +6,46 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-08-03
-- 运行时间：2026-08-03 21:41:07 UTC
+- 最新运行日期：2026-08-04
+- 运行时间：2026-08-04 21:57:26 UTC
 - 运行状态：成功
-- 本次总论文数：5
-- 精读区：2
+- 本次总论文数：8
+- 精读区：5
 - 速读区：3
 
 ### 今日简报（AI）
-今日精读聚焦参数高效MoE，两篇高分论文分别统一医学图像分类与隐式神经表示分类；速读覆盖医学OCT/OCTA异常检测、推荐生成检索及多模态冲突路由。最值得关注MoE在医学影像与权重空间分类中的高效适配，其中《MoPET》达9.0分。建议普通读者优先精读这两篇高分MoE论文，并关注其与速读中ReMoE的医学场景互补性。
-- 详情：[/202608/03/README](/202608/03/README)
+今日精读速读共8篇，焦点集中在混合专家（MoE）架构的多场景应用。
+最值得看两篇9分工作：LooperMuscle实现人形机器人全身稳定追踪，One Query Many Scales完成高效跨视图地理定位。
+建议关注MoE在具身控制与多模态检索中的落地潜力，可优先复现这两篇方法。
+- 详情：[/202608/04/README](/202608/04/README)
 
 ### 精读区论文标签
-1. [MoPET: Parameter-Efficient Mixture-of-Experts for Unified Medical Image Classification](/202608/03/2607.29462v1-mopet-parameter-efficient-mixture-of-experts-for-unified-medical-image-classification)  
+1. [LooperMuscle: Fast and Stable Learning of Humanoid Whole-Body Tracking via Structured Mixture-of-Experts](/202608/04/2608.00820v1-loopermuscle-fast-and-stable-learning-of-humanoid-whole-body-tracking-via-structured-mixture-of-experts)  
    标签：评分：9.0/10、query:moe-special
-   evidence：提出MoPET，一种使用学习式稀疏路由和低秩专家的稀疏混合专家模型
-2. [Weight-Space Mixture-of-Experts for Implicit Neural Representation Classification](/202608/03/2607.29463v1-weight-space-mixture-of-experts-for-implicit-neural-representation-classification)  
+   evidence：结构化混合专家、贡献路由回放与显式专家专业化
+2. [One Query, Many Scales: Sparse Mixture-of-Experts for Efficient Hierarchical Cross-View Geo-Localization](/202608/04/2608.01060v1-one-query-many-scales-sparse-mixture-of-experts-for-efficient-hierarchical-cross-view-geo-localization)  
    标签：评分：9.0/10、query:moe-special
-   evidence：提出基于条件计算的分层混合专家Transformer
+   evidence：提出GeoMoE，一种采用内容自适应路由的稀疏混合专家双编码器
+3. [Beyond Routing Saturation: A Long-Horizon Class-Incremental Perspective on Expert Routing in Multimodal Continual Instruction Tuning](/202608/04/2608.01437v1-beyond-routing-saturation-a-long-horizon-class-incremental-perspective-on-expert-routing-in-multimodal-continual-instruction-tuning)  
+   标签：评分：9.0/10、query:moe-special
+   evidence：直接研究专家路由机制，提出FLEX基准以揭示多模态持续指令微调中的路由饱和问题。
+4. [HetRoute Heterogeneous and Cost-aware Collaborative Routing Framework for Distributed Edge MoE Inference](/202608/04/2608.00577v1-hetroute-heterogeneous-and-cost-aware-collaborative-routing-framework-for-distributed-edge-moe-inference)  
+   标签：评分：8.0/10、query:moe-special
+   evidence：面向分布式边缘MoE推理的协同路由框架
+5. [REFLEX: Rethinking MoE Inference as Refinement-Aware Compute Allocation in Diffusion Language Models](/202608/04/2608.01784v1-reflex-rethinking-moe-inference-as-refinement-aware-compute-allocation-in-diffusion-language-models)  
+   标签：评分：8.0/10、query:moe-special
+   evidence：将扩散语言模型中的MoE推理重新定义为感知细化的计算分配
 
 ### 速读区论文标签
-1. [ReMoE: Report-Guided Mixture-of-Experts for Multimodal OCT/OCTA Anomaly Detection](/202608/03/2607.29039v1-remoe-report-guided-mixture-of-experts-for-multimodal-octocta-anomaly-detection)  
+1. [TrimMoE A communication aware and adaptive depth framework for distributed edge inference](/202608/04/2608.00573v1-trimmoe-a-communication-aware-and-adaptive-depth-framework-for-distributed-edge-inference)  
    标签：评分：7.0/10、query:moe-special
-   evidence：提出报告引导的混合专家模型ReMoE，应用于多模态OCT/OCTA异常检测
-2. [Multi-Decoder OneRec: Controllable Generative Retrieval for Multi-Objective Industrial Recommendation](/202608/03/2607.26500v1-multi-decoder-onerec-controllable-generative-retrieval-for-multi-objective-industrial-recommendation)  
+   evidence：MoE专家选择与通信感知路由机制，面向分布式边缘推理
+2. [RING: Retrieval-Internalized Generation for Continual Large-Scale Knowledge Injection](/202608/04/2608.01630v1-ring-retrieval-internalized-generation-for-continual-large-scale-knowledge-injection)  
+   标签：评分：7.0/10、query:moe-special
+   evidence：混合记忆专家架构，通过强化学习学习参数化路由搜索策略
+3. [Tevatron Meets Megatron: Expert-Parallel LLM Reranker Training on an Academic Budget](/202608/04/2608.00916v1-tevatron-meets-megatron-expert-parallel-llm-reranker-training-on-an-academic-budget)  
    标签：评分：6.0/10、query:moe-special
-   evidence：为每个目标使用独立的参数高效LoRA专家，体现专家专业化
-3. [CAER: Conflict-Aware Evidence Routing with Dual Prefix Experts for Multimodal Large Language Models](/202608/03/2607.28991v1-caer-conflict-aware-evidence-routing-with-dual-prefix-experts-for-multimodal-large-language-models)  
-   标签：评分：6.0/10、query:moe-special
-   evidence：在多模态大语言模型中使用双前缀专家和基于片段的证据路由器进行冲突感知生成
+   evidence：用于大规模MoE模型的训练基础设施
 
 
 <div class="dpr-home-promo-card">
