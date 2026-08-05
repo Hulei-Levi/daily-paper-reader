@@ -1,0 +1,1076 @@
+Title: TAOT: Topology-Aware Optimal Transport for Dynamic Expert Replica Placement in MoE Training
+
+URL Source: https://arxiv.org/pdf/2608.03676v1
+
+Published Time: Wed, 05 Aug 2026 01:07:20 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# TAOT: Topology-Aware Optimal Transport for Dynamic Expert Replica Placement in MoE Training 
+
+Lingyun Zhang 1, Henghua Zhang 1, †, Shilei Gu 1, Kai Mo 1, Shuai Han 1, Shiyong Li 1,Yanpeng Wang 1, Dou Shen 1, †
+
+§ https://github.com/baidu-baige/LoongForge 
+
+Abstract 
+
+Mixture-of-Experts (MoE) has become a key architecture for scaling large language models (LLMs), yet its dynamic rout-ing causes severe load imbalance in expert-parallel training. Existing dynamic-replica methods copy hot experts onto idle ranks to share computation, but they optimize load balance alone and ignore the cost of moving expert weights across a multi-node topology, so the resulting cross-node communi-cation can outweigh the balancing gain and inflate training cost. We present TAOT, a topology-aware optimal transport method for dynamic expert-replica placement. TAOT models the overload on hot ranks and the spare capacity on lightly loaded ranks as a balanced entropy-regularized optimal trans-port problem with a communication-cost matrix, solves it with Sinkhorn-Knopp iterations to produce rank-level flow hints, and combines integer replica matching with token as-signment into an executable schedule. At the system level, it overlaps guest-weight transfer with home-expert computa-tion to hide the communication overhead. Experiments show TAOT achieves a 1.43 × end-to-end MoE training speedup, reaches balance quality competitive with or better than exist-ing state-of-the-art methods, and attains the lowest weighted expert-communication cost across all configurations, with up to a 74% reduction. 
+
+## Introduction 
+
+The continued scaling of large language models (LLMs) is pushing training systems from dense Transformers (Vaswani et al. 2017) toward sparsely activated expert models. Mixture-of-Experts (MoE) replaces the dense feed-forward (FFN) sublayer in a standard Transformer with several feed-forward experts, and each token activates only a few of them, so that model size is partly decoupled from the per-step com-putation (Shazeer et al. 2017; Lepikhin et al. 2021; Fedus, Zoph, and Shazeer 2022; Cai et al. 2025). This property makes MoE a foundational architecture for training trillion-parameter models, and it has been adopted by GLaM (Du et al. 2022), Mixtral (Jiang et al. 2024), DeepSeek-V3 (Liu et al. 2024), Qwen3 (Yang et al. 2025), Kimi-K2 (Kimi Team et al. 2025), and Llama 4 (Adcock et al. 2026). In distributed training, expert parallelism (EP) is the core way to support large-scale MoE (Shoeybi et al. 2019; Ra-
+
+> 1
+
+Baidu, Inc. 
+
+> †
+
+Corresponding authors. 
+
+jbhandari et al. 2022; Hwang et al. 2023). Different experts are placed on different GPU ranks, and after the router se-lects experts for each token, an All-to-All communication step dispatches tokens to the target ranks for computation. However, as the input, the training stage, and the degree of expert specialization vary, the token count on each expert can be highly skewed (He et al. 2022; Nguyen et al. 2026; Skiadopoulos et al. 2026). In synchronous training, the iter-ation time is set by the slowest rank, so a rank that holds a few hot experts becomes a global straggler and drags down the overall training throughput. Prior work mitigates imbalance at two levels: the model-algorithm level and the training-system level. Algorithm-level methods use auxiliary balance losses, capacity factors, expert-choice routing, or auxiliary-loss-free bias adjustment to steer tokens toward a more uniform distribution (Fedus, Zoph, and Shazeer 2022; Liu et al. 2024; Zoph et al. 2022; Zhou et al. 2022). They improve the long-term statistical distribution, but they must trade off expressiveness, token dropping, wasted capacity, and stability, and they cannot re-move the instantaneous imbalance at the micro-batch level. System-level methods keep the routing decision fixed and, once the routing is determined, rearrange where computation happens through parallelism switching, expert remapping, hot-expert replication, token scheduling, or expert-weight migration (He et al. 2022; Nguyen et al. 2026; Skiadopoulos et al. 2026; Zhai et al. 2023; Zeng et al. 2025; Zhao et al. 2025; Qi, Liu, and Zhao 2026; Liu et al. 2026; NVIDIA Megatron-LM Team 2025; DeepSeek-AI 2025). They do not change the routing target, but they introduce new problems such as replica-weight transfer, optimizer-state migration, extra token forwarding, hardware dependence, or online-solving overhead. This paper focuses on an underrated but critical question in system-level balancing: where should a replicated expert be placed. A typical replica mechanism reserves a spare slot on a lightly loaded rank, temporarily copies the weights of a hot expert onto it, and lets the lightly loaded rank take over part of the token computation, thereby reducing the strag-gler load without changing the routing. However, existing placement strategies aim only at “best load balance”: they treat spare capacity as a homogeneous resource and ignore that the effective bandwidth and cost of intra-node NVLink differ markedly from those of inter-node InfiniBand/RDMA. arXiv:2608.03676v1 [cs.DC] 4 Aug 2026 Two schemes with almost identical balancing quality can therefore incur completely different communication cost, de-pending on whether expert weights are moved across nodes. This observation leads to the central idea of this paper: MoE replica placement should not optimize load balance alone, but should also treat the communication topology as an ob-jective in the planning. In other words, replica planning must strike the best trade-off between peak-shaving capability and the cost of moving expert weights. Building on this, we propose TAOT (Topology-Aware Optimal Transport), a topology-aware replica-planning and communication-overlapping scheme for MoE guest-expert placement. While preserving the peak-shaving effect, TAOT steers replication toward intra-node placement as much as possible, and thus greatly reduces cross-node communication and the cost of moving expert weights. Furthermore, once ex-pert communication has been effectively reduced, we hide the weight-distribution overhead introduced by the guest-expert mechanism inside the computation of the home experts on the same rank, achieving computation-communication over-lap between hot and cold experts. We implement TAOT on an in-house training frame-work built on Megatron-Core. The results show that TAOT improves the end-to-end training speed by 42 .82% over Megatron-LM. At the same time, TAOT reaches competi-tive or state-of-the-art balance quality compared with exist-ing methods at the algorithmic level, and obtains the lowest weighted expert-communication cost across all configura-tions, with a reduction of up to 74% .The contributions of this paper are summarized as follows: 
+
+• Topology-aware dynamic replica-placement model-ing. TAOT is the first to jointly and explicitly model the per-rank peak-shaving gain and the topology-dependent cost of moving expert weights in guest-expert placement. It obtains the lowest expert-communication cost com-pared with existing state-of-the-art methods while keep-ing competitive or state-of-the-art balance results. 
+
+• A GPU-friendly, low-overhead planning algorithm. 
+
+We formulate rank-level flow planning as an entropy-regularized optimal transport problem and solve it with Sinkhorn-Knopp iterations, producing a soft topology prior that guides integer replica matching. 
+
+• A communication-overlapping execution design. We overlap guest-weight transfer with home-expert compu-tation to further hide the communication overhead intro-duced by the dynamic replicas. 
+
+## Related Work 
+
+MoE was first introduced into deep learning by Shazeer et al. (2017) in a sparsely gated form. GShard and Switch Trans-former later scaled it to trillion parameters (Lepikhin et al. 2021; Fedus, Zoph, and Shazeer 2022), and GLaM, Mixtral, and DeepSeek-V3 further confirmed its capacity and perfor-mance advantages at a comparable compute budget (Liu et al. 2024). To relieve expert load imbalance, routing-level meth-ods typically regulate expert load via auxiliary losses, capac-ity limits, token dropping, expert choice, or dynamic bias ad-justment: ST-MoE targets stability (Zoph et al. 2022), Expert Choice Routing inverts token-choice so experts pick tokens for better balance (Zhou et al. 2022), and BASE Layers and Hash Layers explore alternative assignment schemes (Lewis et al. 2021; Roller et al. 2021), with surveys likewise listing routing balance as a core issue in MoE scaling (Cai et al. 2025). Such methods suppress long-term hot spots at the algorithmic level, but they aim at training stability and ex-pert utilization rather than device-level execution time: an overly strong auxiliary loss weakens semantic routing, ca-pacity limits and expert-choice may drop tokens, and even auxiliary-loss-free routing acts mainly on statistical balance, failing to guarantee equal instantaneous load across EP ranks on any given micro-batch. System-level dynamic-balancing methods reduce strag-glers without changing routing semantics, by adjusting the parallelism strategy, expert layout, expert replicas, or token execution location. One line adaptively tunes parallelism or capacity: FasterMoE replicates hot experts via performance-model-based dynamic shadowing and pipelines the sched-ule (He et al. 2022), SmartMoE switches online among an offline-built pool of parallel strategies (Zhai et al. 2023), and EfficientMoE assigns distinct capacities to hot and cold experts to cut static-graph waste (Zeng et al. 2025). An-other centers on hot-expert replication and weight migration: Echo in Megatron-LM quickly matches replicas by over-flow amount (NVIDIA Megatron-LM Team 2025), LLEP greedily migrates overloaded tokens and expert weights to the least-loaded rank as approximate online spill schedul-ing (Nguyen et al. 2026), and SYMI statically shards opti-mizer states to lower state-migration cost (Skiadopoulos et al. 2026). These serve different problems—strategy switching, state migration, token scheduling, or capacity prediction— and none treats topology-aware placement of guest replicas under multi-node EP as a core objective. Additionally, Dy-namicMoE uses ARIMA to predict load and adjust capac-ity (Wen et al. 2026), and FLEX-MoE performs capacity-constrained expert assignment for federated settings (Zhang et al. 2026). Some work also relies on specific communication paradigms or hardware. LAER-MoE splits expert param-eters across several devices and, under a fixed parameter-and gradient-communication pattern, plans the recovery lo-cation to balance load (Liu et al. 2026). FEPLB uses the NVLink Copy Engine on Hopper for intra-node movement that barely occupies SM, but confines balancing within a node (Qi, Liu, and Zhao 2026). Unlike both, TAOT targets the standard EP setting: it neither depends on LAER-MoE’s fixed, complex communication paradigm nor confines bal-ancing within a node as FEPLB does. The closest work to ours, LPLB, models token-to-spare-slot assignment as a lin-ear program and limits replica communication paths with predefined graph structures such as Cube, Hypercube, or Torus (DeepSeek-AI 2025), when the EP scale grows or hot spots mismatch the fixed adjacency, local capacity is easily exhausted first while distant idle ranks are constrained by the graph, shrinking the feasible region. TAOT instead uses a continuous communication-cost matrix and a soft topology preference, directly expressing in the optimization the trade-off of preferring intra-node placement while allowing cross-B.Three-Phase TAOT Planner(Topology-Aware Optimal Transport)                                 
+
+> Flow Planning (Rank-level OT)
+> Phase 1: Sinkhorn-Knopp
+> Supply ( excess )sDemand ( spare )d
+> Cost Matrix W
+> high low
+> Gibbs Kernel Soft Flow Plan T(Rank-level)
+> (Expert-level Discrete Assignment) Phase 2: Replica Matching Replica Plan Column-priority Matching
+> Flow Hint
+> Hot Experts Cold Ranks (with spare) (from H)
+> 101... 0
+> 010... 1
+> ... ... ... ... ...
+> 100... 1
+> (Token-level Exact Allocation) Phase 3: Auction Assignment
+> Lagrange Auction
+> Assignment X Bid / Price
+> (Prs)
+> (Replica Slots) (Hot Ranks) Senders Slots
+> 1.2 0.7 ...
+> 0.9 1.1 ...
+> ... ... ...
+> ...
+> ...
+> ... ... ...
+
+A.Router Snapshot   
+
+> Router
+> Input Tokens
+> Seq.1 Seq.2
+> Seq.3 Seq.4
+> Rank Load Vector
+> Hot Ranks H Cold Ranks C
+
+D.  Overlapping Expert Weight Communication C.  Topology-aware  Planning Result                
+
+> Home FC1 GEMM
+> expert_dispatch FC1
+> Moe_act
+> Guest FC1 GEMM
+> ... ... ... ...
+> Compute Stream
+> Comm . Stream
+> Home FC2 GEMM
+> expert_dispatch FC2
+> Sync: wait for finishing FC2
+> set expert_weight Sync: wait for finishing FC1
+> set expert_weight
+> FC1 Stage FC2 Stage
+> Guest FC2
+> GEMM
+> GPU 0 GPU 1 GPU 3 GPU 2
+> overload ！overload ！
+> 🔥 🔥 🧊 🧊
+> GPU 0 GPU 1 GPU 3
+> copy copy
+> Node 0 Node 1
+> GPU 2
+> Token Dispatch
+> ...
+> ... ... ...
+> （1）
+> ...
+> ...
+> ...
+
+Figure 1: The TAOT system architecture. node placement when necessary, which better fits multi-node EP with micro-batch-level dynamic hot spots. Overall, existing MoE load-balancing research has covered strategy switching, capacity prediction, expert replication, and expert re-layout, but none of the existing schemes con-siders both the peak-shaving gain and the associated expert-movement cost in the objective function. TAOT effectively fills this gap. 
+
+## Method 
+
+This section first formalizes the guest-expert placement prob-lem, and then presents a three-stage topology-aware optimal transport (OT) planning algorithm. Figure 1 shows the TAOT system architecture. After the router makes its routing deci-sion, we collect the load of each rank and feed it into the three-stage TAOT planner to produce the replica plan. In the forward pass, each rank overlaps the expert-dispatch com-munication with the home GEMM. In the backward pass, the weight gradients produced by the guest experts are sent back to the home rank through a reverse All-to-All (A2A) and accumulated there. 
+
+Problem Formulation 
+
+Consider a distributed training cluster with R EP ranks and 
+
+E experts in total. Each rank holds E/R disjoint experts, and the home rank of expert e is denoted by re. For a given micro-batch, let nre be the number of tokens that rank r
+
+sends to expert e. After dispatch, rank r must compute all tokens that its experts Er receive from every rank, so its actual computation load is ℓr = P
+
+> e∈E r
+
+P 
+
+> r′
+
+nr′e, with global mean 
+
+¯ℓ. We write the overload and the spare capacity of a rank as excess r = max( ℓr − ¯ℓ, 0) and spare r = max( ¯ℓ − ℓr , 0) , and use them to split ranks into a hot set H and a cold set C. The load imbalance is defined as 
+
+ρ = max r ℓr − ¯ℓ
+
+¯ℓ . (1) In training, the iteration time is set by the maximum load, so driving ρ close to zero is the core goal. To absorb the imbalance without changing the routing, we reserve K spare slots on each rank to temporarily host the hot experts copied from overloaded ranks, we call these guest experts. Let zer ∈ { 0, 1} be the replica-placement indicator ( e is held by a hot rank and r ∈ C is the target cold rank). Once the placement z is fixed, the token routing is adjusted accord-ingly, and ρ(z) is the residual imbalance after adjustment. The replica-placement objective is 
+
+min  
+
+> z∈{ 0,1}
+
+ρ(z)
+
+|{z} 
+
+> residual imbalance
+
++μ · X
+
+> e, r
+
+zer · Wre, r 
+
+| {z }
+
+> weighted replica comm. cost
+
+s.t. X
+
+> e
+
+zer ≤ K, ∀r ∈ C 
+
+(2) where μ > 0 trades off the balance quality against the com-munication cost, and Wre,r is the topology communication cost from the home rank of expert e to the target cold rank: it is 1 for intra-node and λ for inter-node. Topology-Aware Optimal Transport Planning 
+
+Solving the two-objective problem jointly is complex, so we decompose it into three stages. Phase 1 plans the global flow direction at the rank level with optimal transport and builds a topology-aware soft flow hint. Phase 2 works at the expert level and combines the flow hint, the spill amount, and the spare capacity to produce an integer replica assignment in a column-first manner. Phase 3 works at the token level and uses a Lagrange auction to finish the exact assignment of each rank to the spare slots. 
+
+Phase 1: Sinkhorn-Knopp topology-aware flow plan-ning. Phase 1 sets up a rank-level balanced optimal transport problem with a topology cost: taking the overload s of each rank as the supply and the spare capacity d as the demand, it seeks a transport plan under the topology cost matrix W :
+
+T ∗ = arg min   
+
+> T≥0
+
+⟨T, W ⟩
+
+s.t. T 1 = s, T ⊤1 = d.
+
+(3) This OT needs an LP solver and is hard to implement on GPUs. Adding a negative-entropy regularizer relaxes it, and the optimal solution then has a Gibbs-kernel struc-ture T ∗ 
+
+> ε
+
+= diag (u)M diag (v), where Mij = exp( −Wij /ε )
+
+and the scaling vectors (u, v) are obtained by alternat-ing Sinkhorn-Knopp GEMV iterations. When ε = λ, the ratio of the intra-node to the inter-node kernel value is 
+
+exp(( λ − 1) /λ ) > 1, which forms a soft topology prefer-ence. Expanding the rank-level plan to the expert dimen-sion by home rank gives the OT flow-hint matrix Ter , whose normalized form serves as the third-level scoring signal in Phase 2. 
+
+Phase 2: Column-first iterative matching. Phase 1 gives a continuous flow reference, but replica placement is inher-ently an integer decision: each cold rank holds at most K
+
+complete replicas, and several cold ranks may compete for the same hot expert. Phase 2 therefore refines the continuous flow into the binary decision of “which expert goes to which spare slot.” It first sorts the experts within each hot rank by load in ascending order and, through cumulative-excess dif-ferencing, computes the spill amount spill e that each expert can share out. When expert e is placed on cold rank r, this match transfers at most min( spill e, spare r ) tokens, i.e., the maximum balance improvement of the match. We score each candidate placement of an expert accordingly: score er = min( spill e, spare r )
+
+| {z }
+
+> main: balance gain
+
++α Ber 
+
+|{z} 
+
+> second: topology pref.
+
++ 0 .1α (Ter )norm 
+
+| {z }
+
+> third: OT flow hint
+
+(4) where α = ¯ℓR/E is a scale-alignment factor that makes the main term far larger than the second, ensuring that balance takes priority over topology preference. Ber is the topology-preference matrix ( 1 intra-node, winter < 1 inter-node, 0
+
+for itself), and the OT hint only acts as a global reference when scores tie. We adopt column-first iterative matching from the viewpoint of the cold ranks: in each round every cold rank independently picks the highest-scoring candidate Algorithm 1: TAOT Planning (Phase 2 & Phase 3) 
+
+Input : spill e, spare r , topology-preference matrix B, OT hint 
+
+Ter , per-rank holdings nre , replica number K, price step ε,iterations Tmax 
+
+Output : Aes (planned amount), Xrs (tokens rank r sends to spare slot s) 
+
+> 1:
+
+// Phase 2: column-first iterative matching  
+
+> 2:
+
+Uer ← 0; Aes ← 0 
+
+> 3:
+
+for k = 0 , . . . , K − 1 do  
+
+> 4:
+
+mr ← 0 
+
+> 5:
+
+for inner = 0 , . . . , |C| − 1 do  
+
+> 6:
+
+ser ← min( spill e, spare r ) + αB er + 0 .1α(Ter )norm  
+
+> 7:
+
+ser ← − ∞ if e ∈ E r ∨ Uer ∨ mr ∨ spare r ≤0 ∨
+
+spill e≤0 
+
+> 8:
+
+e∗ 
+
+> r
+
+← arg max e ser ; V ← { r : max e ser > −∞}  
+
+> 9:
+
+Per ← 1[r ∈ V] 1[e∗ 
+
+> r
+
+=e]; r∗ 
+
+> e
+
+← arg max r (s ⊙
+
+P )er  
+
+> 10:
+
+δer ← 1[r∗ 
+
+> e
+
+=r]Per ; ger ← δer min( spill e, spare r ) 
+
+> 11:
+
+spill e − = P 
+
+> r
+
+ger ; spare r − = P 
+
+> e
+
+ger  
+
+> 12:
+
+Uer | =δer ; mr | =( P 
+
+> e
+
+δer > 0)  
+
+> 13:
+
+end for  
+
+> 14:
+
+A ← A + scatter (g, slot k) 
+
+> 15:
+
+end for  
+
+> 16:
+
+// Phase 3: Lagrange auction token assignment  
+
+> 17:
+
+pr ← 0; Xrs ← 0 
+
+> 18:
+
+for t = 1 , . . . , T max do  
+
+> 19:
+
+srs ← Brs − pr ; srs ← − ∞ if nr,e s ≤0 ∨ Aes,s ≤0 
+
+> 20:
+
+r∗ 
+
+> s
+
+← arg max r srs ; crs ← 1[r∗ 
+
+> s
+
+=r] 
+
+> 21:
+
+s∗ 
+
+> r
+
+← arg max s(s ⊙ c)rs  
+
+> 22:
+
+xr ← min( nr,e s∗ 
+
+> r
+
+, A es∗  
+
+> r,s ∗
+> r
+
+) 1[s∗ 
+
+> r
+
+valid ] 
+
+> 23:
+
+Xr,s ∗ 
+
+> r
+
++ = xr ; nr,e s∗ 
+
+> r
+
+− =xr ; Aes∗  
+
+> r,s ∗
+> r
+
+− =xr 
+
+> 24:
+
+pr + = ε 1[xr > 0]  
+
+> 25:
+
+end for 
+
+expert, conflicts are resolved by an arbitration mechanism, and losers re-select in the next round (see the Phase 2 part of Algorithm 1). 
+
+Phase 3: Lagrange auction token assignment. Phase 2 fixes “expert e plans Aes tokens for spare slot s,” but the tokens of expert e are spread over several ranks, so we still need the actual contribution Xr′es of each rank r′, subject to P 
+
+> r′
+
+Xr′es = Aes and P 
+
+> s
+
+Xr′es ≤ nr′e. A direct pro-portional split would introduce floating-point truncation er-ror and ignore the topology preference. Phase 3 therefore introduces a Lagrange multiplier (price) pr′ for the rank-capacity constraint. In each round every spare slot bids for a source rank by net gain Br′s − pr′ (topology bonus mi-nus current price), after a winning rank is assigned, its price increases monotonically, so its competitiveness naturally de-cays in the next round. This embeds the topology preference while spreading the load evenly (see the Phase 3 part of Algorithm 1). 
+
+## Experiments 
+
+This section evaluates TAOT. We first describe the experi-mental setup, then give the end-to-end performance compar-ison, then compare balance quality and communication cost with SOTA methods along two dimensions, then evaluate the scalability, sensitivity, and online planning overhead of TAOT, and finally ablate the roles of the balanced Sinkhorn flow hint and the topology-cost modeling. 
+
+Experimental Setup 
+
+All end-to-end experiments run on 4 ×8 A800 GPUs. We use the Qwen3-30B-A3B MoE model on the Pile-test dataset (Gao et al. 2020), and compare four methods: Megatron-LM, ECHO, LPLB, and LLEP. As the balancing and communication behavior is corpus-independent, Pile-test is chosen only to provide representative, realistic expert-routing traffic. For metrics, balance quality uses the final im-balance (each rank’s largest load deviation from the average after balancing, as a fraction) and the improvement (initial minus final imbalance, in pp). We also report the number of intra-/inter-node expert transfers and the weighted expert-communication cost (with a 1:3 intra/inter ratio). 
+
+End-to-End Performance 
+
+Figure 2 shows the end-to-end speedup of TAOT on Qwen3-30B-A3B and the accuracy-consistency check. Performance is measured by the forward-plus-backward (F+B) time of a single iteration (the mean of 10 consecutive steps after 20 warm-up steps). TAOT reduces this time from 155.4 ms to 108.8 ms, an end-to-end speedup of 42 .82% . The right plot compares the lm loss over 100 steps: the error range of TAOT relative to standard EP is −0.878 ‰ to 2.237 ‰, with a mean absolute relative error of 0.297 ‰, staying stably within 
+
+±3‰. This shows that the guest-expert path neither changes the target-expert semantics of the tokens nor breaks the up-date semantics in which guest gradients are returned and ac-cumulated to the home expert during back-propagation. The speedup comes from better load balance and from expert communication being effectively hidden, not from sacrific-ing numerical precision. Base   
+
+> TAOT
+> 0 50  100  150
+> Time per F+B (ms)  1.00×
+> 1.43×
+> 050 100
+> Training step
+> −6  −3  0 3 6
+> Signed loss rel. error (‰)
+> ±3‰
+
+Figure 2: TAOT end-to-end speedup and loss consistency. 
+
+Balance Quality and Communication Cost 
+
+To evaluate the balance quality and communication cost of the algorithm itself, we construct five initial imbalance levels of 10%, 20%, 30%, 50%, and 70%, and compare with three SOTA methods under EP=16 and EP=32. Table 1 summa-rizes the results of each method, where LPLB uses the Cube topology at EP=16 and the Torus 4 ×8 topology at EP=32. Figure 3 shows how the final imbalance and the weighted cost change with the initial imbalance. 10% 20% 30% 50% 70%                
+
+> Initial Load Imbalance
+> 1.0%  2.0%
+> Final Load Imbalance  EP = 16
+> 10% 20% 30% 50% 70%
+> Initial Load Imbalance
+> 2.0%  4.0%  6.0%
+> Final Load Imbalance  EP = 32
+> 10% 20% 30% 50% 70%
+> Initial Load Imbalance
+> 0 20  40
+> Weighted Comm. Cost  EP = 16
+> 10% 20% 30% 50% 70%
+> Initial Load Imbalance
+> 0 50  100
+> Weighted Comm. Cost  EP = 32
+> ECHO LLEP LPLB TAOT(ours)
+
+Figure 3: Balance effect and weighted expert-communication cost of each method. Since LLEP reserves no spare slot, it can reach any tar-get imbalance level by adjusting its transfer threshold. We therefore align LLEP’s final imbalance to that of TAOT to compare their routing communication cost fairly under the same balance quality, so LLEP does not enter the balance-quality ranking. In the end-to-end experiments above, expert communication and computation take a ratio of about 1:7. Thus, when two methods differ by only 1 pp in imbalance, a communication reduction of about 7% can offset the extra cost from the computation tail. As the EP scale grows, this critical value drops further: the larger the EP, the shorter the per-rank computation window and the more transfer candi-dates, so communication takes a larger share. We therefore report balance quality and communication cost as two sep-arate metrics, rather than merging them into a single metric via a coefficient. 
+
+Balance quality. At EP=16, TAOT is close to the best overall: it ties for best at 10%, and from 20% to 70% it trails LPLB by only about 1 pp, while turning this small gap into a communication drop that is more valuable to the end-to-end result. This is a “low-communication trade-off under near-best balance,” not a plain ranking loss. At EP=32, TAOT is best or tied for best in all cases, showing that as the scale grows it keeps low communication and gains stronger peak-shaving. LPLB degrades from EP=16 to EP=32 because of the cou-pling between the hard topology and the load distribution. At Initial Method EP=16 EP=32 Improve (pp) Weighted comm. cost Intra-node transfer Inter-node transfer Improve (pp) Weighted comm. cost Intra-node transfer Inter-node transfer 
+
+10% ECHO (Megatron-LM) -9.4 24 6 6 -9.5 72 3 23 LLEP (ICML 2026) -9.4 20 5 5 -9.5 44 5 13 LPLB (DeepSeek) -8.8 32 32 0 -8.6 128 32 32 TAOT (Ours) -9.4 17 8 3 -9.5 38 17 720% ECHO (Megatron-LM) -18.8 27 6 7 -18.9 72 3 23 LLEP (ICML 2026) -18.9 21 6 5 -19.1 51 3 16 LPLB (DeepSeek) -19.3 32 32 0 -18.4 128 32 32 TAOT (Ours) -18.9 15 9 2 -19.1 38 17 730% ECHO (Megatron-LM) -27.7 24 9 5 -28.2 75 6 23 LLEP (ICML 2026) -28.7 22 7 5 -28.4 42 3 13 LPLB (DeepSeek) -28.9 32 32 0 -27.6 128 32 32 TAOT (Ours) -28.7 18 9 3 -28.4 37 16 750% ECHO (Megatron-LM) -48.2 30 9 7 -49.1 71 8 21 LLEP (ICML 2026) -48.5 23 8 5 -49.4 58 4 18 LPLB (DeepSeek) -49.6 32 32 0 -47.2 128 32 32 TAOT (Ours) -48.5 18 12 2 -49.4 44 14 10 70% ECHO (Megatron-LM) -68.2 42 6 12 -66.4 74 5 23 LLEP (ICML 2026) -68.9 29 5 8 -66.7 40 4 12 LPLB (DeepSeek) -69.5 32 32 0 -63.0 128 32 32 TAOT (Ours) -68.9 27 9 6 -66.7 33 18 5Table 1: Comprehensive comparison of load-balancing performance across different EP scales and initial balance conditions. For the improvement and the weighted comm. cost, the best in each group is shown in bold. EP=16, each rank holds 16 experts, the Cube topology fits the 2-node, 8-card layout, and hot spot overflow can be fully absorbed by nearby ranks within a node. At EP=32, each rank holds only 8 experts, hot spots are split across more nodes, and the Torus 4 ×8 fixes the migration paths onto adjacent edges, so as the imbalance grows, the capacity around the hot spots is exhausted first while distant idle ranks are unreach-able under the topology constraint. TAOT, in contrast, forms a soft topology preference through the balanced Sinkhorn flow hint: it takes the low-cost path when intra-node capacity is enough and accesses cross-node capacity in increasing or-der of cost when it is not, so the many more low-load ranks at EP=32 instead enlarge its candidate space for offloading. 
+
+Expert communication cost. TAOT has the lowest cost across all ten configurations. At EP=16 it is 15–27, up to 53% lower than LPLB’s fixed 32; at EP=32 it is 33–44, up to 55% lower than ECHO and up to 74% lower than LPLB. LPLB plans all spare slots with a predefined Cube/Torus graph, so its cost is set by the topology scale and barely changes with hot spot strength (EP=16: a fixed 32 intra-node and 0 inter-node copies; EP=32: a fixed 32+32 copies, i.e., 128 weighted units), offsetting part of the balance gain end to end. The LLEP result shows the same target imbalance does not imply the same communication efficiency: at 70% and EP=32, TAOT costs 33 while LLEP costs 40. The difference lies in the placement strategy: LLEP fills idle ranks by load via LPT scheduling and lacks continuous topology-cost mod-eling, whereas TAOT puts intra-/inter-node communication cost directly into placement and consumes low-cost capacity first, making fewer cross-node copies under the same target. In summary, at EP=16 TAOT trades a tiny residual im-balance for the lowest communication cost, and at EP=32 it leads in both balance quality and communication cost. This is because a larger scale offers more low-load ranks for of-floading, and the balanced Sinkhorn flow hint can make fuller use of the global capacity without being bound by fixed ad-jacency. This trend is confirmed in Figure 3. In terms of imbalance, TAOT is stably second-best at EP=16 and turns to best or tied for best at EP=32, while LPLB rises to 7.0% in the high-imbalance region at EP=32, reflecting the shrinking feasible region of the Torus, and ECHO also falls behind in the high-imbalance region for lacking global topology mod-eling. In terms of communication cost, LPLB is fixed at 32 and 128 and decoupled from the hot spot strength, while TAOT, ECHO, and LLEP transfer on demand, with TAOT the lowest throughout. 
+
+Scalability and Parameter Sensitivity 
+
+This section evaluates TAOT under different EP scales, ini-tial imbalance levels, and numbers of guest slots per rank, as well as the running time of the balancing algorithm under dif-ferent initial imbalance levels. The imbalance is constructed following LLEP, i.e., routing 30%, 50%, 70%, and 90% of the tokens to the same rank and sending the rest at random. Figure 4 shows the four groups of results. 
+
+EP scalability. As shown in Figure 4(a), the speedup of EP4 EP8 EP16                      
+
+> EP size
+> 0 1 2
+> Normalized speedup
+> 1.00× 1.00× 1.00×
+> 1.08× 1.30×
+> 1.79×
+> (a) EP scalability
+> Base
+> TAOT
+> 30% 50% 70% 90%
+> Initial imbalance
+> 0.0  0.5  1.0  1.5  2.0
+> 1.00× 1.00× 1.00× 1.00×
+> 1.21× 1.38× 1.57× 1.75×
+> (b) Imbalance scalability
+> 124816
+> Guest slots per EP rank
+> 1.05  1.10  1.15  1.20  1.25
+> memory boundary
+> 1.12×
+> 1.21× 1.23× 1.22×
+> 1.21×
+> (c) Guest-slot sensitivity
+> 30% 50% 70% 90%
+> Initial imbalance
+> 0.0  0.5  1.0
+> Planning / forward (%)
+> 1% of forward
+> 0.58% 0.54% 0.61% 0.62%
+> (d) Planning overhead
+
+Figure 4: Scalability and parameter-sensitivity results of TAOT. TAOT keeps rising as the EP scale grows from EP4 to EP16, up to 1.79 ×. This shows that a larger EP scale offers richer global spare capacity and a larger search space for topology-aware planning, so TAOT can find more low-communication-cost offloading paths for hot spot tokens. 
+
+Imbalance scalability. As shown in Figure 4(b), when the initial imbalance rises from 30% to 90%, the speedup of TAOT grows from 1.21 × to 1.75 ×, showing stronger adaptability to highly imbalanced cases. The more severe the initial imbalance, the more prominent the computation tail of the hot ranks, and the larger the tail load that the guest-expert mechanism can cut, while the topology-aware cost matrix suppresses cross-node transfer cost, so the peak-shaving gain is kept in the end-to-end execution. 
+
+Guest-slot sensitivity. As shown in Figure 4(c), the gain rises as the number of guest slots per rank grows from 1 to 4 and peaks at 4, then stops growing and drops slightly at 8 and 16, reflecting the trade-off between offloadable capac-ity and system overhead. Considering both performance and memory (memory stays basically the same as Base when the number of slots is at most 2), 2 guest slots per rank is the better choice in this experiment. 
+
+Balancing-algorithm overhead. As shown in Figure 4(d), the online planning overhead of TAOT stays below 1% of the forward time and does not scale linearly with the imbalance. This shows that the TAOT algorithm is light enough to be applied at the micro-batch granularity without becoming a new system bottleneck. In summary, the gain of TAOT grows with the EP scale, thanks to the global spare capacity offered by a larger paral-lel domain, and also grows with the imbalance, thanks to the effective conversion of the hot spot tail load. The guest slots have a clear empirical optimal range that balances load, com-munication, and memory under limited resources. Together with the below-1% online overhead, this shows that the main gain comes from the algorithm design and the system execu-tion path itself. 
+
+Ablation Study 
+
+To analyze how each design in the TAOT algorithm affects the result, this section performs an algorithm-level ablation at EP=32 and an initial imbalance of 70%, and reports the mean and standard deviation over several random seeds. Table 2 treats the Phase 1 flow hint and the Phase 2 communication-cost modeling as two switches. Phase 3 only assigns tokens and does not change the replica location, so it is not ablated.                         
+
+> Phase 1 flow hint Phase 2 comm. cost Final imbalance Intra transfers Inter transfers Weighted cost
+> ××1.95% 4.67 18 .33 59 .67
+> ±0.18 ±1.70 ±1.25 ±2.36
+> ×✓2.00% 14 .67 10 .00 44 .67
+> ±0.82 ±0.94 ±1.41 ±3.86
+> ✓✓1.48 %15 .00 9.67 44 .00
+> ±0.26 ±0.82 ±1.70 ±4.55
+
+Table 2: Ablation of the TAOT planning algorithm. The ablation shows that the two components each do their own job and neither can be dropped. After adding Phase 2, the number of inter-node transfers drops from 18.33 to 10.00 and the weighted communication cost drops from 59.67 to 44.67, while the imbalance stays at about 2%, showing that it constrains replicas to the intra-node side first while keep-ing the peak-shaving ability. Adding Phase 1 on top of this further drops the imbalance from 2.00% to 1.48%, and the communication cost drops as well, showing that the rank-level flow hint, as a global reference, avoids the case where the local greediness of column-first matching makes some communication paths unreasonable, thus further improving balance quality and lowering communication cost. Under the two working together, the best balance-communication trade-off is reached. 
+
+## Conclusion 
+
+We present TAOT, a topology-aware optimal transport method for dynamic expert-replica placement, which ad-dresses the load imbalance caused by dynamic routing in MoE expert-parallel training while controlling the cost of moving expert weights. The method unifies the peak-shaving gain and the cross-node communication cost between over-loaded and lightly loaded ranks into an entropy-regularized optimal transport problem, and combines Sinkhorn flow hints, integer replica matching, and token assignment to gen-erate an executable schedule. At the system level, it further hides the communication overhead by overlapping guest-weight transfer with home-expert computation. References 
+
+Adcock, A.; Srivastava, A.; Dubey, A.; et al. 2026. The Llama 4 Herd: Architecture, Training, Evaluation, and Deployment Notes. arXiv preprint arXiv:2601.11659 .Cai, W.; Jiang, J.; Wang, F.; et al. 2025. A Survey on Mixture of Experts in Large Language Models. IEEE Transactions on Knowledge and Data Engineering .DeepSeek-AI. 2025. LPLB: Linear-Programming-Based Load Balancer for Mixture-of-Experts Models. https:// github.com/deepseek-ai/LPLB. Du, N.; et al. 2022. GLaM: Efficient Scaling of Language Models with Mixture-of-Experts. In International Confer-ence on Machine Learning (ICML) , 5547–5569. PMLR. Fedus, W.; Zoph, B.; and Shazeer, N. 2022. Switch Trans-formers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity. Journal of Machine Learning Re-search , 23(120): 1–39. Gao, L.; Biderman, S.; Black, S.; Golding, L.; Hoppe, T.; Foster, C.; Phang, J.; He, H.; Thite, A.; Nabeshima, N.; Presser, S.; and Leahy, C. 2020. The Pile: An 800GB Dataset of Diverse Text for Language Modeling. arXiv preprint arXiv:2101.00027 .He, J.; Zhai, J.; Antunes, T.; Wang, H.; Luo, F.; Shi, S.; and Li, Q. 2022. FasterMoE: Modeling and Optimizing Training of Large-Scale Dynamic Pre-Trained Models. In Proceedings of the 27th ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming (PPoPP) , 120–134. Hwang, C.; Cui, W.; Xiong, Y.; Yang, Z.; Liu, Z.; Hu, H.; Wang, Z.; Salas, R.; Jose, J.; Ram, P.; et al. 2023. Tutel: Adaptive Mixture-of-Experts at Scale. Proceedings of Ma-chine Learning and Systems , 5: 269–287. Jiang, A. Q.; et al. 2024. Mixtral of Experts. arXiv preprint arXiv:2401.04088 .Kimi Team; Bai, Y.; Bao, Y.; et al. 2025. Kimi K2: Open Agentic Intelligence. arXiv preprint arXiv:2507.20534 .Lepikhin, D.; Lee, H.; Xu, Y.; Chen, D.; Firat, O.; Huang, Y.; Krikun, M.; Shazeer, N.; and Chen, Z. 2021. GShard: Scaling Giant Models with Conditional Computation and Automatic Sharding. In International Conference on Learning Repre-sentations (ICLR) .Lewis, M.; Bhosale, S.; Dettmers, T.; Goyal, N.; and Zettle-moyer, L. 2021. BASE Layers: Simplifying Training of Large, Sparse Models. In International Conference on Ma-chine Learning (ICML) , 6265–6274. PMLR. Liu, A.; et al. 2024. DeepSeek-V3 Technical Report. arXiv preprint arXiv:2412.19437 .Liu, X.; Wang, Y.; Fu, F.; Xiao, X.; Li, H.; Li, J.; and Cui, B. 2026. LAER-MoE: Load-Adaptive Expert Re-Layout for Ef-ficient Mixture-of-Experts Training. In International Confer-ence on Architectural Support for Programming Languages and Operating Systems (ASPLOS) , volume 2, 1055–1072. Nguyen, X.-P.; Pandit, S.; Xu, A.; Xiong, C.; and Joty, S. 2026. Least-Loaded Expert Parallelism: Load Balancing an Imbalanced Mixture-of-Experts. In International Confer-ence on Machine Learning (ICML) .NVIDIA Megatron-LM Team. 2025. MoE ECHO: Unlock-ing Sync-Free, Full CUDA-Graph Support for Dropless MoE via Elastic Cloning. Megatron-LM Pull Request #2368. https://github.com/NVIDIA/Megatron-LM/pull/2368. Qi, S.; Liu, H.; and Zhao, S. 2026. FEPLB: Exploiting Copy Engines for Nearly Free MoE Load Balancing in Distributed Training. arXiv preprint arXiv:2604.19654 .Rajbhandari, S.; Li, C.; Yao, Z.; Zhang, M.; Aminabadi, R. Y.; Awan, A. A.; Rasley, J.; and He, Y. 2022. DeepSpeed-MoE: Advancing Mixture-of-Experts Inference and Training to Power Next-Generation AI Scale. In International Confer-ence on Machine Learning (ICML) , 18332–18346. PMLR. Roller, S.; Sukhbaatar, S.; Szlam, A.; and Weston, J. 2021. Hash Layers for Large Sparse Models. In Advances in Neu-ral Information Processing Systems (NeurIPS) , volume 34, 17555–17566. Shazeer, N.; Mirhoseini, A.; Maziarz, K.; Davis, A.; Le, Q.; Hinton, G.; and Dean, J. 2017. Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer. In International Conference on Learning Represen-tations (ICLR) .Shoeybi, M.; Patwary, M.; Puri, R.; LeGresley, P.; Casper, J.; and Catanzaro, B. 2019. Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Paral-lelism. arXiv preprint arXiv:1909.08053 .Skiadopoulos, A.; Zhao, M.; Gandhi, S.; Norrie, T.; Mukher-jee, S.; and Kozyrakis, C. 2026. SYMI: Efficient Mixture-of-Experts Training via Model and Optimizer State Decoupling. In USENIX Symposium on Networked Systems Design and Implementation (NSDI) , 75–92. Vaswani, A.; Shazeer, N.; Parmar, N.; Uszkoreit, J.; Jones, L.; Gomez, A. N.; Kaiser, L.; and Polosukhin, I. 2017. At-tention Is All You Need. In Advances in Neural Information Processing Systems (NeurIPS) , volume 30. Wen, J.-L.; Li, X.-J.; Yao, J.-P.; Sun, H.-F.; and An, X.-R. 2026. Consensus-Expert DynamicMoE: ARIMA-Based Ca-pacity Prediction with Adaptive Load Balancing for Sparse Models. International Journal of Computational Intelligence Systems , 19(1): 157. Yang, A.; et al. 2025. Qwen3 Technical Report. arXiv preprint arXiv:2505.09388 .Zeng, Y.; Huang, C.; Mei, Y.; Zhang, L.; Su, T.; Ye, W.; Shi, W.; and Wang, S. 2025. EfficientMoE: Optimizing Mixture-of-Experts Model Training with Adaptive Load Bal-ance. IEEE Transactions on Parallel and Distributed Sys-tems , 36(4): 677–688. Zhai, M.; He, J.; Ma, Z.; Zong, Z.; Zhang, R.; and Zhai, J. 2023. SmartMoE: Efficiently Training Sparsely-Activated Models through Combining Offline and Online Paralleliza-tion. In 2023 USENIX Annual Technical Conference (USENIX ATC 23) , 961–975. Zhang, B.; Chen, X.; Zhang, S.; Zhang, S.; Zhou, X.; and Sun, M. 2026. FLEX-MoE: Federated Mixture-of-Experts with Load-Balanced Expert Assignment. In Proceedings of the AAAI Conference on Artificial Intelligence .Zhao, C.; Wu, W.; Song, L.; Xu, Y.; and Yuan, Y. 2025. MicroMoE: Fine-Grained Load Balancing for Mixture-of-Experts with Token Scheduling. arXiv preprint arXiv:2511.16947 .Zhou, Y.; Lei, T.; Liu, H.; Du, N.; Huang, Y.; Zhao, V.; Dai, A. M.; Chen, Z.; Le, Q. V.; and Laudon, J. 2022. Mixture-of-Experts with Expert Choice Routing. In Advances in Neural Information Processing Systems (NeurIPS) , 7103–7114. Zoph, B.; Bello, I.; Kumar, S.; Du, N.; Huang, Y.; Dean, J.; Shazeer, N.; and Fedus, W. 2022. ST-MoE: Designing Sta-ble and Transferable Sparse Expert Models. arXiv preprint arXiv:2202.08906 .A Supplementary Details for the Method 
+
+Due to space limits, the Method section of the main paper gives only the key steps of the problem formulation and the three-phase planning algorithm. This appendix provides the complete version: the full problem formulation with all def-initions (§A.1), and the three planning phases with their full derivations and the two planning algorithms in full (§A.2– A.4). 
+
+A.1 Problem Formulation 
+
+To cast the guest expert placement problem into a uni-fied optimization framework rather than relying entirely on topology-unaware greedy heuristics, we first establish a mathematical model. Consider a distributed training cluster with R EP ranks deploying E experts in total, where each rank holds E/R 
+
+experts with disjoint expert sets across ranks. Let Er denote the set of experts held by rank r, and let re denote the home rank of expert e. For a given micro-batch, let nre denote the number of tokens sent by rank r to expert e. After All-to-All dispatch, the actual computational load on rank r is 
+
+ℓr = X
+
+> e∈E r
+> R−1
+
+X
+
+> r′=0
+
+nr′e. (5) Let the global mean load be ¯ℓ = 1
+
+> R
+
+P 
+
+> r
+
+ℓr . The excess load and spare capacity of rank r are 
+
+excess r = max( ℓr − ¯ℓ, 0) , spare r = max( ¯ℓ − ℓr , 0) .
+
+(6) The load imbalance ratio is 
+
+ρ = max( ℓ0, ℓ 1, . . . , ℓ R−1) − ¯ℓ
+
+¯ℓ . (7) In synchronous training, overall latency is determined by 
+
+max r ℓr ; reducing ρ to near zero is the primary objective. The sets of hot ranks and cold ranks are 
+
+H = {r | excess r > 0}, C = {r | spare r > 0}. (8) Let zer ∈ { 0, 1} be the replica placement indicator, where 
+
+e is an expert held by a hot rank ( re ∈ H ) and r ∈ C is the target cold rank. Once a placement scheme z is deter-mined, token routing is adjusted accordingly; let ρ(z) denote the residual imbalance after adjustment. The optimization objective is 
+
+min 
+
+> z∈{ 0,1}E×|C|
+
+ρ(z)
+
+|{z} 
+
+> residual imbalance
+
++μ · X
+
+> e,r
+
+zer · Wre,r 
+
+| {z }
+
+> weighted replica comm. cost
+
+s.t. X
+
+> e
+
+zer ≤ K, ∀r ∈ C 
+
+(9) where μ > 0 is a trade-off coefficient between balancing ef-fectiveness and communication cost, and Wre,r is the com-munication cost from the home rank re of expert e to target cold rank r, defined by the cluster topology: 
+
+Wre,r =
+
+1 if re and r are on the same node 
+
+λ if re and r are on different nodes. (10) The parameter λ > 1 reflects the bandwidth disparity be-tween inter-node and intra-node links; we set λ = 3 in our experiments. The fundamental limitation of existing replica placement strategies is that their objectives include only the 
+
+ρ(z) term, with communication cost Wre,r entirely absent, causing replicas to scatter across inter-node ranks and in-curring unnecessary inter-node communication overhead. This paper incorporates Wre,r into the replica-placement objective, weighted by the 0/1 indicator zer , to reflect the fixed topology-dependent cost of transmitting guest expert weights during expert dispatch. Because this objective jointly involves discrete replica selection, spare-slot capacity con-straints, and integer token assignment, we do not directly solve the mixed-integer problem. Instead, we use Sinkhorn-Knopp iterations to construct a rank-level topology-aware flow hint, and then generate an executable plan through dis-crete matching and token assignment. 
+
+A.2 Phase 1: Sinkhorn-Knopp Topology-Aware Flow Planning 
+
+The bi-objective problem above involves both discrete replica placement decisions and continuous token allocation, and di-rect joint solving causes the problem scale to grow rapidly with the EP degree. We decompose it into three cooperative, progressively refined phases. Phase 1 uses balanced opti-mal transport to generate rank-level topology-aware soft flow hints; Phase 2 combines the flow hints with residual spillover and spare capacity to produce integer replica assignments at expert granularity, using column-priority competition to en-sure fair scheduling across ranks; Phase 3 performs precise token-to-spare-slot assignment at token granularity via a La-grangian auction. When deciding which hot ranks’ excess load should be offloaded to which cold ranks, we prefer routing overflow along intra-node bandwidth. This is a global trade-off prob-lem in which greedy incremental allocation cannot guarantee globally consistent topology preferences. Phase 1 formulates a rank-level topology-cost optimal transport problem: the excess-load vector s ∈ RR provides supply, and the spare-capacity vector d ∈ RR provides demand, with zero supply on non-hot ranks and zero demand on non-cold ranks. Since both vectors are defined with respect to the same mean load 
+
+¯ℓ, they have equal total mass in exact arithmetic: 
+
+> R−1
+
+X
+
+> r=0
+
+sr =
+
+> R−1
+
+X
+
+> r=0
+
+dr . (11) Therefore, Phase 1 uses balanced OT rather than unbalanced OT. Given the topology cost matrix W ∈ RR×R, the rank-level transport plan T ∗ ∈ RR×R 
+
+> ≥0
+
+satisfies equality marginal constraints: 
+
+T ∗ = arg min   
+
+> T≥0
+
+⟨T, W ⟩
+
+s.t. T 1 = s, T ⊤1 = d.
+
+(12) The raw OT problem requires LP solving, which is com-plex to implement on GPU. Introducing a negative-entropy regularization term H(T ) = − P 
+
+> ij
+
+Tij log Tij relaxes it to 
+
+T ∗ 
+
+> ε
+
+= arg min   
+
+> T≥0
+
+⟨T, W ⟩ − εH (T )
+
+s.t. T 1 = s, T ⊤1 = d.
+
+(13) The optimal solution of this relaxed problem possesses a Gibbs kernel structure. Constructing the Gibbs kernel ma-trix M ∈ RR×R with elements Mij = exp( −Wij /ε ), the optimal solution takes the form 
+
+T ∗ 
+
+> ε
+
+= diag( u) M diag( v). (14) Setting ε = λ, the kernel value ratio between intra-node and inter-node entries is 
+
+Mintra 
+
+Minter 
+
+= exp 
+
+ λ − 1
+
+λ
+
+
+
+. (15) This induces soft topological preferences. Unlike LPLB, which imposes predefined graph topologies (Cube, Torus) as hard constraints, soft preferences preserve a larger candidate space under extreme imbalance: when intra-node capacity is insufficient, inter-node ranks remain feasible candidates with higher cost rather than being removed by a fixed graph. The scaling vectors (u, v) are solved via alternating Sinkhorn-Knopp GEMV iterations: 
+
+u(t+1) = ˜s
+
+M v(t) , v(t+1) = d
+
+M ⊤u(t+1) , (16) where ˜s = γs and γ = min(1 , P 
+
+> r
+
+dr / max( P 
+
+> r
+
+sr , ϵ 0)) . In exact arithmetic, ˜s = s; this scaling is only an implemen-tation safeguard against integer mean loads, finite precision, or anomalous inputs that make the total supply slightly ex-ceed the total demand. After a fixed number of iterations, we obtain T = diag( u)M diag( v). The implementation further applies a column-cap safeguard: 
+
+Tij ← Tij · min 
+
+
+
+1, dj
+
+P 
+
+> i
+
+Tij + ϵ0
+
+
+
+, (17) which ensures that the flow hint does not numerically exceed each target rank’s spare capacity. These supply scaling and column cap operations are not an unbalanced OT solver; they are feasibility safeguards around a balanced Sinkhorn flow hint. The Phase 1 output is not executed directly. Instead, the rank-level plan is expanded to the expert dimension according to each expert’s home rank. This yields the OT flow hint matrix Ter ∈ RE×R, where each element (Ter )e,r = Tre,r 
+
+represents the Phase 1 flow strength for offloading expert e
+
+from its home rank re to cold rank r. Its normalized form is used as the third-level scoring signal in Phase 2. 
+
+A.3 Phase 2: Column-Priority Iterative Matching 
+
+Phase 1 provides a rank-level flow hint, but replica placement is fundamentally an integer decision. Each cold rank accom-modates at most K complete expert replicas, and multiple cold ranks may simultaneously contend for the same hotspot expert. Phase 2 combines this hint with residual spillover and spare capacity to produce concrete binary decisions of the form which expert is placed in which spare slot. Within each hot rank, experts are sorted in ascending order of load, and the spillover amount spill e that each expert can externally absorb is computed via cumulative excess differencing. Let xr, 1 ≤ xr, 2 ≤ · · · ≤ xr,E/R be the sorted expert loads; the cumulative excess of rank r at position k is 
+
+σr,k = max 
+
+
+
+> k
+
+X
+
+> j=1
+
+xr,j − ¯ℓ, 0
+
+ , (18) and the marginal spillover contribution at sorted position k
+
+is 
+
+˜sr,k = σr,k − σr,k −1, (σr, 0 = 0) . (19) After remapping to original expert indices we obtain spill ∈
+
+RE , ensuring lightly loaded experts have zero spillover while heavily loaded experts progressively assume spill responsi-bility in proportion to their marginal contribution. Mean-while, spare r = max( ¯ℓ − ℓr , 0) denotes the remaining ca-pacity that cold rank r can accept relative to the mean load 
+
+¯ℓ. Therefore, when expert e is placed on cold rank r, at most 
+
+min(spill e, spare r ) tokens can be redistributed, which rep-resents the maximum load-balance improvement achievable by this match. Phase 2 selects K hot experts for each cold rank r and determines allocation amounts ger ≥ 0 to maximize total redistributed load: 
+
+max  
+
+> ger ≥0
+
+X
+
+> e, r ∈C
+
+ger 
+
+s.t. X
+
+> r
+
+ger ≤ spill e, ∀e
+
+X
+
+> e
+
+ger ≤ spare r , ∀r ∈ C |{ e | ger > 0}| ≤ K, ∀r ∈ C .
+
+(20) A three-level priority score is defined for each (cold rank r,hot expert e) pair: 
+
+score er = min(spill e, spare r )
+
+| {z }
+
+> primary: balance gain
+
++ α Ber 
+
+|{z} 
+
+> secondary: topo. pref.
+
++0 .1α (Ter )norm 
+
+| {z }
+
+> tertiary: OT hint
+
+(21) where α = ¯ℓR/E is a dimensional alignment coefficient ensuring the primary term dominates the secondary, so bal-ance effectiveness takes priority over topological preference. 
+
+(Ter )norm = Ter / max(excess re , ϵ 0) denotes the normalized OT flow hint. It measures the relative strength of the Phase 1 recommendation to offload expert e from its home rank re
+
+to cold rank r, and serves as a global-optimality tiebreaker. The topology preference matrix Ber is 
+
+Ber =
+
+
+
+1 if e and rank r are intra-node 
+
+winter if e and rank r are inter-node, winter < 10 if e belongs to rank r (home). (22) The choice of matching direction is critical. If experts are iterated as the outer loop (row-priority), heavily loaded ex-perts greedily occupy all spare slots, leaving lightly loaded Algorithm 2: Column-Priority Iterative Matching (Phase 2) 
+
+Require: Spillover spill e, spare capacity spare r , topology preference matrix Ber , OT hint Ter , replica count K
+
+Ensure: A ∈ ZE×S 
+
+> ≥0
+
+: planned token count from expert e to spare slot s (S = |C| × K)
+
+1: Uer ← 0 ( ∀e, r ); Aes ← 0 ( ∀e, s ) {Uer =1 : expert e as-signed to rank r}
+
+2: for k ← 0, 1, . . . , K − 1 do 
+
+3: mr ← 0 ( ∀r) {cold ranks matched in this round} 
+
+4: for inner ← 0, 1, . . . , |C| − 1 do 
+
+5: // Step 1: Compute scores and mask invalid entries 
+
+6: score er ← min(spill e, spare r ) + αB er +0.1α(Ter )norm 
+
+7: if e ∈ E r or Uer =1 or mr =1 or spare r ≤0 or 
+
+spill e≤0 then 
+
+8: score er ← − ∞ 
+
+9: end if 
+
+10: // Step 2: Cold ranks choose best experts 
+
+11: e∗ 
+
+> r
+
+← arg max e score er ;
+
+V ← { r | max e score er > − ∞} 
+
+12: // Step 3: Resolve expert-rank conflicts 
+
+13: Per ← 1[r ∈ V ] · 1[e∗ 
+
+> r
+
+=e]
+
+14: r∗ 
+
+> e
+
+← arg max r (score ⊙ P )er (∀ e : P 
+
+> r
+
+Per >0) 
+
+15: δer ← 1[r∗ 
+
+> e
+
+=r] · Per 
+
+16: // Step 4: Update assignments and residuals 
+
+17: ger ← δer · min(spill e, spare r )
+
+18: spill e −= P 
+
+> r
+
+ger ; spare r −= P 
+
+> e
+
+ger 
+
+19: Uer ← Uer ∨ δer ; mr ← mr ∨ (P 
+
+> e
+
+δer >0) 
+
+20: end for 
+
+21: A ← A + scatter( g, spare slot k)
+
+22: end for 
+
+ranks with insufficient scheduling opportunities and residual imbalance of 7–10%. To address this, we propose column-priority iterative matching from the cold rank perspective. In each round, every cold rank independently selects its highest-scoring candidate expert. If multiple cold ranks select the same expert, a conflict arbitration mechanism keeps the best match and lets the losing cold ranks re-enter the next round. This perspective shift guarantees each cold rank an indepen-dent competition opportunity per round, reducing residual imbalance to 1–2%. The detailed procedure is given in Algo-rithm 2; the outer loop runs K times, the inner loop resolves conflicts with a fixed iteration count, and the entire procedure is free of dynamic branches. 
+
+A.4 Phase 3: Lagrangian Auction Token Assignment 
+
+Phase 2 determines that expert e plans to assign Aes tokens to spare slot s; however, tokens for expert e are distributed across multiple ranks ( nr′e tokens per rank r′), requiring determination of the actual contribution Xr′es from each rank r′, subject to 
+
+X
+
+> r′
+
+Xr′es = Aes , X
+
+> s
+
+Xr′es ≤ nr′e, Xr′es ≥ 0. (23) Algorithm 3: Lagrangian Auction Token Assignment (Phase 3) 
+
+Require: Token counts nre (per rank per expert), planned allocation Aes (from Alg. 2), topology bonus Brs , price step ε, iteration count Tmax 
+
+Ensure: Xrs ∈ Z≥0: actual token count from rank r to spare slot s
+
+1: pr ← 0 (∀r); Xrs ← 0 (∀r, s ) {Initialize Lagrange multipliers} 
+
+2: for t ← 1, 2, . . . , T max do 
+
+3: // Step 1: Spare slots bid for source ranks 
+
+4: score rs ← Brs − pr
+
+5: if nr,e s ≤ 0 or Aes,s ≤ 0 then 
+
+6: score rs ← − ∞ 
+
+7: end if 
+
+8: r∗ 
+
+> s
+
+← arg max r score rs 
+
+9: // Step 2: Ranks serve highest-profit slots 
+
+10: crs ← 1[r∗ 
+
+> s
+
+=r]
+
+11: s∗ 
+
+> r
+
+← arg max s (score ⊙ c)rs 
+
+12: // Step 3: Compute allocation (bounded by nre , Aes )
+
+13: xr ← min( nr,e s∗ 
+
+> r
+
+, A es∗  
+
+> r,s ∗
+> r
+
+) · 1[s∗ 
+
+> r
+
+valid ]
+
+14: // Step 4: Update X, n, A, and Lagrange multipliers 
+
+15: Xr,s ∗ 
+
+> r
+
+← Xr,s ∗ 
+
+> r
+
++ xr
+
+16: nr,e s∗ 
+
+> r
+
+← nr,e s∗ 
+
+> r
+
+− xr
+
+17: Aes∗  
+
+> r,s ∗
+> r
+
+← Aes∗  
+
+> r,s ∗
+> r
+
+− xr
+
+18: pr ← pr + ε · 1[xr >0] 
+
+19: end for 
+
+Proportional allocation introduces floating-point rounding errors and ignores topological preference. Phase 3 therefore introduces a Lagrangian auction mechanism. Introducing La-grange multipliers (prices) pr′ ≥ 0 for the rank capacity constraints, the augmented objective is 
+
+max 
+
+> X≥0
+
+X
+
+> r′,s
+
+(Br′s − pr′ ) Xr′s
+
+s.t. X
+
+> r′
+
+Xr′s ≤ ds, Xr′s ≤ nr′es ,
+
+(24) where Br′s is the topology bonus ( 1 for intra-node, winter 
+
+for inter-node) and ds = Aess is the planned allocation for spare slot s. In each round, each spare slot bids for a source rank by net profit: 
+
+winner( s) = arg max  
+
+> r′
+
+(Br′s − pr′ ). (25) After a winning rank completes its allocation, its price mono-tonically increases ( pr′ ← pr′ + ε), naturally reducing its competitiveness in subsequent rounds, thereby achieving fair load distribution with embedded topological preference. A fixed iteration count ensures CUDA Graph compatibility, eliminates floating-point truncation, and guarantees exact to-ken conservation. The complete procedure is given in Algo-rithm 3. B Supplementary Details for the Experiments 
+
+This appendix reports the full computing environment (§B.1), the complete set of training hyperparameters (§B.2), and the implementation and usage of TAOT (§B.3). 
+
+B.1 Computing Environment 
+
+All end-to-end experiments run on four training nodes, each with eight NVIDIA A800-SXM4-80GB GPUs (32 GPUs in total). GPUs within a node are connected by NVLink, and inter-node communication uses InfiniBand; this two-tier in-terconnect is exactly the source of the intra-/inter-node cost gap modeled by the topology cost matrix W , with the inter-node factor set to λ = 3 in our experiments. The distributed training system is an in-house framework built on Megatron-Core. Table 3 lists the detailed hardware and software con-figuration of each node.               
+
+> Component Specification
+> CPU 2×Intel Xeon Platinum 8350C @ 2.60 GHz (32 cores/socket, 2 threads/core) Memory 1.5 TiB DRAM GPU 8×NVIDIA A800-SXM4-80GB Intra-node NVLink Inter-node InfiniBand OS Ubuntu 24.04.2 LTS (kernel 5.15.0-124) GPU driver 535.230.02 CUDA 12.9 (V12.9.86) PyTorch 2.8.0 (NVIDIA NGC 25.06) cuDNN / NCCL 9.16.0 / 2.27.3 Libraries transformers 5.3.0, triton 3.3.0
+
+Table 3: Per-node hardware and software environment. 
+
+B.2 Training Hyperparameters 
+
+The end-to-end evaluation uses the Qwen3-30B-A3B MoE model on the Pile-test dataset under the TP4 PP2 EP16 paral-lel configuration. Since TAOT operates purely at the system-execution level and does not alter the routing semantics or the model outputs, its balancing and communication behavior is independent of the specific corpus; Pile-test only serves as a representative pretraining workload that produces realistic expert-routing traffic. To prevent routing-level regularization from masking the behavior of system-level dynamic balanc-ing, the MoE auxiliary load-balancing loss is disabled, so the routing distribution is determined by the model itself. Table 4 lists the complete set of hyperparameters. 
+
+B.3 Implementation and Usage 
+
+TAOT is integrated into the training framework as an extension of the guest-expert mechanism and is enabled through command-line arguments. Two functions are ex-posed to the user. The topology-aware expert-dispatch plan-ner is selected with --moe-echo-algorithm , which chooses the specific planning algorithm used in the                                     
+
+> Hyperparameter Value
+> Model / sequence
+> Model Qwen3-30B-A3B (MoE) Rotary base 1,000,000 Sequence length 32,768 Max position emb. 32,768 Init method std 0.006
+> Optimization
+> Micro-batch size 3Global batch size 96 Optimizer Adam ( β1=0 .9,β2=0 .95 ,ϵ=10 −8)Learning rate 1.0×10 −5(min 1.0×10 −6)LR schedule cosine, warmup fraction 0.002 Train / decay iters 50,000 / 50,000 Weight decay 0.1 Grad clip 1.0 Norm epsilon 10 −6
+> Precision bf16 (precision-aware optimizer) Initial loss scale 65,536
+> MoE / routing
+> Router top-k8Router dtype fp32 Aux-loss disabled Grouped GEMM enabled
+> Parallelism / memory
+> TP / PP / EP 4 / 2 / 16 Expert TP size 1Virtual PP stages 3Sequence parallel enabled Distributed optimizer ZeRO-1 Recomputation full, block, 24 layers Comm. backend NCCL
+
+Table 4: End-to-end training hyperparameters. planning phases. The communication overlap is turned on with --moe-echo-expert-dispatch-overlap ,which overlaps guest-expert weight transfer with home-expert computation to hide the communication latency. A minimal configuration enables --moe-enable-echo ,sets the number of spare (guest) expert slots per rank with 
+
+--moe-num-echo-experts , and selects the planning algorithm with --moe-echo-algorithm sinkhorn 
+
+(sinkhorn for TAOT). Table 5 lists all available command-line arguments. A few arguments deserve further explanation. 
+
+--moe-num-echo-experts sets the number of spare (guest) expert slots reserved per rank (K); it must be a multiple of the EP degree so that the re-served slots are distributed evenly across all EP ranks. 
+
+--moe-echo-expert-dispatcher-type selects the communication backend used to fetch guest-expert parameters: alltoall uses a plain All-to-All, while 
+
+hybridep uses a dedicated communication library as an Argument Description                   
+
+> Core
+> --moe-enable-echo Enable guest-expert load balancing.
+> --moe-num-echo-experts KSpare expert slots per rank ( K; a multiple of the EP degree).
+> --moe-echo-algorithm sinkhorn Planning algorithm: sinkhorn (TAOT).
+> Efficiency
+> --moe-echo-expert-dispatch-overlap Overlap guest-expert dispatch with home-expert computation.
+> --moe-echo-expert-dispatcher-type Collective backend for expert-parameter fetch: alltoall or hybridep .
+> Diagnostics
+> --moe-echo-log-steps 1,3,5 Log dispatch statistics at the given global steps.
+> --moe-echo-log-layers 1,2,3,4 Restrict logging to the given transformer layers.
+> --moe-echo-log-file PATH Output file for dispatch diagnostics.
+
+Table 5: Command-line arguments exposed by TAOT. alternative backend. The three diagnostic arguments control logging. 
+
+--moe-echo-log-steps specifies the global train-ing steps at which dispatch statistics are recorded (e.g. 
+
+1,3,5 ); --moe-echo-log-layers restricts logging to the given transformer layers (e.g. 1,2,3,4 ); and 
+
+--moe-echo-log-file sets the output file path for the diagnostics. When enabled, TAOT produces a per-step, per-layer report organized into four parts: (1) the per-rank and per-expert load before echo routing, with hot ranks and hot experts marked; (2) the cloning plan, listing for each cloned hot expert its target spare slot, whether the copy is intra-or inter-node, and the number of tokens rerouted, followed by a topology summary of intra-/inter-node copy counts and the weighted communication cost; (3) the projected per-rank load after routing; and (4) a load-balance improvement sum-mary reporting the imbalance before and after, the peak-load reduction, the fraction of tokens rerouted, and the final intra-/inter-node copy counts and weighted cost. This report makes the balancing behavior of each planning invocation directly inspectable.
