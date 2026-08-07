@@ -1,0 +1,935 @@
+Title: Beyond Global Routing Aggregation: Phase-Aware Expert Merging for MoE Vision-Language Models
+
+URL Source: https://arxiv.org/pdf/2608.04454v1
+
+Published Time: Thu, 06 Aug 2026 00:30:36 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+# Beyond Global Routing Aggregation: Phase-Aware Expert Merging for MoE Vision-Language Models 
+
+## Hongyu Zhang, Cheng Yan, Xiang Xia, Wuyang Zhang ∗
+
+University of Science and Technology of China, Hefei, China 
+
+hongyuzhang@mail.ustc.edu.cn , wuyangz@ustc.edu.cn 
+
+Abstract 
+
+Mixture-of-experts vision-language models (MoE-VLMs) in-crease model capacity with sparse expert activation, yet de-ployment requires storing the full expert pool. Training-free expert merging reduces this burden, and many routing-based methods aggregate routing statistics across all tokens to deter-mine merge compatibility. However, MoE-VLM inference is phase-structured: image-context tokens carry visual content, question tokens specify the query, and answer tokens produce the output, with different counts and routing distributions. Because image-context tokens are far more numerous, global aggregation can overemphasize image-context processing and obscure phase-conditioned expert roles, making experts serv-ing different phases appear interchangeable and degrading model performance. We therefore argue that MoE-VLM ex-pert merging should preserve phase-conditioned expert roles, judging compatibility by how experts serve different phases rather than globally aggregated routing statistics. Based on this view, we propose RoleMerge , a training-free method that constructs each expert’s Routing Role Profile (RRP) from phase-normalized routing statistics, capturing its rel-ative phase preference. Guided by expert–phase information loss, RoleMerge merges experts with compatible profiles and their corresponding router entries while preserving answer-decoding expert distinctions. Experiments on three models and multiple benchmarks show that RoleMerge preserves more of the full model’s performance than alternative expert-merging methods at matched expert-retention ratios, with rel-ative improvements of up to 9.6% in six-task macro-average performance. These results validate phase-conditioned expert roles as a more effective basis than global routing aggregation for MoE-VLM expert merging. 
+
+## 1 Introduction 
+
+Mixture-of-experts (MoE) models increase model capac-ity by routing each token to only a small subset of ex-perts, avoiding a proportional increase in per-token com-putation (Shazeer et al. 2017; Fedus, Zoph, and Shazeer 2022). This conditional-computation paradigm has sub-sequently been incorporated into vision-language models (VLMs) (Lin et al. 2024; Xin et al. 2025). Mixture-of-experts vision-language models (MoE-VLMs) apply sparse expert activation to multimodal understanding and generation, in-creasing model capacity while keeping per-token computa-
+
+> ∗
+
+Corresponding author. 
+
+tion manageable. Recent representative MoE-VLMs include DeepSeek-VL2 (Wu et al. 2024), Qwen3-VL (Bai et al. 2025), InternVL3.5 (Wang et al. 2025), and Aria (Li et al. 2024a), collectively validating this direction for scaling model ca-pacity in VLMs. However, sparse expert activation reduces per-token computation but not expert storage, because de-ployment must still store the full expert pool. This creates a practical need to reduce expert storage while preserving model performance. Training-free expert merging directly addresses this need by replacing groups of pretrained experts with fewer merged experts. Existing approaches address complementary parts of this process, including identifying and grouping merge-compatible ex-perts (Chen et al. 2025), mitigating parameter conflicts (Li et al. 2026; Nguyen et al. 2025), and determining how expert parameters within each group should be combined (Zhao, Wang, and Zhang 2025; Nguyen et al. 2026). To decide which experts to merge, many routing-based methods aggre-gate routing statistics across all calibration tokens. Together, they make training-free expert merging practical for reducing expert storage while largely preserving model performance. However, directly applying this global aggregation to MoE-VLMs overlooks the distinct phase structure of mul-timodal inference. A typical sequence comprises image-context tokens that encode visual content, question tokens that specify the query, and answer tokens that form the gen-erated output. These phases serve different functions, con-tribute substantially different numbers of tokens, and exhibit distinct routing distributions. Consequently, globally aggre-gated routing statistics can be dominated by image-context processing, even though answer decoding may concentrate routing on a narrower subset of experts. Figure 1 shows that routing during answer decoding is more concentrated than during image-context processing across the analyzed models and benchmarks. More fundamentally, global ag-gregation marginalizes out inference phase, so experts with different routing distributions across phases can nevertheless have identical globally aggregated routing statistics and ap-pear merge-compatible. Merging such experts may disrupt the routing structure needed for question processing or an-swer decoding and degrade model performance. This raises the central question: how can we merge MoE-VLM experts to reduce storage while preserving the routing structure re-quired across multimodal inference phases? arXiv:2608.04454v1 [cs.CV] 5 Aug 2026 Image-context processing Question processing Answer decoding   
+
+> 025 50 75 100 99.1 75.0 42.1
+> DeepSeek-VL2-Tiny
+> 75.3 50.1 42.4
+> Qwen3-VL
+> 74.0 51.5 27.5
+> InternVL3.5
+> 72.0 73.7 53.4
+> Aria
+> (a) Across models
+> 025 50 75 100 99.7 57.7 53.1
+> TextVQA
+> 99.4 69.0 40.7
+> ChartQA
+> 98.5 79.2 23.2
+> Science QA
+> 99.6 64.7 60.0
+> DocVQA
+> 99.0 74.8 23.5
+> AI2D
+> 99.0 70.6 31.8
+> RealWorld QA
+> 98.9 58.4 50.7
+> M4
+> (b) Across benchmarks
+> Normalized effective expert ratio (%)
+
+Figure 1: Phase-conditioned routing breadth, measured as exponentiated routing entropy normalized by expert count. Answer decoding uses fewer effective experts than image-context processing across (a) four MoE-VLMs and (b) six QA datasets plus an external M4-Instruct profile on DeepSeek-VL2-Tiny (Li et al. 2024b). Our key insight is to separate two decisions that global aggregation conflates: identifying how each expert serves different inference phases and determining whether two ex-perts should be merged. We model the former as a phase-conditioned expert role and assess merge compatibility by the expert–phase information that would be lost through merg-ing. Based on this reformulation, we propose RoleMerge ,a training-free expert-merging method that represents each expert’s role with a Routing Role Profile (RRP), constructed from phase-normalized routing statistics to capture its rel-ative preference across image-context processing, question processing, and answer decoding. Guided by expert–phase information loss, RoleMerge groups experts with compati-ble profiles while preserving answer-decoding expert distinc-tions. After grouping, it combines the corresponding expert parameters and router entries using the same within-group weights, without retraining either the experts or the router. Across three models, RoleMerge retains more of the full model’s macro-average performance than the compar-ison methods at all evaluated expert-retention ratios. At 
+
+ρ = .50 , its relative macro-average gains over the best-performing comparison method reach 2.7% on DeepSeek-VL2-Tiny and 9.6% on Qwen3-VL-30B-A3B-Instruct. On Qwen3-VL-30B-A3B-Instruct, it retains 85.5% and 96.2% of the full model’s macro-average performance at ρ = .50 and 
+
+.75 , respectively. Together, these results support our central premise that phase-conditioned expert roles provide a more effective basis than global routing aggregation for training-free MoE-VLM expert merging. Our contributions are threefold: 
+
+• Phase-conditioned expert roles. We reformulate MoE-VLM expert merging around phase-conditioned expert roles, characterizing how each expert serves different in-ference phases before assessing merge compatibility. 
+
+• Training-free expert merging. We propose Role-Merge , which represents roles with RRPs, measures compatibility by expert–phase information loss, preserves answer-decoding distinctions, and merges expert and router parameters with shared within-group weights. 
+
+• Empirical support for phase-conditioned expert roles. 
+
+Across three models, six benchmarks, and three expert-retention ratios, RoleMerge consistently retains more of the full model’s macro-average performance than the comparison methods, with relative gains of up to 9.6%. Component ablations and calibration analyses further support the proposed reformulation. 
+
+## 2 Related Work 
+
+Sparse MoE-VLMs and deployment. Sparse MoEs in-crease model capacity by routing each token to only a small subset of experts, avoiding a proportional increase in per-token computation (Shazeer et al. 2017; Fedus, Zoph, and Shazeer 2022). This conditional-computation paradigm has been extended to vision and multimodal modeling through V-MoE (Riquelme et al. 2021), MoMa (Lin et al. 2024), and I2MoE (Xin et al. 2025), while recent MoE-VLMs include DeepSeek-VL2 (Wu et al. 2024), Qwen3-VL (Bai et al. 2025), InternVL3.5 (Wang et al. 2025), and Aria (Li et al. 2024a). However, sparse expert activation reduces per-token com-putation but not expert storage, because deployment must still store the full expert pool. Distributed MoE systems im-prove execution efficiency through partitioning, communica-tion, and scheduling (Lepikhin et al. 2021; Rajbhandari et al. 2022; Hwang et al. 2023), without reducing the expert pool. 
+
+Context-dependent routing and expert specialization. 
+
+MoE routing varies with task, modality, token type, position, and language (Riquelme et al. 2021; Lin et al. 2024; Xin et al. 2025; Xue et al. 2024a; Muennighoff et al. 2025; Bandarkar et al. 2026). Generation-time traces also reveal concentrated expert reuse that can support caching and prefetching (Xue et al. 2024b). Together, these findings show that expert usage depends on token context rather than being fully charac-terized by a single global usage statistic. This dependence is especially relevant to MoE-VLM inference, which comprises image-context tokens that carry visual content, question to-kens that specify the query, and answer tokens that produce the output. Prior work characterizes contextual specializa-tion or exploits routing for systems efficiency, but does not 1 Phase-Normalized Role Profiling  
+
+> make unequal phases directly comparable
+> one calibration sample
+> What is shown in the image?
+> Frozen MoE-VLM
+> Unequal Phase Routing Traces
+> raw route counts are dominated by phase length
+> Image
+> Question
+> Answer
+> Normalize Within Each Phase
+> Routing Role Profiles (RRPs)
+> equal-width Image · Question · Answer profiles
+> same scale across all three phases
+> 2
+
+Answer-Aware Expert Grouping    
+
+> role similarity proposes merges; answer evidence regulates them
+> Two Signals, One Merge Decision
+> Candidate Pair Expert–Phase Role Match Signed Answer Collision Adjustment
+> +
+> merge earlier
+> +
+> delay merge
+> Merge Score
+> lower score
+> merge earlier
+> higher score
+> delay merge
+> Greedy Merge-and-Update group identities only
+> current groups
+
+… 
+
+> example selected pair
+> +lowest score
+> Select
+> minimum score
+> Merge
+> groups
+> Update
+> group scores
+
+…     
+
+> 3Joint Expert–Router Materialization
+> one grouping produces both compressed components
+> Final Grouping
+> Weighted-Average Materialization
+> uses ω₁ ω₄ ω₆
+> Same Within-Group Weights
+> Expert Parameters Router Entries
+> Compressed MoE Layer
+> No retraining
+
+Figure 2: RoleMerge overview. Phase-separated routes form RRPs; answer-aware grouping combines role dissimilarity and the signed collision adjustment, then merges expert parameters and router entries with shared within-group weights. use phase-conditioned expert roles for merge compatibility. 
+
+Training-free expert merging. By replacing groups of pretrained experts with fewer merged experts, training-free expert merging directly reduces expert storage. Existing methods explore behavior- or routing-based grouping (Li et al. 2024c), conflict-aware fusion (Nguyen et al. 2025), and structured or output-based merge realization (Zhao, Wang, and Zhang 2025; Miao et al. 2025). HC-SMoE groups experts through hierarchical clustering (Chen et al. 2025), whereas Sub-MoE mitigates parameter conflicts through subspace expert merging (Li et al. 2026). NAMEx formulates ex-pert fusion as a Nash-bargaining problem (Nguyen et al. 2026), while REAM combines router/output similarity, neu-ron alignment, and importance-weighted fusion (Jha et al. 2026). These methods typically rely on parameter similarity, globally aggregated routing statistics, or calibration-set acti-vations and outputs. Routing-based criteria commonly aggre-gate routing statistics across all calibration tokens, marginal-izing out inference phase and potentially making experts with different phase-conditioned roles appear merge-compatible. 
+
+RoleMerge instead represents each expert with a Rout-ing Role Profile constructed from phase-normalized routing statistics across image-context processing, question process-ing, and answer decoding, and uses these phase-conditioned expert roles to guide merge compatibility. 
+
+## 3 Preliminaries and Problem Formulation 
+
+3.1 MoE Layers and Expert Merging 
+
+For a positive integer M , let [M ] = {1, . . . , M }. Consider an MoE-VLM with L MoE layers. For each layer ℓ ∈ [L], let 
+
+Nℓ denote the number of experts in its expert pool, ϕℓ,e the function implemented by expert e, and Rℓ the router. Given a token representation x ∈ Rd, the router selects k experts and assigns them normalized routing weights gℓ,e (x). The resulting output of MoE layer ℓ is 
+
+yℓ(x) = X
+
+e∈TopK( Rℓ(x),k )
+
+gℓ,e (x)ϕℓ,e (x). (1) We use Θℓ,e to denote the parameters of expert e and rℓ,e to denote its corresponding expert-indexed output parameter in the pretrained router prior to expert merging. Given a target expert-retention ratio ρ, expert merging reduces layer ℓ to Kℓ expert groups, where Kℓ/N ℓ = ρ for the evaluated ratios. A surjective grouping map cℓ : [ Nℓ] →
+
+[Kℓ] induces the partition Gℓ = {c−1
+
+ℓ (k) : k ∈ [Kℓ]}. The problem is to group experts while preserving the routing structure required for multimodal inference. 
+
+3.2 Limitation of Global Routing Aggregation 
+
+Let B = {img , ques , ans } denote image-context processing, question processing, and answer decoding. For a calibration set Dcal , let nℓ,b (e) be the number of times expert e is selected by the router at layer ℓ for tokens processed during phase b,and let Tℓ,b = P
+
+e nℓ,b (e) denote the total number of expert selections in that phase. The phase-normalized routing distri-bution is pℓ,b (e) = nℓ,b (e)/T ℓ,b , and the empirical fraction of selections contributed by phase b is bπℓ(b) = Tℓ,b / P
+
+b′ Tℓ,b ′ .The resulting global routing distribution is 
+
+pℓ(e) = X
+
+b∈B 
+
+bπℓ(b)pℓ,b (e). (2) Because image-context processing typically contains sub-stantially more tokens, it contributes more expert selections and therefore receives greater weight in pℓ(e), potentially obscuring differences expressed during question processing or answer decoding in multimodal inference. Global aggregation also marginalizes inference phase: dis-tinct {pℓ,b (e)}b∈B can yield the same pℓ(e). Experts with dif-ferent phase roles may therefore appear merge-compatible. Appendix A constructs such a non-identifiability example. 
+
+3.3 Phase-Conditioned Expert Roles 
+
+We instead characterize how each expert serves the three inference phases before assessing merge compatibility. To prevent unequal token counts from dominating this charac-terization, we use the uniform phase prior π(b) = 1 /|B| and construct Pℓ(e, b ) = π(b)pℓ,b (e), with Pℓ(e) = P 
+
+> b
+
+Pℓ(e, b ).Let Sℓ ∈ [Nℓ] denote expert identity and B ∈ B denote inference phase under this constructed joint distribution. For 
+
+Pℓ(e) > 0, the Routing Role Profile (RRP) of expert e is 
+
+qℓ,e (b) = Pℓ(B = b | Sℓ = e) = Pℓ(e, b )
+
+Pℓ(e) . (3) For an expert with Pℓ(e) = 0 , we use the zero vector by con-vention. The RRP represents the expert’s phase-conditioned expert role by describing its relative preference across image-context processing, question processing, and answer decod-ing. It is induced by routing behavior on the calibration set rather than interpreted as a universal semantic label. This formulation separates two decisions coupled by global routing aggregation: identifying how an expert serves different inference phases and determining whether two ex-perts should be merged. The RRP characterizes the former, while the expert marginal Pℓ(e) weights the information lost when evaluating a candidate merge. 
+
+3.4 Expert–Phase Information Loss 
+
+We quantify merge compatibility by the expert–phase in-formation removed by grouping. Let Cℓ = cℓ(Sℓ) de-note the retained group identity. For a group G ∈ G ℓ, let 
+
+Pℓ(G) = P 
+
+> e∈G
+
+Pℓ(e) and, when Pℓ(G) > 0, qℓ,G =P 
+
+> e∈G
+
+Pℓ(e)qℓ,e /P ℓ(G). For a zero-mass group, we use the zero vector, and terms weighted by Pℓ(e) = 0 are defined as zero. The expert–phase information loss of the grouping is 
+
+∆EP ,ℓ (cℓ) = IPℓ (Sℓ; B) − IPℓ (Cℓ; B)= X
+
+> G∈G ℓ
+
+X
+
+> e∈G
+
+Pℓ(e)DKL (qℓ,e ∥qℓ,G ) , (4) where mutual information is evaluated under Pℓ and DKL 
+
+denotes KL divergence over B.For two experts i̸ = j with Pℓ(i) + Pℓ(j) > 0, let 
+
+mℓ,ij =  Pℓ(i)qℓ,i +Pℓ(j)qℓ,j 
+
+/ Pℓ(i)+ Pℓ(j). Their pair-wise expert–phase information loss is 
+
+dEP ,ℓ (i, j ) = Pℓ(i)DKL (qℓ,i ∥mℓ,ij )+ Pℓ(j)DKL (qℓ,j ∥mℓ,ij ) . (5) This quantity is the exact decrease in expert–phase mutual information caused by merging i and j while leaving all other experts as one-expert groups. Appendix A provides the corresponding derivation and its relation to the group-level expert–phase information loss. When Pℓ(i) + Pℓ(j) = 0 , we define dEP ,ℓ (i, j ) = 0 . A small value indicates compatible phase-conditioned expert roles. Expert–phase information loss distinguishes how experts serve inference phases. However, it alone cannot prevent co-grouping of experts frequently selected in the same phase, especially during answer decoding. We therefore augment it to preserve answer-decoding expert distinctions. 
+
+## 4 RoleMerge 
+
+4.1 Pipeline 
+
+Given a pretrained MoE-VLM, a calibration set Dcal , and a target expert-retention ratio ρ, RoleMerge reduces the ex-pert pool of each selected MoE layer ℓ from Nℓ to Kℓ experts, where Kℓ/N ℓ = ρ. It processes each layer in four steps. First, it collects routing statistics separately for the three inference phases: image-context processing, question processing, and answer decoding. Second, it constructs Routing Role Pro-files (RRPs) that represent the phase-conditioned expert roles and computes the pairwise expert–phase information losses. Third, it greedily merges expert groups until Kℓ groups re-main, using an answer-aware merge score that accounts for role compatibility and preserves answer-decoding expert dis-tinctions. Finally, it merges the expert and router parameters using the same within-group weights, producing Kℓ merged experts and a router with a reduced output dimension. The following subsections detail RRP construction, the answer-aware merge score, and expert–router merging; Appendix B provides implementation details for exact reproduction. 
+
+4.2 Routing Role Profile Construction 
+
+For each selected layer ℓ, RoleMerge collects the phase-separated routing counts nℓ,b (e) over Dcal . Using the phase-normalized distributions, uniform phase prior, and RRP con-struction defined in the preliminaries, it obtains qℓ,e and the pairwise expert–phase information losses dEP ,ℓ (i, j ). The answer-decoding distribution pℓ, ans (e) is retained for the signed collision adjustment in the next step. 
+
+4.3 Answer-Aware Merge Score 
+
+Given dEP ,ℓ (i, j ) and pℓ, ans (e), RoleMerge scores each candidate group merge using role dissimilarity and a signed adjustment based on answer-decoding mass. We first normalize dEP ,ℓ (i, j ) within each layer and de-fine the group-wise role dissimilarity for candidate groups 
+
+G, H ⊆ [Nℓ] using the following single-link expression: 
+
+drole ,ℓ (G, H ) = min 
+
+> i∈G,j ∈H
+
+dEP ,ℓ (i, j )max u,v ∈[Nℓ]
+
+> u̸=v
+
+dEP ,ℓ (u, v ) . (6) If the layer-wise maximum in the denominator is zero, we set drole ,ℓ (G, H ) = 0 for all candidate group pairs. This definition applies single linkage: two groups have a small 
+
+drole ,ℓ (G, H ) when they contain at least one expert pair with compatible profiles, as indicated by low expert–phase in-formation loss. It is a greedy extension of the exact pair-wise losses that propagates local profile compatibility during group construction. For multi-expert groups, drole ,ℓ (G, H )is not generally the group-level loss in Eq. (4) and does not guarantee a globally optimal grouping. To preserve answer-decoding expert distinctions beyond role compatibility, we construct a signed collision adjust-ment from pℓ, ans (e). We measure the answer-decoding rout-ing concentration of layer ℓ by κℓ = 1 − H(pℓ, ans )/ log Nℓ,where H(·) denotes Shannon entropy. We set λℓ ∝
+
+max( κℓ, ε ) and normalize it to mean λ over the selected layers, with ε > 0 providing a positive floor for each layer. For a candidate group G, the ratio between its total answer-decoding routing mass and the largest individual mass within the group indicates whether that mass is concentrated on one expert or distributed across multiple experts. The ratio is close to one when a single expert dominates and increases when several experts carry substantial answer-decoding rout-ing mass. We therefore use the group-level collision measure: 
+
+Rans ,ℓ (G) = 
+
+ P 
+
+> e∈G
+
+pℓ, ans (e)max e∈G pℓ, ans (e) + ε − 1
+
+
+
+> +
+
+. (7) For a candidate merge, its signed collision adjustment is 
+
+∆Rans ,ℓ (G, H ) = Rans ,ℓ (G∪H)−Rans ,ℓ (G)−Rans ,ℓ (H).Because Rans ,ℓ is group-normalized and nonadditive, this ad-justment can be either positive or negative. A positive value raises the merge score and lowers the priority of the candi-date merge, whereas a negative value lowers the score and raises its priority. A negative value indicates that the union carries less normalized collision than the two groups consid-ered separately, so the merge does not introduce additional answer-expert overlap under this score. To normalize the magnitude of the collision adjustment across layers, let τℓ > 0 be the median of the strictly positive collision increments computed over original expert pairs, with a fallback value of 1 when no such increment exists. The resulting score for merging groups G and H is 
+
+Jℓ(G, H ) = drole ,ℓ (G, H ) + λℓ
+
+∆Rans ,ℓ (G, H )
+
+τℓ
+
+. (8) At each iteration, RoleMerge merges the candidate pair with the smallest Jℓ(G, H ) until Kℓ groups remain, producing the grouping map cℓ used for parameter merging. Unlike the layer-aggregated answer-decoding distribu-tion used in the merge score, ACR is computed sepa-rately for each task–layer calibration record r. Given its normalized answer-decoding routing distribution pAr (e),we define Answer-Carrier Recoverability as ACR r (cℓ) = P 
+
+> G∈G ℓ
+
+max e∈G pAr (e). ACR diagnoses how well cℓ retains distinctions among experts used during answer decoding; it is not optimized by Jℓ. Its derivation is provided in Ap-pendix A. The grouping map cℓ then determines the merging of expert and router parameters. 
+
+4.4 Merging Expert and Router Parameters 
+
+Given the grouping map cℓ produced by the preceding step, 
+
+RoleMerge merges the parameters in each group G ∈ G ℓ to form one merged expert and its corresponding router entry. Following prior frequency-weighted expert merging (Li et al. 2024c), we define ωℓ,e by normalizing within group G
+
+the original calibration routing count pooled across inference phases, P 
+
+> b∈B
+
+nℓ,b (e), such that P 
+
+> e∈G
+
+ωℓ,e = 1 . Applying the shared within-group weights to both parameter sets gives 
+
+bΘℓ,G = X
+
+> e∈G
+
+ωℓ,e Θℓ,e , brℓ,G = X
+
+> e∈G
+
+ωℓ,e rℓ,e . (9) This yields Kℓ merged experts and reduces the router out-put to Kℓ. Only routed expert parameters and router output entries change; the visual encoder, attention modules, shared parameters, and decoding interface remain fixed. 
+
+## 5 Experiments 
+
+We organize the experiments around four questions that match the main claims and boundaries of RoleMerge .
+
+Q1 Does RoleMerge retain more of the full model’s perfor-mance than comparison methods under matched expert-retention ratios and calibration settings? 
+
+Q2 How do phase-conditioned expert roles and the signed collision adjustment contribute to RoleMerge ?
+
+Q3 How sensitive is RoleMerge to calibration construction, the collision weight, and the grouping rule? 
+
+Q4 How much does RoleMerge reduce expert storage and improve inference efficiency in practice? 
+
+5.1 Experimental Settings 
+
+To evaluate the effectiveness of RoleMerge for MoE-VLM compression, we conduct experiments on three models: DeepSeek-VL2-Tiny and DeepSeek-VL2-Small (Wu et al. 2024), together with Qwen3-VL-30B-A3B-Instruct (Bai et al. 2025). We use the uncompressed Full Model as the reference and compare RoleMerge with Sub-MoE (Li et al. 2026) and NAMEx (Nguyen et al. 2026) across all three models. On DeepSeek-VL2-Tiny, we additionally include MC-SMoE (Li et al. 2024c), MergeMoE (Miao et al. 2025), HC-SMoE (Chen et al. 2025), and REAM (Jha et al. 2026). 
+
+Models and compression protocol. The main compres-sion points are ρ ∈ { .50 , . 625 , . 75 }. At fixed model and ρ, all methods share the same checkpoint, calibration set, retained expert count, and compressed MoE layers. The default cali-bration set is TextVQA (Singh et al. 2019)–ChartQA (Masry et al. 2022)–ScienceQA (Lu et al. 2022) (TCS), selected before downstream evaluation using calibration-only rout-ing diagnostics. The calibration procedure uses only routing traces and does not use task labels, answer correctness, or downstream scores. Using single linkage, RoleMerge ex-tends normalized pairwise expert–phase losses to group dis-similarities, adds the signed collision adjustment ( λ = .03 ), and merges expert and router parameters with the same within-group weights during materialization. 
+
+Benchmarks and metrics. We evaluate all methods on six benchmarks: InfoVQA (Mathew et al. 2022), MMMU (Yue et al. 2024), and OCRBench (Liu et al. 2024) for multi-modal understanding, and ARC-Easy (Clark et al. 2018), PIQA (Bisk et al. 2020), and Winogrande (Sakaguchi et al. 2020) for text reasoning. We map the official metrics to a common 0–100 scale, where higher is better: InfoVQA uses ANLS ×100 , and the other five benchmarks use official Method ρ = .50 ρ = .625 ρ = .75                                                                                                                                                                                                                                         
+
+> Info MMU OCR ARC PIQA Wino Avg Info MMU OCR ARC PIQA Wino Avg Info MMU OCR ARC PIQA Wino Avg DeepSeek-VL2-Tiny
+> Full 49.3 39.1 81.1 67.9 73.2 59.9 61.7 49.3 39.1 81.1 67.9 73.2 59.9 61.7 49.3 39.1 81.1 67.9 73.2 59.9 61.7 MC-SMoE 31.7 23.8 48.6 34.2 56.7 45.9 40.2 39.6 26.2 60.4 37.7 60.5 46.2 45.1 45.3 31.3 68.5 42.6 62.4 49.7 50.0 MergeMoE 17.4 20.3 12.6 30.9 55.9 45.2 30.4 30.9 25.4 43.5 43.8 64.5 48.2 42.7 41.8 33.8 70.2 58.5 69.8 55.1 54.9 HC-SMoE 18.5 25.8 49.3 45.2 63.1 51.9 42.3 31.1 27.9 60.5 52.1 64.4 53.8 48.3 39.2 32.3 68.7 57.6 69.2 54.8 53.6 REAM 40.3 34.1 70.2 46.4 67.3 53.0 51.9 44.0 34.8 72.9 51.8 68.8 57.4 54.9 46.5 35.4 78.2 54.0 69.0 57.9 56.8 Sub-MoE 28.3 27.6 42.3 48.2 62.0 55.0 43.9 34.8 30.4 59.4 53.9 65.5 57.2 50.2 43.7 35.0 72.5 55.7 66.9 55.6 54.9 NAMEx 30.6 25.9 61.3 51.9 63.2 53.9 47.8 37.3 30.3 64.3 57.7 67.0 54.1 51.8 48.1 34.7 71.1 60.8 70.2 58.6 57.2
+> RoleMerge 49.3 32.3 70.4 49.9 65.1 52.7 53.3 50.7 35.1 74.2 58.9 69.4 53.3 56.9 59.0 37.1 77.6 62.2 70.4 56.1 60.4 DeepSeek-VL2-Small
+> Full 57.9 46.0 81.3 77.9 77.5 70.2 68.5 57.9 46.0 81.3 77.9 77.5 70.2 68.5 57.9 46.0 81.3 77.9 77.5 70.2 68.5 Sub-MoE 45.3 34.4 64.9 35.9 59.0 51.9 48.6 48.2 37.1 71.5 40.4 61.7 54.3 52.2 58.3 41.0 74.8 46.1 65.8 55.9 57.0 NAMEx 45.8 34.2 63.8 35.5 59.1 51.4 48.3 48.1 36.8 71.3 39.5 62.1 54.5 52.0 57.7 41.0 74.8 45.3 65.5 55.9 56.7
+> RoleMerge 51.5 39.0 69.8 36.2 62.2 49.9 51.4 54.5 42.0 74.9 43.4 66.9 52.5 55.7 58.3 44.8 78.3 48.7 68.5 56.4 59.2 Qwen3-VL-30B-A3B-Instruct
+> Full 80.1 54.4 84.9 79.1 79.3 73.8 75.3 80.1 54.4 84.9 79.1 79.3 73.8 75.3 80.1 54.4 84.9 79.1 79.3 73.8 75.3 Sub-MoE 57.0 37.4 65.6 61.8 68.6 59.7 58.4 64.5 42.9 74.0 68.4 73.4 64.0 64.5 71.3 48.7 78.9 73.7 76.3 68.8 69.6 NAMEx 57.8 38.1 67.9 60.8 69.3 58.4 58.7 64.9 43.2 74.4 68.3 75.6 65.3 65.3 73.3 49.7 80.6 73.8 78.6 69.9 71.0
+> RoleMerge 72.5 44.6 74.4 66.9 71.1 56.5 64.3 76.3 47.7 78.2 73.9 76.5 62.7 69.2 79.7 52.3 81.2 76.1 77.6 67.6 72.4
+
+Table 1: Main compression results on official 0–100 scores (higher is better). InfoVQA uses ANLS ×100 ; all others use accuracy ×100 . ρ: expert retention; TCS: TextVQA–ChartQA–ScienceQA calibration; Avg: unweighted six-task mean before rounding. Shading marks Avg; bold/underline mark the best/second-best compressed values per column. accuracy ×100 . With a fixed calibration set, RoleMerge is deterministic; all autoregressive generation uses greedy de-coding with temperature set to 0 and sampling disabled, and methods share fixed evaluation examples and order. MM3 averages the three multimodal task scores, Text3 averages the three text task scores, and Avg is the unweighted average over all six. Full Model denotes the uncompressed reference, and bold numbers mark the best compressed method under the same model, retention ratio, and task column. Unless otherwise stated, experiments use two NVIDIA A100 80GB GPUs for the largest model; the efficiency audit uses one A100 80GB. Appendix C details the experimental protocol. 
+
+5.2 Main Results under Matched Compression 
+
+To answer Q1. Table 1 presents matched comparisons across three MoE-VLM settings and three retention ratios using TCS calibration under matched within-model settings. On DeepSeek-VL2-Tiny, RoleMerge achieves the best com-pressed average at all three retention ratios, retaining 86.3%, 92.2%, and 97.8% of Full Model Avg at ρ = .50 , .625 ,and .75 , respectively. At ρ = .75 , RoleMerge reaches 60.4 Avg, compared with the best competing Avg of 57.2, a 5.6% relative gain. When the parameter scale increases to DeepSeek-VL2-Small, the same pattern remains: Role-Merge again gives the best Avg at all three retention ratios and retains 75.1%, 81.3%, and 86.4% of the Full Model Avg. At ρ = .625 , it reaches 55.7 Avg, improving by 6.7% over the strongest compared method, Sub-MoE (52.2), while also leading on the three multimodal tasks. On Qwen3-VL-30B-A3B-Instruct, the result transfers to a different MoE-VLM family and architecture. RoleMerge retains 85.5%, 91.9%, and 96.2% of the Full Model Avg across the three retention                     
+
+> Variant ACR (%) ∆ACR MM3 ∆MM3 w/o phase split 93.1 −1.953.5 −3.6
+> w/o collision adj. 89.1 −5.955.4 −1.7
+> permuted roles 70.8 −24 .351.7 −5.5
+> Complete RoleMerge 95.0 0.0 57.1 0.0
+
+Table 2: DeepSeek-VL2-Small component ablations at ρ =
+
+.625 . ACR averages 78 task–layer records. Deltas relative to the complete RoleMerge setting are percentage points for ACR and normalized points for MM3, the mean of multi-modal benchmarks. ratios; at ρ = .50 , it improves over NAMEx from 58.7 to 64.3 Avg, a 9.6% relative gain. The relative margins narrow as more experts are kept, but the best compressed Avg re-mains RoleMerge in all nine model–retention settings. Ap-pendix D reports paired uncertainty estimates and additional Q1 comparisons across models and retention ratios. 
+
+5.3 Mechanism Analysis 
+
+To answer Q2. Table 2 reports matched mechanism controls on DeepSeek-VL2-Small at ρ = .625 . All controls use the same calibration set, retained expert count, grouping rule, and parameter-merging procedure, with only the specified mechanism changed. ACR measures preservation of answer-decoding expert distinctions and serves as a mechanism di-agnostic, not a universal performance predictor. Pooling routing statistics from image-context processing, question processing, and answer decoding lowers ACR from 95.0% to 93.1% ( −1.9 points) and MM3 from 57.1 to 53.5 Factor Setting MM3 Text3 Avg ∆                                        
+
+> λ= 0 50.1 58.7 54.4 −2.6
+> λ=.01 53.9 59.3 56.6 −0.4
+> λ=.03 (ours) 53.4 60.5 56.9 0.0
+> Collision weight
+> λ=.10 53.9 61.2 57.6 0.6 avg. link 52.9 58.8 55.9 −1.1
+> comp. link 52.3 58.3 55.3 −1.6
+> k-means++ 43 .72.359 .20.951 .51.2−5.4
+> Grouping rule
+> single link (ours) 53.4 60.5 56.9 0.0
+
+Table 3: DeepSeek-VL2-Tiny sensitivity at ρ = .625 (nor-malized points; higher is better). ∆ is the Avg change from 
+
+λ = .03 /single link; The k-means++ row gives five-seed means; subscripts denote standard deviations. (−3.6), showing the benefit of retaining phase identity. Per-muting RRPs across expert identities produces a larger degra-dation: ACR falls to 70.8% ( −24 .3) and MM3 to 51.7 ( −5.5), supporting the importance of preserving the correspondence between each expert and its RRP. This result shows that phase separation alone is insufficient: each RRP must remain asso-ciated with the expert whose phase-conditioned role it rep-resents. Together, these controls support phase-conditioned expert roles for assessing merge compatibility. Removing the signed collision adjustment reduces ACR to 89.1% ( −5.9) and MM3 to 55.4 ( −1.7). The simultaneous decreases support the intended role of the adjustment in pre-serving answer-decoding expert distinctions, complementing the role-compatibility signal from expert–phase information loss. Appendix E gives expanded controls; Appendix A re-ports an additional signed-collision diagnostic. 
+
+5.4 Calibration and Sensitivity Analysis 
+
+To answer Q3. We evaluate sensitivity to calibration con-struction, the collision weight, and the grouping rule. 
+
+Calibration composition. Under a fixed calibration bud-get, the one-source, two-source, and TCS calibration sets yield similar two-task macro scores of 39.0, 39.8, and 39.7 points, respectively. This result suggests that the TCS calibra-tion set is not unusually sensitive to the number of calibration sources. Alternative equal-prior mixtures can score higher on the two-task diagnostic (DAR reaches 42.1 points), so we do not claim TCS is uniquely optimal. Instead, TCS is kept as a pre-specified, balanced default because it has the lowest top-16 answer-decoding expert overlap (.442) and highest union coverage (.411) among the audited mixtures. 
+
+Calibration source. On the Tiny three-retention-ratio sweep, a mixed multimodal calibration set reaches 57.6 points, compared with 51.2 for text-only answer traces and 53.1 for a task-specific multimodal source. This gap supports constructing RRPs from multimodal calibration inputs. TCS averages 56.9, close to 56.8 for an alternative multimodal cal-ibration set, suggesting stable performance across different multimodal calibration constructions. 
+
+Calibration-set size. The calibration-size sweep ranges from 54.9 to 57.6 over 32–1024 examples per source, in-dicating a broad plateau rather than sharp size sensitivity. 
+
+Collision weight and grouping rule. Table 3 shows that the default setting is not a sharp optimum. Increasing λ from .03 to .10 changes the six-task macro by +0 .6 points, whereas setting λ = 0 drops the macro by 2.6 points. Among the audited grouping rules, single link gives the strongest down-stream preservation. In particular, k-means++ trails single link by 5.4 points, indicating that centroid-based clustering is a poor default in this setting. Appendix F provides the full calibration and sensitivity analyses. 
+
+5.5 Storage and Efficiency Analysis 
+
+To answer Q4. For Qwen3-VL-30B-A3B-Instruct at ρ =
+
+.625 , RoleMerge reduces routed-expert parameters by 37.5% (28.99B to 18.12B) and total parameters and seri-alized bf16 storage by 35.0% (31.07B to 20.19B; 62.14GB to 40.39GB). In a controlled single-A100 audit of DeepSeek-VL2-Small at ρ = .50 , it reduces steady-state and peak incre-mental GPU memory by 33.8% and 32.2%, TTFT by 32.1%, and end-to-end latency by 15.3%, while increasing 32-token throughput by 5.7%. All checkpoints remain GPU-resident, and these directions are consistent across repetitions. Ap-pendix G details the efficiency and storage measurements. 
+
+## 6 Conclusion and Discussion 
+
+In this paper, we reformulated training-free MoE-VLM ex-pert merging around phase-conditioned expert roles, pre-serving the expert–phase information obscured by global routing aggregation. We proposed RoleMerge , a training-free method that represents phase-conditioned expert roles with Routing Role Profiles and uses expert–phase informa-tion loss to determine merge compatibility while preserv-ing answer-decoding expert distinctions. Across three mod-els and six benchmarks, RoleMerge retained more of the model’s macro-average performance than the comparison methods at all evaluated expert-retention ratios, with rela-tive gains of up to 9.6%. Together, these results validate phase-conditioned expert roles as a basis for training-free MoE-VLM expert merging under matched settings. 
+
+Discussion. Routing Role Profiles are constructed from rout-ing statistics on calibration data and characterize how experts are used across image-context processing, question process-ing, and answer decoding. They should not be interpreted as universal semantic labels. Our evaluation covers three mod-els from two MoE-VLM families and three expert-retention ratios, leaving broader architectures, calibration domains, and open-ended generation settings for future study. Role-Merge focuses on merge compatibility and does not directly address parameter interference within merged experts. Fu-ture work could combine RoleMerge with more advanced parameter fusion or lightweight post-merge adaptation. Be-yond merging, expert pruning offers another way to reduce expert storage. Extending phase-conditioned expert roles to pruning could help avoid removing experts whose routing is concentrated in inference phases with fewer tokens. References 
+
+Bai, S.; Cai, Y.; Chen, R.; Chen, K.; Chen, X.; Cheng, Z.; et al. 2025. Qwen3-VL Technical Report. arXiv:2511.21631. Bandarkar, L.; Yang, C.; Fayyaz, M.; Hu, J.; and Peng, N. 2026. Multilingual Routing in Mixture-of-Experts. In International Con-ference on Learning Representations .Bisk, Y.; Zellers, R.; Le Bras, R.; Gao, J.; and Choi, Y. 2020. PIQA: Reasoning about Physical Commonsense in Natural Language. Pro-ceedings of the AAAI Conference on Artificial Intelligence , 34(5): 7432–7439. Chen, I.-C.; Liu, H.-S.; Sun, W.-F.; Chao, C.-H.; Hsu, Y.-C.; and Lee, C.-Y. 2025. Retraining-free Merging of Sparse MoE via Hi-erarchical Clustering. In Proceedings of the 42nd International Conference on Machine Learning , volume 267 of Proceedings of Machine Learning Research , 8594–8620. PMLR. Clark, P.; Cowhey, I.; Etzioni, O.; Khot, T.; Sabharwal, A.; Schoenick, C.; and Tafjord, O. 2018. Think You Have Solved Question Answering? Try ARC, the AI2 Reasoning Challenge. arXiv:1803.05457. Fedus, W.; Zoph, B.; and Shazeer, N. 2022. Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity. Journal of Machine Learning Research , 23(120): 1–39. Hwang, C.; Cui, W.; Xiong, Y.; Yang, Z.; Liu, Z.; Hu, H.; Wang, Z.; Salas, R.; Jose, J.; Ram, P.; Chau, H.; Cheng, P.; Yang, F.; Yang, M.; and Xiong, Y. 2023. Tutel: Adaptive Mixture-of-Experts at Scale. In Proceedings of Machine Learning and Systems , volume 5. Jha, S.; Hashemzadeh, M.; Pasand, A. S.; Parviz, A.; Lee, M.-J.; and Knyazev, B. 2026. REAM: Merging Improves Pruning of Experts in LLMs. CoRR , abs/2604.04356. Lasby, M.; Lazarevich, I.; Sinnadurai, N.; Lie, S.; Ioannou, Y.; and Thangarasa, V. 2026. REAP the Experts: Why Pruning Prevails for One-Shot MoE Compression. In International Conference on Learning Representations .Lepikhin, D.; Lee, H.; Xu, Y.; Chen, D.; Firat, O.; Huang, Y.; Krikun, M.; Shazeer, N.; and Chen, Z. 2021. GShard: Scaling Giant Models with Conditional Computation and Automatic Sharding. In 
+
+International Conference on Learning Representations .Li, D.; Liu, Y.; Wu, H.; Wang, Y.; Shen, Z.; Qu, B.; Niu, X.; et al. 2024a. Aria: An Open Multimodal Native Mixture-of-Experts Model. arXiv:2410.05993. Li, F.; Zhang, R.; Zhang, H.; Zhang, Y.; Li, B.; Li, W.; Ma, Z.; and Li, C. 2024b. LLaVA-NeXT-Interleave: Tackling Multi-image, Video, and 3D in Large Multimodal Models. arXiv:2407.07895. Li, L.; Zhu, Q.; Wang, J.; Qin, X.; Li, W.; Gu, H.; Han, S.; and Guo, Y. 2026. Sub-MoE: Efficient Mixture-of-Expert LLMs Com-pression via Subspace Expert Merging. Proceedings of the AAAI Conference on Artificial Intelligence , 40(27): 22994–23002. Li, P.; Zhang, Z.; Yadav, P.; Sung, Y.-L.; Cheng, Y.; Bansal, M.; and Chen, T. 2024c. Merge, Then Compress: Demystify Efficient SMoE with Hints from Its Routing Policy. In International Conference on Learning Representations .Lin, X. V.; Shrivastava, A.; Luo, L.; Iyer, S.; Lewis, M.; Ghosh, G.; Zettlemoyer, L.; and Aghajanyan, A. 2024. MoMa: Efficient Early-Fusion Pre-training with Mixture of Modality-Aware Experts. arXiv:2407.21770. Liu, Y.; Li, Z.; Huang, M.; et al. 2024. OCRBench: On the Hidden Mystery of OCR in Large Multimodal Models. Science China Information Sciences , 67(12): 220102. Lu, P.; Mishra, S.; Xia, T.; Qiu, L.; Chang, K.-W.; Zhu, S.-C.; Tafjord, O.; Clark, P.; and Kalyan, A. 2022. Learn to Explain: Multimodal Reasoning via Thought Chains for Science Question Answering. In Advances in Neural Information Processing Systems ,volume 35, 2507–2521. Masry, A.; Long, D. X.; Tan, J. Q.; Joty, S.; and Hoque, E. 2022. ChartQA: A Benchmark for Question Answering about Charts with Visual and Logical Reasoning. In Findings of the Association for Computational Linguistics: ACL 2022 , 2263–2279. Dublin, Ireland: Association for Computational Linguistics. Mathew, M.; Bagal, V.; Tito, R.; Karatzas, D.; Valveny, E.; and Jawahar, C. V. 2022. InfographicVQA. In Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision ,1697–1706. Miao, R.; Yao, Y.; Wang, Z.; Wang, Z.; Yi, B.; Liu, L.; Zhao, Y.; and Yang, T. 2025. MergeMoE: Efficient Compression of MoE Models via Expert Output Merging. arXiv:2510.14436. Muennighoff, N.; Soldaini, L.; Groeneveld, D.; Lo, K.; Morrison, J.; Min, S.; Shi, W.; Walsh, P.; Tafjord, O.; Lambert, N.; Gu, Y.; Arora, S.; Bhagia, A.; Schwenk, D.; Wadden, D.; Wettig, A.; Hui, B.; Dettmers, T.; Kiela, D.; Farhadi, A.; Smith, N. A.; Koh, P. W.; Singh, A.; and Hajishirzi, H. 2025. OLMoE: Open Mixture-of-Experts Language Models. In International Conference on Learn-ing Representations .Nguyen, D. V.; Anh Nguyen Thi; Nguyen, M. H.; Nguyen, L.; Jiang, S.; Fetaya, E.; Tran, L. D.; Chechik, G.; and Nguyen, T. M. 2026. Expert Merging in Sparse Mixture of Experts with Nash Bargaining. In International Conference on Learning Representations .Nguyen, D. V.; Nguyen, M. H.; Nguyen, L. Q.; Teo, R. S.; Nguyen, T. M.; and Tran, L. D. 2025. CAMEx: Curvature-aware Merging of Experts. In International Conference on Learning Representations .Rajbhandari, S.; Li, C.; Yao, Z.; Zhang, M.; Aminabadi, R. Y.; Awan, A. A.; Rasley, J.; and He, Y. 2022. DeepSpeed-MoE: Ad-vancing Mixture-of-Experts Inference and Training to Power Next-Generation AI Scale. In Proceedings of the 39th International Conference on Machine Learning , volume 162 of Proceedings of Machine Learning Research , 18332–18346. PMLR. Riquelme, C.; Puigcerver, J.; Mustafa, B.; Neumann, M.; Jenatton, R.; Pinto, A. S.; Keysers, D.; and Houlsby, N. 2021. Scaling Vision with Sparse Mixture of Experts. In Advances in Neural Information Processing Systems , volume 34, 8583–8595. Sakaguchi, K.; Le Bras, R.; Bhagavatula, C.; and Choi, Y. 2020. WinoGrande: An Adversarial Winograd Schema Challenge at Scale. Proceedings of the AAAI Conference on Artificial Intelli-gence , 34(5): 8732–8740. Shazeer, N.; Mirhoseini, A.; Maziarz, K.; Davis, A.; Le, Q. V.; Hinton, G. E.; and Dean, J. 2017. Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer. In Inter-national Conference on Learning Representations .Singh, A.; Natarajan, V.; Shah, M.; Jiang, Y.; Chen, X.; Batra, D.; Parikh, D.; and Rohrbach, M. 2019. Towards VQA Models That Can Read. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition , 8317–8326. Wang, W.; Gao, Z.; Gu, L.; Pu, H.; Cui, L.; Wei, X.; Liu, Z.; Jing, L.; Ye, S.; Shao, J.; et al. 2025. InternVL3.5: Advancing Open-Source Multimodal Models in Versatility, Reasoning, and Efficiency. arXiv:2508.18265. Wu, Z.; Chen, X.; Pan, Z.; Liu, X.; Liu, W.; Dai, D.; et al. 2024. DeepSeek-VL2: Mixture-of-Experts Vision-Language Models for Advanced Multimodal Understanding. arXiv:2412.10302. Xin, J.; Yun, S.; Peng, J.; Choi, I.; Ballard, J. L.; Chen, T.; and Long, Q. 2025. I 2MoE: Interpretable Multimodal Interaction-aware Mixture-of-Experts. In Proceedings of the 42nd International Con-ference on Machine Learning , volume 267 of Proceedings of Ma-chine Learning Research , 68870–68888. PMLR. Xue, F.; Zheng, Z.; Fu, Y.; Ni, J.; Zheng, Z.; Zhou, W.; and You, Y. 2024a. OpenMoE: An Early Effort on Open Mixture-of-Experts Language Models. arXiv:2402.01739. Xue, L.; Fu, Y.; Lu, Z.; Mai, L.; and Marina, M. 2024b. MoE-Infinity: Efficient MoE Inference on Personal Machines with Sparsity-Aware Expert Cache. arXiv:2401.14361. Yue, X.; Ni, Y.; Zhang, K.; Zheng, T.; Liu, R.; Zhang, G.; et al. 2024. MMMU: A Massive Multi-discipline Multimodal Under-standing and Reasoning Benchmark for Expert AGI. In Proceed-ings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition , 9556–9567. Zhao, Y.; Wang, Z.; and Zhang, M. 2025. PuzzleMoE: Efficient Compression of Large Mixture-of-Experts Models via Sparse Ex-pert Merging and Bit-Packed Inference. arXiv:2511.04805. A Additional Technical Analysis 
+
+A.1 Non-Identifiability under Global Routing Aggregation 
+
+The globally aggregated routing distribution pℓ(e) =P 
+
+> b
+
+bπℓ(b)pℓ,b (e) does not identify an expert’s phase-conditioned role. Consider the two-phase restriction with two equally likely phases and two experts. In a separated routing world, each phase exclusively uses a different expert; in a pooled world, both phases use both experts uniformly. Both produce pℓ(e1) = pℓ(e2) = 1 /2, whereas 
+
+Iseparated  
+
+> Pℓ
+
+(Sℓ; B) = log 2 , Ipooled  
+
+> Pℓ
+
+(Sℓ; B) = 0 . (10) Thus identical globally aggregated routing statistics are compatible with either complementary or identical phase-conditioned expert roles. 
+
+A.2 Derivation of the Expert–Phase Information Loss 
+
+For a group G = c−1 
+
+> ℓ
+
+(g), conditioning on its compressed identity gives 
+
+Pℓ(B = b | Cℓ = g) = qℓ,G (b) = 
+
+P 
+
+> e∈G
+
+Pℓ(e)qℓ,e (b)
+
+P 
+
+> e∈G
+
+Pℓ(e) .
+
+(11) Because Cℓ = cℓ(Sℓ) is a deterministic function of Sℓ,
+
+IPℓ (Sℓ; B) − IPℓ (Cℓ; B) = IPℓ (Sℓ; B | Cℓ)= X
+
+> G
+
+X
+
+> e∈G
+
+Pℓ(e)DKL (qℓ,e ∥qℓ,G ).
+
+(12) If only experts i, j are merged, all other one-expert groups contribute zero. Substituting qℓ, {i,j } = mℓ,ij therefore yields exactly the pairwise expert–phase information loss 
+
+dEP ,ℓ (i, j ) defined in the main paper. This establishes an exact pairwise expert–phase information loss, but does not imply that the partition produced by single linkage globally minimizes the group-level expert–phase information loss. Nor does the identity claim that retaining more global phase mutual information universally predicts higher downstream accuracy. 
+
+A.3 Derivation of Answer-Carrier Recoverability 
+
+Fix an answer-decoding task–layer calibration record r and grouping cℓ, let pAr (e) be expert e’s normalized answer-decoding routing mass, and let G ∈ G ℓ be a retained group. After observing only group G, the Bayes-optimal guess is the member with largest pAr (e). Its conditional success prob-ability is 
+
+qAr (G) = max e∈G pAr (e)
+
+P 
+
+> e∈G
+
+pAr (e) . (13) Weighting by the probability of observing each group gives 
+
+ACR r (cℓ) = X
+
+> G∈G ℓ
+
+max  
+
+> e∈G
+
+pAr (e). (14) This is precisely Pguess (Sℓ | Cℓ, B = answer , r ). Zero-mass groups contribute zero and are omitted from the condi-tional ratio. The odds-form ambiguity 1/q Ar (G) − 1 equals 
+
+P 
+
+> e∈G
+
+pAr (e)/ max e∈G pAr (e) − 1, the unstabilized form of the group-normalized statistic underlying the signed colli-sion adjustment. For the audited record set R, reported ACR is the uniform average |R| −1 P 
+
+> r∈R
+
+ACR r (cr ), where cr is the grouping at the layer associated with r. ACR depends only on calibration routes and topology, not correctness la-bels. We use it as a mechanism diagnostic rather than the greedy objective or a universal accuracy predictor. 
+
+A.4 Additional Signed-Collision Diagnostic                
+
+> Qwen3-VL, ρ=.625 ACR (%) EP ret. Avg
+> RoleMerge w/o collision adj. 84.66 .8338 59.9
+> RoleMerge (λ=.03 )88.22 .7752 69.2
+
+Table 4: Additional one-factor signed-collision diagnostic. ACR averages 144 task–layer calibration records from the task-disjoint TCS calibration set; EP ret. is the ratio of grouped to original expert–phase normalized mutual infor-mation summed over the same records, and Avg is the down-stream unweighted six-task average. Enabling the signed collision adjustment raises displayed ACR by 3.56 percentage points and Avg by 9.3 points even though the aggregated expert–phase information retention decreases. This additional intervention supports the adjust-ment’s intended role in preserving answer-decoding expert distinctions. This is an expected trade-off because the full score balances role compatibility against answer-decoding collision rather than optimizing aggregated expert–phase in-formation retention alone; it also reinforces the main paper’s treatment of ACR as a mechanism diagnostic rather than a universal predictor of downstream performance. 
+
+## B Implementation Details 
+
+B.1 Phase Boundaries and Routing Role Profile Construction 
+
+RoleMerge constructs its grouping evidence from routing traces of the pretrained, frozen MoE-VLM. For each cal-ibration example, we run greedy autoregressive decoding with temperature set to 0 and sampling disabled, and par-tition routed assignments into three disjoint phase buckets. The image-context bucket contains routed visual-token posi-tions in the prompt prefill and represents image-context pro-cessing; the question bucket contains the remaining routed prompt positions and represents question processing; and the answer bucket contains routed positions produced dur-ing autoregressive decoding and represents answer decoding. At layer ℓ, each selected top-k expert contributes one hard assignment to the corresponding bucket; gate probabilities are not used as fractional counts. The resulting counts are 
+
+nℓ,b (e) in the notation of the main paper and are summed across calibration examples separately for each inference phase. Each phase column is then normalized over experts and assigned prior mass 1/3, as defined in the main paper. This yields the phase distributions pℓ,b (e), the balanced joint distribution Pℓ(e, b ), and the Routing Role Profile qℓ,e (b). No task label, answer correctness, or downstream score is used when constructing these profiles. All audited routing traces pass assignment-conservation and nonempty-phase-bucket checks. If an expert has zero balanced mass, its conditional RRP is represented by the zero vector and its contribution to each pairwise expert–phase information loss is zero. If every pairwise expert–phase information loss in a layer is zero, the normalized pairwise-loss matrix remains all zero rather than dividing by zero. 
+
+B.2 Answer-Aware Grouping and Parameter Merging 
+
+For every compressed layer, the target number of experts is 
+
+Kℓ = ρN ℓ. Pairwise expert–phase information losses dEP ,ℓ 
+
+are normalized within each layer and extended to candidate groups through the group-wise role dissimilarity drole ,ℓ , con-structed using single linkage. RoleMerge then applies deter-ministic agglomeration using the signed collision adjustment in the main paper’s merge score. The default collision weight is λ = .03 ; the strict λ = 0 control removes this adjustment. The collision normalization scale τℓ is the median strictly positive pairwise collision increment, with fallback value 1
+
+when no such increment exists. At each step, the implementa-tion chooses the candidate with the smallest merge score and resolves exact ties lexicographically by group-wise role dis-similarity, signed collision adjustment, merged-group size, and expert indices. It repeats this update until exactly Kℓ
+
+groups remain. After the grouping map cℓ is fixed, the expert and router parameters in each group are merged using the same within-group weights as in the main paper. For group G, the im-plementation pools each expert’s nonnegative calibration routing count over inference phases, then normalizes these masses within G into weights ωℓ,e with P 
+
+> e∈G
+
+ωℓ,e = 1 . It falls back to uniform weights only when the pooled mass of the entire group is zero. The merged expert parameters bΘℓ,G 
+
+and corresponding router entry brℓ,G are both computed with these same within-group weights. Only routed expert tensors and router output entries are changed; the visual encoder, at-tention modules, shared parameters, and decoding interface remain unchanged. 
+
+B.3 End-to-End Pseudocode 
+
+Algorithm 1 summarizes the complete RoleMerge pipeline. Phase-separated hard routing counts determine the RRPs and the answer-aware merge score, while the merged expert pa-rameters and corresponding router entry use the same nor-malized calibration-frequency weights. 
+
+## C Experimental Protocol 
+
+C.1 Models, Compared Methods, and Evaluation 
+
+The main experiments cover DeepSeek-VL2-Tiny, DeepSeek-VL2-Small (Wu et al. 2024), and Qwen3-VL-30B-A3B-Instruct (Bai et al. 2025). The Full Model is the uncompressed reference. Sub-MoE (Li et al. 2026) and NAMEx (Nguyen et al. 2026) are evaluated across all three models; MC-SMoE (Li et al. 2024c), MergeMoE (Miao et al. 2025), HC-SMoE (Chen et al. 2025), and REAM (Jha et al. 2026) are additionally evaluated on DeepSeek-VL2-Tiny. At the same model and expert-retention ratio, all compressed methods use the same checkpoint, calibration set, retained expert count, and compressed MoE layers. Unless otherwise stated, experiments use the TCS calibration set described below. Evaluation follows the main paper. InfoVQA (Mathew et al. 2022), MMMU (Yue et al. 2024), and OCRBench (Liu et al. 2024) form MM3; ARC-Easy (Clark et al. 2018), PIQA (Bisk et al. 2020), and Winogrande (Sakaguchi et al. 2020) form Text3. All task values are official task scores mapped to a 0–100 scale: InfoVQA uses ANLS ×100 , while the other five tasks use their official accuracy ×100 . MM3 and Text3 are the unweighted averages over their respec-tive three tasks, and Avg is the unweighted average over all six. Unless otherwise stated, experiments use two NVIDIA A100 80GB GPUs; the isolated efficiency audit below uses one A100 80GB. 
+
+C.2 Evaluation Identities, Prompts, and Decoding 
+
+Table 5 gives the exact paper-facing task identifiers and eval-uated sample counts. The evaluation cap is 1,000 examples per task; InfoVQA and MMMU contain only 500 and 900 ex-amples, respectively, under the archived validation-task def-initions, so all available examples are used. For every model, all methods use the same fixed example identities and order within a task. The multimodal tasks use pinned LMMS-Eval task definitions and the text tasks use pinned LM Evaluation Harness definitions. Their task templates, answer extraction, metric implementation, checkpoint-specific processor, and generation arguments are held fixed across methods; only the compressed checkpoint changes. All autoregressive gen-eration uses greedy decoding with temperature set to 0 and sampling disabled. We use batch size one for the audited generation runs. For Qwen3-VL, the archived runner uses bfloat16, tensor parallelism of two, a 32,768-token maximum context, and the same processor bounds and system prompt for every compared method. The DeepSeek-VL2-Small com-parison likewise shares one dtype-safe wrapper, processor, evaluator, prompt set, and generation configuration across all rows.               
+
+> Benchmark Archived task identifier nPaper score
+> InfoVQA infovqa_val_lite 500 ANLS ×100
+> MMMU mmmu_val 900 Accuracy ×100
+> OCRBench ocrbench 1,000 Accuracy ×100
+> ARC-Easy arc_easy 1,000 Accuracy ×100
+> PIQA piqa 1,000 Accuracy ×100
+> Winogrande winogrande 1,000 Accuracy ×100
+
+Table 5: Evaluation identities and sample counts used by ev-ery paper-facing comparison. The same identities are reused across methods within each model and retention ratio. 
+
+C.3 Matched-Baseline Construction 
+
+The reported baseline numbers are reruns under our common MoE-VLM protocol, not values copied from the original pa-pers. At a fixed model and ρ, every method receives the same Algorithm 1 RoleMerge : Phase-Conditioned Grouping and Expert–Router Parameter Merging 
+
+Require: Pretrained MoE-VLM F ; calibration set Dcal (labels unused); selected MoE layers L; expert-retention ratio ρ; collision weight 
+
+λ = .03 
+
+Ensure: Compressed model bF with Kℓ routed experts in each compressed layer ℓ
+
+Phase I: collect phase-separated routing evidence 
+
+1: for all x ∈ D cal do 
+
+2: Run deterministic autoregressive inference with the frozen model F
+
+3: Split routed positions into image-context processing, question processing, and answer decoding 4: For each ℓ ∈ L , phase b, and top-k selected expert e, increment nℓ,b (e)
+
+5: end for Phase II: construct RRPs and pairwise expert–phase information losses 
+
+6: for all ℓ ∈ L do 
+
+7: for all phases b do 
+
+8: pℓ,b (e) ← nℓ,b (e)/ P 
+
+> j
+
+nℓ,b (j)
+
+9: end for 
+
+10: Pℓ(e, b ) ← pℓ,b (e)/3; Pℓ(e) ← P 
+
+> b
+
+Pℓ(e, b ); qℓ,e (b) ← Pℓ(e, b )/P ℓ(e), using qℓ,e ≡ 0 when Pℓ(e) = 0 
+
+11: for all expert pairs i < j do 
+
+12: if Pℓ(i) + Pℓ(j) > 0 then 
+
+13: mℓ,ij ←  Pℓ(i)qℓ,i + Pℓ(j)qℓ,j 
+
+/ Pℓ(i) + Pℓ(j)
+
+14: dEP ,ℓ (i, j ) ← Pℓ(i)DKL (qℓ,i ∥mℓ,ij ) + Pℓ(j)DKL (qℓ,j ∥mℓ,ij )
+
+15: else 
+
+16: dEP ,ℓ (i, j ) ← 0
+
+17: end if 
+
+18: end for 
+
+19: Normalize dEP ,ℓ by its largest off-diagonal value, retaining an all-zero matrix when the maximum is zero 20: κℓ ← 1 − H(pℓ, ans )/ log Nℓ
+
+21: end for 
+
+22: ¯κ ← |L| −1 P 
+
+> ℓ∈L
+
+max( κℓ, ε )
+
+Phase III: construct the answer-aware grouping 
+
+23: for all ℓ ∈ L do 
+
+24: λℓ ← λ max( κℓ, ε )/¯κ
+
+25: Kℓ ← TargetCount (Nℓ, ρ ); Gℓ ← {{ 1}, . . . , {Nℓ}} 
+
+26: Rans ,ℓ (G) ← P  
+
+> e∈G
+
+pℓ, ans (e)/ max e∈G pℓ, ans (e) + ε − 1
+
+> +
+
+27: τℓ ← median +
+
+> i<j
+
+ Rans ,ℓ ({i, j }) − Rans ,ℓ ({i}) − Rans ,ℓ ({j}), using 1 if no positive value exists 28: while |G ℓ| > K ℓ do 
+
+29: for all unordered group pairs G, H ∈ G ℓ do 
+
+30: drole ,ℓ (G, H ) ← min i∈G,j ∈H dEP ,ℓ (i, j )
+
+31: ∆Rans ,ℓ (G, H ) ← Rans ,ℓ (G ∪ H) − Rans ,ℓ (G) − Rans ,ℓ (H)
+
+32: Jℓ(G, H ) ← drole ,ℓ (G, H ) + λℓ∆Rans ,ℓ (G, H )/τ ℓ
+
+33: end for 
+
+34: Select (G⋆, H ⋆) ← arg min Jℓ(G, H ), breaking exact ties by group-wise role dissimilarity, signed collision adjustment, group size, and expert indices 35: Replace G⋆, H ⋆ in Gℓ by G⋆ ∪ H⋆
+
+36: end while Phase IV: merge expert and router parameters 
+
+37: for all G ∈ G ℓ do 
+
+38: Let uℓ,e ← P 
+
+> b
+
+nℓ,b (e) and ωℓ,e ← uℓ,e / P 
+
+> j∈G
+
+uℓ,j for e ∈ G
+
+39: If P 
+
+> j∈G
+
+uℓ,j = 0 , set ωℓ,e ← 1/|G|
+
+40: bΘℓ,G ← P 
+
+> e∈G
+
+ωℓ,e Θℓ,e ; brℓ,G ← P 
+
+> e∈G
+
+ωℓ,e rℓ,e 
+
+41: end for 
+
+42: Replace layer ℓ by {( bΘℓ,G , brℓ,G ) : G ∈ G ℓ} and reduce its router output dimension to Kℓ
+
+43: end for 
+
+44: return bFbase checkpoint, target expert counts Kℓ, compressed layer set, calibration identities, evaluation identities, and hardware precision. Each method retains its defining grouping and parameter-combination rules. The shared adaptation is lim-ited to loading the same MoE-VLM checkpoint, materializ-ing the requested number of retained experts, translating the router to the reduced expert pool, and exposing the check-point through the same evaluator. Thus “matched” does not mean replacing a baseline’s grouping or parameter-merging procedure with that of RoleMerge .For DeepSeek-VL2-Small, one TCS calibration set with 64 examples from each source is reused by RoleMerge , Sub-MoE, and NAMEx at all three retention ratios. The three rows share task configurations, prompts, sample identities, processor, evaluator, and generation settings. For DeepSeek-VL2-Tiny, the main TCS calibration set uses 128 examples per source. The Qwen3-VL audit checks protocol parity per task and retention ratio, including evaluator version, preci-sion, tensor parallelism, context length, batch size, prompts, processor bounds, and sample count. No method is selected separately per downstream task, and the uncompressed Full Model is evaluated once per model and reused as the com-mon reference across retention ratios. Because some origi-nal baselines were proposed for text-only MoEs, these rows should be interpreted as matched MoE-VLM adaptations un-der the paper’s protocol rather than reproductions of the orig-inal papers’ task settings. 
+
+C.4 TCS Calibration Set 
+
+TCS denotes TextVQA (Singh et al. 2019), ChartQA (Masry et al. 2022), and ScienceQA (Lu et al. 2022). These sources provide scene-text reading, chart/number understanding, and scientific visual reasoning contexts for route profiling. They are used only to collect calibration routing traces, not as downstream supervision. RoleMerge uses no task labels, answer correctness, or downstream evaluation scores when constructing RRPs from this set. All audited routing traces pass assignment-conservation and nonempty phase-bucket checks. 
+
+## D Additional Results for Q1 
+
+D.1 REAM Port and Additional REAP Baseline 
+
+Table 6 reports detailed REAM and REAP results on DeepSeek-VL2-Tiny. REAM (Jha et al. 2026) is included in the main comparison, while the table here retains two-decimal scores and juxtaposes it with REAP. REAP (Lasby et al. 2026) removes low-saliency experts rather than merg-ing expert parameters, so its compression operator differs from the expert-merging methods in the main comparison. Because the official REAM implementation does not natively support DeepSeek-VL2, its results use our audited official-core DeepSeek-VL2 port with non-sequential merging; the calibration replay does not retain the complete visual se-quence and attention state required by REAM’s sequential mode. The REAP adapter follows its router-weighted expert-activation criterion, and all calibration identities remain dis-joint from the six evaluation datasets. 
+
+Retention trend and operator comparison. Both supple-mentary operators improve smoothly as more experts are retained. From ρ = .50 to .75 , six-task Avg rises by 4.94 points for REAM and 4.54 points for REAP; the correspond-ing MM3 gains are 5.16 and 4.51 points, and the Text3 gains are 4.73 and 4.57 points. This monotone response is use-ful as a basic implementation check: neither port exhibits an anomalous reversal when its retained expert budget in-creases. The two operators remain close under the matched proto-col. REAP exceeds REAM by 0.27 and 0.80 Avg points at 
+
+ρ = .50 and .625 , whereas REAM is higher by 0.13 points at 
+
+ρ = .75 . Thus the supplementary pruning baseline does not uniformly dominate the merging baseline, and their largest displayed separation is below one point. Both remain below the uncompressed Full Model, including gaps of 4.92 and 5.05 Avg points for REAM and REAP at ρ = .75 , respec-tively. These comparisons describe the compression trade-off without treating the two distinct operators as interchangeable. 
+
+D.2 Paired Uncertainty 
+
+Table 7 complements the main Q1 results with paired uncer-tainty for the matched DeepSeek-VL2-Small comparisons. These intervals quantify finite-sample evaluation uncertainty rather than variation from repeated decoding runs. For each task, one bootstrap replicate samples evaluation identities with replacement and applies exactly the same sampled in-dices to both methods. We compute each task mean, aver-age the six task means with equal weight, and record the paired difference. The reported interval is the 2.5th–97.5th percentile range over 10,000 replicates. This preserves pair-ing between methods while preventing evaluation sets with more examples from receiving greater weight in the six-task Avg.                                  
+
+> ρComparison ∆95% CI
+> .50 RoleMerge −Sub-MoE +2 .84 [+1 .54 ,+4 .15]
+> .50 RoleMerge −NAMEx +3 .10 [+1 .82 ,+4 .42]
+> .625 RoleMerge −Sub-MoE +3 .53 [+2 .32 ,+4 .72]
+> .625 RoleMerge −NAMEx +3 .69 [+2 .51 ,+4 .88]
+> .75 RoleMerge −Sub-MoE +2 .21 [+1 .13 ,+3 .30]
+> .75 RoleMerge −NAMEx +2 .48 [+1 .40 ,+3 .59]
+
+Table 7: Paired 10,000-resample DeepSeek-VL2-Small dif-ferences in six-task Avg points. Resampling uses matched per-sample scores. Table 8 gives the corresponding paired uncertainty for the Qwen3-VL-30B-A3B-Instruct comparison with Sub-MoE.                 
+
+> ρComparator ∆Avg Paired 95% CI
+> 0.50 Sub-MoE +5 .97 [+4 .58 ,+7 .32]
+> 0.625 Sub-MoE +4 .68 [+3 .42 ,+5 .90]
+> 0.75 Sub-MoE +2 .82 [+1 .71 ,+3 .97]
+
+Table 8: Paired 10,000-resample uncertainty in six-task Avg points for the Qwen3-VL-30B-A3B-Instruct RoleMerge –Sub-MoE comparisons reported in the main table. Method / ρ Info MMMU OCR MM3 ARC-E PIQA Wino. Text3 Avg                                                                
+
+> Full 49.28 39.11 81.10 56.50 67.90 73.20 59.90 67.00 61.75 REAM / .50 40.31 34.11 70.20 48.21 46.40 67.30 53.00 55.57 51.89 REAM / .625 43.95 34.78 72.90 50.54 51.80 68.80 57.40 59.33 54.94 REAM / .75 46.46 35.44 78.20 53.37 54.00 69.00 57.90 60.30 56.83 REAP / .50 41.18 34.00 71.30 48.83 46.90 66.60 53.00 55.50 52.16 REAP / .625 45.72 34.44 73.90 51.35 53.20 69.80 57.40 60.13 55.74 REAP / .75 46.07 35.44 78.50 53.34 53.60 69.10 57.50 60.07 56.70
+
+Table 6: Detailed REAM (Jha et al. 2026) merging and additional REAP (Lasby et al. 2026) pruning results on DeepSeek-VL2-Tiny using official task scores on a 0–100 scale. Both use the same TCS calibration set, three expert-retention ratios, and six-task evaluation protocol as the Tiny comparison in the main paper. REAM also appears in the main table and uses our audited official-core DeepSeek-VL2 port with non-sequential merging; REAP is supplementary because it removes experts rather than merging expert parameters. Avg is the unweighted six-task average. 
+
+## E Additional Mechanism Analysis for Q2 
+
+E.1 Component Controls 
+
+Table 9 reports the DeepSeek-VL2-Small component con-trols summarized in the main paper at ρ = .625 . All rows use the same calibration set, retained expert count, grouping rule, and expert/router parameter-merging procedure; only the specified mechanism changes. Pooling routing statistics from image-context processing, question processing, and an-swer decoding before grouping reduces ACR from 95.0% to 93.1% and MM3 from 57.1 to 53.5. Removing the signed col-lision adjustment lowers ACR to 89.1% and MM3 to 55.4, while permuting RRPs across expert identities lowers them to 70.8% and 51.7, respectively. The corresponding paired 95% intervals exclude zero. The table uses the complete 
+
+RoleMerge row from the main text as its reporting anchor: paired ablation deltas are computed before display rounding and applied to that common anchor.                   
+
+> Intervention ACR (%) MM3 95% CI
+> w/o phase split 93.1 53.5 [−5.46 ,−1.81]
+> w/o collision adj. 89.1 55.4 [−3.27 ,−0.14]
+> permuted roles 70.8 51.7 [−7.40 ,−3.62]
+> Complete RoleMerge 95.0 57.1 —
+
+Table 9: DeepSeek-VL2-Small component controls at 
+
+ρ = .625 . ACR is averaged uniformly over 78 task– layer calibration records; MM3 is the unweighted In-foVQA/MMMU/OCRBench average. The final column gives paired 10,000-resample 95% intervals for the MM3 change relative to the complete RoleMerge setting. 
+
+## F Additional Calibration Analyses for Q3 
+
+F.1 Calibration Construction, Source Type, and Set Size 
+
+Table 10 expands the calibration-set construction and source-type controls summarized under Q3 in the main paper. For the source-type comparison, the model, 128 examples per source, compression settings, three retention ratios, and six evaluation tasks are fixed; only the calibration source used to construct the RRPs changes. The mixed-multimodal set con-tains image–question–answer traces, the text-only-answer set contains answer traces without visual conditioning, and the task-specific-multimodal set uses one task-specific multi-modal source rather than the mixed pool. The first two rows compare TCS with the earlier Mixed/IQA calibration con-struction. The results show that mixed multimodal calibra-tion is stronger than the two source-type controls, while TCS is close to the alternative multimodal construction over the three-retention-ratio sweep.                         
+
+> Calibration construction .50 .625 .75 Mean
+> Mixed/IQA, 64/source 52.99 57.56 59.82 56.79 TCS, 128/source 53.28 56.94 60.41 56.88 Mixed multimodal, 128/source 54.05 58.19 60.65 57.63 Text-only answer, 128/source 45.08 51.41 56.95 51.15 Task-specific MM, 128/source 48.85 53.52 56.81 53.06
+
+Table 10: DeepSeek-VL2-Tiny calibration controls in six-task Avg points. The first two rows compare calibration-set constructions; the last three compare calibration-source types. 
+
+Construction and source-type contrasts. TCS and Mixed/IQA are nearly tied on the three-ratio mean: TCS is higher by 0.09 points overall, with per-ratio differences of +0 .29 , −0.62 , and +0 .59 . The change in sign is con-sistent with treating TCS as a fixed, balanced construction rather than a calibration set optimized for a particular reten-tion ratio. The source-type control is more decisive. Mixed multimodal calibration exceeds text-only-answer calibration by 6.48 mean points and the task-specific multimodal con-trol by 4.57 points. These gaps are already present at every retention ratio, supporting the use of phase-complete mul-timodal traces while avoiding a claim that any individual source mixture is downstream-optimal. Examples/source 32 64 128 256 512 1024   
+
+> Mean over ρ54.88 56.79 57.63 56.70 57.41 57.18
+
+Table 11: DeepSeek-VL2-Tiny calibration-set-size sweep (six-task Avg points). Table 11 varies the number of calibration examples per source. The largest change is the 2.75-point increase from 32 to 128 examples per source. From 64 through 1024 examples, however, all six-task averages lie within a 0.93-point range; increasing the set from 128 to 1024 changes the mean by only 
+
+−0.45 points. The non-monotone response therefore forms a broad plateau rather than a sample-count scaling trend. It also shows that the reported behavior is not explained by selecting one sharply tuned calibration-set size. 
+
+F.2 Fixed-Budget Mixtures and Routing Coverage 
+
+To test sensitivity to the composition of TCS, we addi-tionally evaluate fixed-budget calibration sets on DeepSeek-VL2-Tiny at ρ = .625 . The model, RoleMerge config-uration, phase buckets, total calibration budget, and In-foVQA/MMMU evaluation identities are fixed; only source count, source prior, or source identity changes. TCS was se-lected before inspecting these downstream diagnostic scores. The exact-mixture comparison separates downstream score from the calibration-only routing criterion: DAR reaches 42.05 on this two-task diagnostic, compared with 39.69 for TCS. Thus neither the main paper nor this appendix claims downstream optimality for TCS.                          
+
+> Panel Calibration set Budget Avg
+> Source count T384 39.36 C384 38.86 S384 38.90 T+C 384 40.33 T+S 384 40.47 C+S 384 38.49 T+C+S 384 39.69 Exact mixture TCS 384 39.69 DCS 384 40.30 DAR 384 42.05 TDC 384 40.56
+
+Table 12: Fixed-budget calibration-set audit on DeepSeek-VL2-Tiny at ρ = .625 . Avg is the unweighted mean of InfoVQA and MMMU. T/C/S/D/A/R denote TextVQA, ChartQA, ScienceQA, DocVQA, AI2D, and RealWorldQA, respectively. 
+
+Budget-matched source-count comparison. Because ev-ery row uses 384 calibration examples, the first panel isolates composition rather than total calibration volume. The three one-source sets span only 0.50 points (38.86–39.36) and av-erage 39.04. The three two-source sets have a similar mean of 39.76 but a wider 1.98-point range: T+C and T+S reach 40.33 and 40.47, whereas C+S reaches 38.49. Within this audit, adding a second source therefore does not provide a uniform gain; source identity matters at least as much as source count. The balanced three-source TCS value of 39.69 is 0.65 points above the one-source mean, 0.07 points below the two-source mean, and 0.78 points below the strongest individual two-source row. This places TCS near the center of the fixed-budget source-count comparisons rather than at an isolated score extreme. 
+
+Exact-mixture spread. Holding the same total budget and source count while changing the exact source identities pro-duces a larger score spread. DCS and TDC exceed TCS by 0.61 and 0.87 points, while DAR exceeds it by 2.36 points. DAR is also 1.75 points above DCS and 1.49 points above TDC. These differences show why the exact source identities must be reported alongside the nominal number of sources. They do not alter the matched main comparisons, which reuse the same pre-specified TCS set for every method and retention ratio. 
+
+Within-panel identity pattern. Among the one-source controls, T reaches 39.36, which is 0.48 points above the mean of C and S. Among the two-source controls, the two mixtures containing T average 40.40, or 1.91 points above C+S. This repeated ordering is descriptive rather than causal, because holding the total budget fixed also changes the num-ber of examples allocated to each included source. It nev-ertheless explains why the mean over source counts can conceal material composition effects. The 2.36-point range among the exact three-source mixtures also slightly exceeds the 1.98-point range in the entire source-count panel, further motivating the identity-level audit. 
+
+Source-count and routing-coverage diagnostics. Fig-ure 3(c) shows that one-source, two-source, and TCS cal-ibration sets give close two-task averages of 39.04, 39.76, and 39.69. Instead, Table 13 shows why TCS is kept as a pre-specified, balanced default: among the audited mixtures, it has the lowest top-16 answer-decoding expert overlap and the highest union coverage. The score diagnostic bounds the optimality claim, while the routing diagnostic supports the fixed default used by every matched main comparison. More specifically, relative to TCS, DCS increases J16 by .042 and reduces U16 by .017; the corresponding changes are +.035 
+
+and −.009 for DAR, and +.096 and −.033 for TDC. Thus all three alternative exact mixtures show greater top-16 overlap and lower union coverage than TCS. Across these four rows, the ordering of J16 is exactly reversed by the ordering of U16 ,making the two columns complementary views of the same concentration–coverage trade-off.                
+
+> Calibration set Avg J16 U16
+> TCS 39.69 .442 .411 DCS 40.30 .484 .394 DAR 42.05 .477 .402 TDC 40.56 .538 .378
+
+Table 13: Calibration-set score and routing-coverage diag-nostics. J16 is the mean top-16 answer-decoding expert Jac-card overlap, and U16 is the mean top-16 union coverage. 
+
+Score–coverage separation. The downstream score order-ing does not follow either routing statistic monotonically. TCS DCS DAR TDC                   
+
+> 32
+> 34
+> 36
+> 38
+> 40
+> 42
+> 44
+> 46
+> 48
+> Score (%)
+> 39.7 40.3
+> 42.1
+> 40.6
+> (a)
+> Macro InfoVQA MMMU
+> 38 39 40 41
+> Top-16 union coverage (%)
+> 39.5
+> 40.0
+> 40.5
+> 41.0
+> 41.5
+> 42.0
+> Macro score (%)
+> TCS
+> DCS
+> DAR
+> TDC
+> (b)
+> Avg
+> Avg score (%) TCS DCS DAR TDC
+> 32
+> 34
+> 36
+> 38
+> 40
+> 42
+> 44
+> 46
+> 48
+> Score (%)
+> 39.7 40.3
+> 42.1
+> 40.6
+> (a)
+> Macro InfoVQA MMMU
+> 38 39 40 41
+> Top-16 union coverage (%)
+> 39.5
+> 40.0
+> 40.5
+> 41.0
+> 41.5
+> 42.0
+> Macro score (%)
+> TCS
+> DCS
+> DAR
+> TDC
+> (b)
+> Avg
+> Avg score (%) 123
+> Number of calibration sources
+> (fixed total budget: 384)
+> 38.5
+> 39.0
+> 39.5
+> 40.0
+> 40.5
+> 41.0
+> Macro score (%)
+> T
+> CS
+> TC
+> TS
+> CS
+> TCS
+> Avg score (%)
+
+(c) 
+
+Figure 3: Fixed-budget calibration diagnostics on DeepSeek-VL2-Tiny at ρ = .625 . T/C/S/D/A/R denote TextVQA, ChartQA, ScienceQA, DocVQA, AI2D, and RealWorldQA. Avg is the unweighted mean of InfoVQA and MMMU. (a) Exact-mixture downstream scores. (b) Downstream Avg versus top-16 answer-decoding union coverage; DAR has the highest audited score, whereas TCS has the highest coverage. (c) Source-count comparison under a fixed 384-example budget; points enumerate all one- and two-source subsets and the three-source TCS set, and horizontal bars mark within-count means. DAR has the highest two-task Avg but only the second-highest union coverage, while TCS has the highest union coverage without the highest Avg. TDC provides the clearest counterexample to treating overlap as an accuracy proxy: it has the largest J16 and smallest U16 , yet its Avg remains be-tween DCS and DAR. We therefore use these columns only to audit the intended routing diversity of the fixed calibration default, not to predict downstream accuracy. The diagnos-tic is limited to one checkpoint, one retention ratio, and the InfoVQA/MMMU pair; it supports protocol consistency but does not claim that TCS is downstream-optimal for other models or task sets. 
+
+F.3 Collision Weight, Grouping Rule, and Search Depth 
+
+Setting MM3 Text3 Avg ∆
+
+Collision weight 
+
+λ = 0 50.12 58.67 54.39 −2.55 
+
+λ = .01 53.86 59.30 56.58 −0.36 
+
+λ = .03 (ours) 53.35 60.53 56.94 0.00 
+
+λ = .10 53.93 61.23 57.58 0.64 
+
+Grouping rule 
+
+avg. link 52.94 58.83 55.89 −1.05 
+
+comp. link 52.27 58.33 55.30 −1.64 
+
+k-means++ 43 .72.3 59 .20.9 51 .51.2 −5.44 
+
+single link (ours) 53.35 60.53 56.94 0.00 
+
+Table 14: DeepSeek-VL2-Tiny Q3 sensitivity at ρ = .625 
+
+(task-score points; higher is better). ∆ is the Avg change relative to the main setting with λ = .03 and single linkage. The k-means++ row gives five-seed means; subscripts denote standard deviations. Table 14 provides the two-decimal values underlying the Q3 sensitivity summary in the main paper. Increasing λ from .03 to .10 changes Avg by +0 .64 , while removing the signed collision adjustment drops Avg by 2.55. The small gain at .10 rules out an optimality claim for .03, while the larger drop at zero supports a positive weight over this audited range. The grouping-rule block shows a clearer conclusion: single linkage outperforms average linkage, complete linkage, and five-seed k-means++ when the same expert–phase informa-tion loss and parameter-merging procedure are used. 
+
+Metric-wise sensitivity. The collision-weight sweep is not strictly monotone, which is why we treat λ = .03 as a fixed default rather than a tuned optimum. Relative to this default, 
+
+λ = .01 raises MM3 by 0.51 points but lowers Text3 by 1.23 points, producing the modest 0.36-point Avg decrease. At 
+
+λ = .10 , the corresponding changes are +0 .58 and +0 .70 ,whereas setting λ = 0 reduces both metrics by 3.23 and 1.86 points. Thus the audit supports retaining a positive collision term, while the small differences among the positive settings do not justify a claim that one precise weight is universally best. 
+
+Variation across positive weights. Restricting the com-parison to λ ∈ { .01 , . 03 , . 10 } gives ranges of 0.58 points on MM3, 1.93 points on Text3, and 1.00 point on Avg. Includ-ing λ = 0 expands the Avg range to 3.19 points. The main 
+
+λ = .03 setting lies inside the positive-weight band: its Avg is 0.36 points above .01 and 0.64 points below .10. Accord-ingly, the larger distinction in this sweep is between removing the adjustment and retaining a positive adjustment, not be-tween two nearby positive values. This is a local stability observation, not a hyperparameter-optimality claim. 
+
+Grouping-rule decomposition. Average and complete linkage trail single linkage on both displayed metrics. Their losses are larger on Text3 (1.70 and 2.20 points) than on MM3 (0.41 and 1.08 points), so their lower Avg is not pro-duced by a reversal between the two diagnostic aggregates. The k-means++ control has a different profile: its 5.44-point Avg gap is driven mainly by a 9.65-point MM3 deficit, while its Text3 deficit is 1.33 points. Even the displayed mean plus Panel Method / ρ Info MMMU OCR ARC-E PIQA Wino Avg. ∆J                                                                                                                          
+
+> AGreedy/.50 49.3 32.3 70.4 49.9 65.1 52.7 53.28 0.0% AGreedy/.625 50.7 35.1 74.2 58.9 69.4 53.3 56.94 0.0% AGreedy/.75 59.0 37.1 77.6 62.2 70.4 56.1 60.41 0.0% AGreedy+1Swap/.50 41.4 34.2 75.1 47.1 65.1 52.9 52.6 -27.35% AGreedy+1Swap/.625 46.0 35.7 77.0 56.9 71.0 56.2 57.1 -34.37% AGreedy+1Swap/.75 47.5 38.0 79.4 61.8 72.8 58.1 59.6 -42.69% AGreedy+SwapC./.50 41.1 34.7 71.8 51.1 66.2 53.7 53.1 -45.60% AGreedy+SwapC./.625 44.6 36.7 76.9 60.0 69.2 58.8 57.7 -60.51% AGreedy+SwapC./.75 47.0 37.1 79.1 62.1 72.3 59.1 59.5 -73.90% Bavg. link/.625 46.2 35.2 77.4 52.4 69.4 54.7 55.9 –Bcomp. link/.625 43.6 34.7 78.5 51.8 66.5 56.7 55.3 –Bk-means++/.625 34 .9±3.031 .0±2.465 .4±2.256 .3±1.866 .5±1.854 .7±1.251 .5±1.2–
+
+Table 15: Controlled search-depth and grouping-rule analysis on DeepSeek-VL2-Tiny using official task scores on a 0–100 scale. Panel A changes only search depth under the same answer-aware merge score and fixed retained expert counts; Panel B changes the grouping rule. Avg is computed before display rounding. The k-means++ control reports five seeds as mean ±std. one standard deviation for its Avg remains 4.24 points below single linkage. These results favor the deterministic default based on single linkage for this matched diagnostic without implying that it must dominate every possible clustering rule or evaluation setting. Table 15 gives the solver-depth diagnostic. Panel Achanges search depth under a fixed answer-aware merge score, while Panel B compares grouping rules at ρ = .625 .Lower merge-score values do not automatically translate into better downstream performance, consistent with the main pa-per’s use of the score as a greedy grouping criterion rather than a universal accuracy predictor. The local-search variants improve Avg only at ρ = .625 and decline at both .50 and 
+
+.75 , so they are not a consistently stronger replacement for the fixed greedy procedure. 
+
+## G Storage and Efficiency Details for Q4 
+
+G.1 DeepSeek-VL2-Small Single-GPU Efficiency                                                 
+
+> Model Params (B) Ckpt. (GiB) Load (s)
+> Full 16.15 30.08 24.20
+> RoleMerge ρ=.50 8.95 16.68 12.05
+> RoleMerge ρ=.625 10.75 20.03 13.02
+> RoleMerge ρ=.75 12.55 23.38 17.23
+> Model Steady Peak TTFT E2E tok/s GiB seconds 32-token
+> Full 48.12 50.55 0.238 0.488 17.23
+> RoleMerge ρ=.50 31.85 34.30 0.162 0.414 18.20
+> RoleMerge ρ=.625 35.92 38.37 0.183 0.459 17.91
+> RoleMerge ρ=.75 39.95 42.40 0.201 0.457 18.33
+
+Table 16: DeepSeek-VL2-Small efficiency on one A100 80GB without CPU/disk offload. Latencies average three run medians over 32 examples per MM3 task (batch size one; 10 warm-ups/task). E2E uses normal generation; tok/s uses 32-token decoding; memory is incremental over pre-load. Table 16 reports an isolated single-A100 measurement for the Full Model and all three RoleMerge retention ratios. All four checkpoints remain fully GPU-resident. At ρ = .50 ,
+
+RoleMerge reduces parameters by 44.6%, steady-state in-cremental memory by 33.8%, and peak incremental memory by 32.2% relative to Full. Its median time to first token de-creases by 32.1%, normal end-to-end latency decreases by 15.3%, and fixed-length decoding throughput increases by 5.7%. At ρ = .625 , the corresponding parameter, steady-memory, and peak-memory reductions are 33.4%, 25.4%, and 24.1%. The ρ = .50 latency and throughput directions hold in all three repetitions. For ρ = .625 , one of three normal-generation repetitions does not improve end-to-end latency, so we report its aggregate timing without claiming a stable speedup. The modest decoding-throughput differ-ences should be interpreted as system measurements rather than algorithmic asymptotics. 
+
+G.2 Exact Footprint Accounting           
+
+> Qwen3-VL-30B-A3B-Instruct artifact Full ρ=.625 Retained
+> Routed-expert parameters 28.991B 18.119B 62.5% Total parameters 31.071B 20.194B 65.0% Serialized bf16 weights 62.14GB 40.39GB 65.0%
+
+Table 17: Qwen3-VL-30B-A3B-Instruct parameter and checkpoint accounting from tensor headers. The retention ratio ρ applies to routed experts. At ρ =
+
+.625 , Qwen3-VL-30B-A3B-Instruct routed-expert parame-ters decrease from 28.991B to 18.119B, while total parame-ters and serialized bf16 weights both retain 65.0% of the full model.
