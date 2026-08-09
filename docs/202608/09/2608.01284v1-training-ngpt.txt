@@ -1,0 +1,1168 @@
+TRAINING nGPT
+Ilya Loshchilov & Boris Ginsburg
+NVIDIA
+{iloshchilov,bginsburg}@nvidia.com
+ABSTRACT
+The normalized Transformer (nGPT) realizes hyperspherical representation learn-
+ing by constraining model parameter vectors and activation vectors to the unit hy-
+persphere. In this paper, we describe a practical training recipe for nGPT and eval-
+uate it on modern hybrid Mamba-2–TransformerMixture-of-Experts (MoE) mod-
+els. The recipe introduces Logit Gradient Preconditioning, Logarithmic Learn-
+ing Rate Decay, GatedAdamW, angular update control, and optional exploration
+mechanisms. Compared with an unnormalized model of the same hybrid MoE ar-
+chitecture trained with AdamW, the 14B-total-parameter nGPT model reaches the
+same validation loss using approximately half as many training tokens. The recipe
+scales across the models considered, which contain up to 14B total parameters.
+1
+PRELIMINARIES
+The normalized Transformer (nGPT) paper (Loshchilov et al., 2024) proposed a hyperspherical rep-
+resentation in which all activation vectors and parameter vectors that form matrices are normalized
+to unit norm. The high-level idea behind nGPT is illustrated in Figure 1, where the initial sequence
+“Life is” is used to predict “beautiful” via a two-step process within a single layer. The ﬁrst step
+of the attention block considers the two blue tokens “Life” and “is”, represented as points, and sug-
+gests a prediction depicted by the green point. This prediction is then combined with the hidden
+state to produce a new intermediate point. The resulting intermediate point is passed to the MLP
+block, which in turn produces its suggestion depicted by the red point. The hidden state then takes
+a second learned step towards the MLP suggestion. When this process is repeated across layers,
+next-token prediction can be viewed as an optimization process on the hypersphere: model vectors
+Input:      Life is
+Output: beautiful
+is
+Life
+beautiful
+Token
+Token suggested by Attention
+Step towards Attention's suggestion
+Step towards MLP's suggestion
+Token suggested by MLP
+Normalized Transformer 
+Step-sizes are controlled by learnable 
+eigen learning rates
+Figure 1: nGPT’s forward pass as a multi-step optimization on the hypersphere.
+1
+arXiv:2608.01284v1  [cs.LG]  2 Aug 2026
+
+
+act as anchors, dot products measure similarity to these anchors, and the attention and MLP blocks
+propose successive steps.
+nGPT was designed based on a ﬁrst-principles view of the hypersphere as the representation man-
+ifold, following an earlier attempt to control the norms of Transformer parameters during training
+(Loshchilov, 2023). At the same time, it connects to a broad line of work that either explicitly studies
+hyperspherical representations (Liu et al., 2017; Wang et al., 2017; Liu et al., 2018; Xu & Durrett,
+2018; Mettes et al., 2019; Wang & Isola, 2020; Liu et al., 2021; Karras et al., 2024) or arrives at re-
+lated ideas through normalization, decoupled weight decay, norm control, and rotational training dy-
+namics (Salimans & Kingma, 2016; Loshchilov & Hutter, 2019; Franke et al., 2023; Kodryan et al.,
+2022; Kosson et al., 2023).
+In this work, we extend nGPT from the dense Transformer setting originally studied in
+Loshchilov et al. (2024) to modern hybrid Mamba-2–Transformer MoE language models, using the
+Nemotron-3 architecture and an industry-grade data blend (Blakeman et al., 2025). We refer to the
+complete collection of normalization, architectural, and optimization modiﬁcations considered in
+this work as the nGPT training recipe. Its principal components include Logit Gradient Precondi-
+tioning, logarithmic learning rate decay, GatedAdamW, Pre-Moment Tangent Projection, Angular
+Step Cap, Second-Moment Growth Clipping, and Post-Moment Exploration Noise. These names
+refer to individual components of the recipe rather than to separate model architectures.
+The core recipe is not speciﬁc to MoE models. For a dense feed-forward block, the same normal-
+ization and optimization rules can be applied to the ordinary MLP projection matrices, while the
+router- and expert-speciﬁc modiﬁcations are omitted. In the experiments, we use GPT and nGPT
+to denote, respectively, the unnormalized and normalized variants of the same hybrid Mamba-2–
+Transformer MoE architecture; optimizer names are appended only when the distinction is relevant.
+The remainder of the paper ﬁrst introduces the individual training components and then describes
+their application to nGPT in the hybrid MoE setting.
+Scope.
+The experiments in this paper were run with a limited compute budget. As a result, we
+focus on the training recipe that worked in practice and do not attempt an exhaustive ablation study.
+In particular, comprehensive component-wise ablations and hyperparameter scaling laws are left for
+future work.
+2
+OPTIMIZATION INGREDIENTS
+2.1
+LOGIT GRADIENT PRECONDITIONING (LGP)
+In nGPT, the output embedding vectors and hidden states are normalized, so the unscaled logits are
+based on bounded dot products. As in the original nGPT formulation, we therefore use a learnable
+vocabulary-wise scale vector sz ∈RV to control the sharpness of the output distribution. We
+initialize this vector as
+sz,0 = 1.
+(1)
+Let u ∈RV denote the logits before this scale is applied. The forward pass uses
+z = sz ⊙u,
+(2)
+and the cross-entropy loss is computed from z.
+The motivation for LGP came from an empirical observation in a dense 8B nGPT model trained
+on 4T tokens alongside the Nemotron-H pretraining cycle (Blakeman et al., 2025). Figure 2 shows
+that after an initial transient, the mean value of the learned vocabulary logit scale vector sz grows
+logarithmically. While different token-speciﬁc entries of sz grow at different rates, the mean of sz
+appears as an explicit global multiplier on the gradient propagated through the output layer to all
+preceding layers, independently of the explicit learning rate schedule. This hidden, time-varying
+multiplier can complicate the design of optimizers and architectures, and may be one contributor to
+the commonly observed growth of gradient norms during long pretraining runs.
+Standard backpropagation would multiply the gradient entering the output layer by sz:
+∂L
+∂u = sz ⊙∂L
+∂z .
+(3)
+2
+
+
+102
+103
+104
+105
+106
+0
+10
+20
+30
+40
+50
+60
+70
+80
+90
+100
+Figure 2: Mean value of the logit scale vector sz for an 8B dense nGPT model trained on 4T tokens.
+The ﬁt is computed from iteration t ≥1000.
+This couples the learned logit scales to the effective learning rate of the output layer and all preceding
+layers. In particular, if the mean of sz grows during training, then the average gradient scale entering
+the network also grows, even though this change is not part of the explicit learning rate schedule. To
+control this coupling, we use sz in the forward pass but replace its explicit backward multiplier by a
+normalized scale:
+∂L
+∂u ←
+
+sz
+mean(sz)
+q
+⊙∂L
+∂z ,
+(4)
+where q controls the strength of the preconditioning. We call this procedure Logit Gradient Precon-
+ditioning (LGP), since it preconditions the gradient ﬂowing backward through the logit scale while
+leaving the forward logits unchanged.
+In our experiments, we use q = 1. The two endpoint settings have simple interpretations. For q = 0,
+the explicit backward scale is
+
+sz
+mean(sz)
+0
+= 1,
+(5)
+so the direct multiplicative effect of the learned logit scale on the gradient propagated from the
+output layer into the rest of the network is removed. The scale vector still affects the backward pass
+indirectly because ∂L/∂z depends on the scaled forward logits z. For q = 1, the explicit backward
+scale is
+sz
+mean(sz),
+(6)
+which removes the global mean scale while preserving the relative vocabulary-wise variation in sz.
+Thus, q = 0 removes the direct vocabulary-wise multiplier from the output layer Jacobian, whereas
+q = 1 retains its relative vocabulary-wise preconditioning effect while removing the explicit time-
+varying global multiplier.
+The gradient with respect to sz itself is left unchanged and remains the standard gradient of the
+forward computation. Therefore, sz remains a learnable vocabulary-wise logit-scale parameter,
+while its explicit backward effect on the rest of the network is controlled independently. Except
+when the replacement scale equals the forward scale, LGP should be viewed as a preconditioned
+backward pass rather than the exact gradient of the forward loss with respect to u.
+3
+
+
+0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1
+0
+0.5
+1
+1.5
+2
+Figure 3: Logarithmic annealing schedules compared with cosine annealing after matching the area
+under the curve (AUC). All schedules use a 10% linear warmup. Each logarithmic schedule is
+multiplied by a constant scale factor so that its AUC matches that of the cosine schedule. Smaller ρ
+allocates more of the learning rate budget early, while large ρ approaches linear decay.
+For values of q other than zero or one, the mean of (sz/ mean(sz))q is not generally equal to one.
+An alternative is to normalize after taking the element-wise power by deﬁning the backward scale
+for coordinate i as
+ebq,i(sz) =
+sq
+z,i
+1
+V
+PV
+ℓ=1 sq
+z,ℓ
+,
+i = 1, . . . , V.
+(7)
+This alternative preserves a unit mean backward scale for every q and agrees with the formulation
+above at both q = 0 and q = 1. We leave the comparison of the two formulations and the study of
+intermediate values of q to future work. The element-wise power assumes positive entries of sz. We
+initialize all entries to one, and the reported experiments use q = 1, for which no fractional power
+is required. Experiments with noninteger values of q should enforce positivity, for example through
+a positive parameterization of sz.
+LGP is not speciﬁc to nGPT. In a standard Transformer, the rows of the output embedding matrix
+are not normalized. Decomposing each row as wi = sz,i ¯wi, where sz,i = ∥wi∥2 and ∥¯wi∥2 = 1,
+shows that the row norms act as vocabulary-wise logit scales. They therefore play the same role
+as the explicit sz parameter in nGPT. LGP can in principle be applied to a standard Transformer
+by computing these row norms, using the equivalent decomposition Wout = diag(sz) ¯
+Wout, and
+replacing the backward scale associated with sz by (sz/mean(sz))q, while leaving the forward
+logits unchanged.
+Preliminary experiments suggest that LGP with q = 1 removes this explicit, time-varying global
+factor without observable performance loss while keeping the forward pass unchanged.
+2.2
+LOGARITHMIC LEARNING RATE DECAY
+An advantage of nGPT over the standard Transformer parameterization is that parameter-vector
+norms are constrained and weight decay is not used for these vectors. This removes the need to tune
+4
+
+
+the interaction between the learning rate and weight decay and makes the effective step size more
+directly controlled by the learning rate schedule. We therefore consider a more front-loaded decay
+schedule, which we call Logarithmic Learning Rate Decay.
+After an optional warmup, let
+r =
+t −twarmup
+tdecay −twarmup
+,
+r ∈[0, 1],
+(8)
+denote the normalized decay progress. We deﬁne a dimensionless schedule multiplier that interpo-
+lates between ηmax and ηmin logarithmically in the normalized training progress:
+η(t) = ηmin + (ηmax −ηmin)
+
+1 −
+log
+
+1 + r
+ρ
+
+log
+
+1 + 1
+ρ
+
+
+,
+(9)
+where ρ > 0 controls the shape of the decay. At optimizer step t, we write ηt = η(t). The
+corresponding scheduled adaptive step size is
+αt = α ηt,
+(10)
+where α is the base step size in the AdamW notation used below. When ηmax = 1, α is the peak
+learning rate. The schedule satisﬁes η(twarmup) = ηmax and η(tdecay) = ηmin. As ρ →∞, it
+approaches linear decay. Smaller values of ρ produce a faster initial decrease and a longer tail.
+Figure 3 compares the proposed logarithmic decay with cosine decay (Loshchilov & Hutter, 2016).
+All schedules in this example use a linear warmup over the ﬁrst 10% of training. For this comparison,
+each logarithmic schedule is multiplied by a constant so that its area under the curve (AUC) matches
+that of the cosine schedule. This keeps the integrated learning rate budget ﬁxed while changing how
+that budget is distributed over training. Smaller values of ρ allocate more of the learning rate budget
+early, producing a sharp decrease after warmup and a long tail. Because of the AUC normalization,
+the peak schedule multiplier can exceed one.
+2.3
+GATEDADAMW
+AdamW decouples weight decay from the adaptive gradient update (Loshchilov & Hutter, 2019).
+We follow the notation of AdamW and denote by θt the parameters, by gt the stochastic gradient,
+by mt and vt the ﬁrst and second moment estimates, by α the base step size, by ηt the dimensionless
+schedule multiplier, and by λ the decoupled weight decay coefﬁcient. The scheduled adaptive step
+size is therefore αt = αηt.
+In AdamW, the adaptive update is controlled by ˆmt/(√ˆvt +ǫ). The constant ǫ is usually introduced
+for numerical stability, but it also suppresses updates when √ˆvt is comparable to or smaller than ǫ.
+We found it useful to separate these two roles. GatedAdamW uses ǫnum for numerical stability and
+a separate soft gate to control the update applied at small second-moment scales.
+Let
+dt =
+p
+ˆvt + ǫnum,
+(11)
+where ǫnum ≥0 is a numerical constant. We deﬁne the coordinate-wise gate
+γt = σ
+
+a log dt
+ǫgate
+
+,
+(12)
+where σ(·) is the sigmoid function, ǫgate > 0 is the gate threshold, and a > 0 controls the sharpness
+of the gate. The GatedAdamW update is then
+θt = θt−1 −ηt
+
+α γt ⊙ˆmt
+dt
++ λθt−1
+
+.
+(13)
+The gate has a simple interpretation. Coordinates with dt,i ≪ǫgate receive a small gate value, which
+suppresses the numerically normalized direction ˆmt,i/dt,i. Because ǫnum may be smaller than the
+AdamW epsilon, the resulting update can nevertheless be larger than the corresponding AdamW
+5
+
+
+Algorithm 1 GatedAdamW
+Require: base step size α, dimensionless schedule multiplier ηt, moment coefﬁcients β1, β2 ∈
+[0, 1), numerical constant ǫnum ≥0, gate threshold ǫgate > 0, gate sharpness a > 0, weight
+decay λ
+Require: initial parameters θ0
+1: m0 ←0, v0 ←0
+2: for t = 1, 2, . . ., T do
+3:
+gt ←∇ft(θt−1)
+4:
+mt ←β1mt−1 + (1 −β1)gt
+5:
+vt ←β2vt−1 + (1 −β2)g2
+t
+6:
+ˆmt ←mt/(1 −βt
+1)
+7:
+ˆvt ←vt/(1 −βt
+2)
+8:
+dt ←√ˆvt + ǫnum
+9:
+γt ←σ(a log (dt/ǫgate))
+10:
+θt ←θt−1 −ηt
+
+α γt ⊙
+ˆ
+mt
+dt + λθt−1
+
+11: end for
+Figure 4: Effect of the GatedAdamW sharpness parameter a on the coordinate-wise sigmoid gate.
+The gate is plotted as a function of the bias-corrected second-moment scale
+√
+ˆv. The vertical dashed
+line marks the gate threshold ǫgate = 10−8, chosen equal to the AdamW value of ǫ. All curves cross
+0.5 when
+√
+ˆv + ǫnum = ǫgate. Smaller values of a produce a smoother transition, suppressing coor-
+dinates below the threshold less strongly while approaching one more slowly above the threshold.
+update, particularly when a < 1. Coordinates with dt,i ≫ǫgate receive a gate value close to one
+and experience little gate suppression. Thus, GatedAdamW makes the effect of Adam’s ǫ explicit
+and tunable: ǫnum controls numerical stability, while ǫgate determines the second-moment scale at
+which the gate transitions from suppressed to active updates.
+6
+
+
+A useful special case recovers AdamW exactly. If a = 1, ǫnum = 0, and ǫgate = ǫ, then
+σ
+
+log
+√ˆvt
+ǫ
+
+=
+√ˆvt
+√ˆvt + ǫ.
+(14)
+For positive √ˆvt, this gives
+γt ⊙ˆmt
+√ˆvt
+=
+ˆmt
+√ˆvt + ǫ.
+(15)
+The equality at zero second moment is understood through the corresponding continuous extension.
+The update therefore reduces to AdamW. This makes GatedAdamW a conservative extension of
+AdamW: this special setting recovers AdamW exactly, while other settings control the transition
+between suppressed and fully active coordinates. An equivalent formulation of the gate without an
+explicit sigmoid is given in Appendix A.
+Figure 4 visualizes the role of the sharpness parameter a in GatedAdamW. In the ﬁgure, we use
+ǫgate = 10−8 and ǫnum = 10−14. The gate is equal to 0.5 when dt,i = ǫgate, or equivalently when
+p
+ˆvt,i = 10−8 −10−14, which is visually indistinguishable from 10−8 on the plot.
+The parameter a controls the sharpness of the transition. When a = 1 and ǫnum = 0, the gate exactly
+recovers the implicit AdamW epsilon gate. With the small nonzero value of ǫnum used in the ﬁgure,
+the difference is negligible on the displayed scale. Smaller values of a make the gate softer: they
+assign larger gate values to coordinates below the threshold but approach one more slowly above it.
+Thus, a controls how abruptly coordinates transition from the epsilon-dominated regime to receiving
+the full adaptive update.
+Angular Step Cap (ASC).
+We optionally cap the angular displacement of normalized non-
+embedding parameter vectors. This provides a safeguard on the geometric step represented by the
+candidate after normalization. Let wt−1 be the previous normalized vector and let e
+wt be the post-
+update candidate before ﬁnal normalization, including any optional post-update perturbation. We
+extract its component tangent to wt−1:
+ut = e
+wt −wt−1
+⟨wt−1, e
+wt⟩
+⟨wt−1, wt−1⟩.
+(16)
+The angle between the previous vector and the candidate is
+φt = atan2
+
+∥ut∥2,
+
+wt−1
+∥wt−1∥2
+, e
+wt
+
+.
+(17)
+If φt exceeds a cap θmax(t) and ∥ut∥2 > 0, we replace the candidate by the point at angle θmax(t)
+in the same tangent direction:
+e
+wt ←cos(θmax(t))
+wt−1
+∥wt−1∥2
++ sin(θmax(t))
+ut
+∥ut∥2
+.
+(18)
+Otherwise, the candidate is left unchanged. In both cases, the usual nGPT normalization is subse-
+quently applied as the retraction step.
+We also propose to optionally use the following techniques in GatedAdamW: Pre-Moment Tan-
+gent Projection (Appendix B), Post-Moment Exploration Noise (PMEN) (Appendix D), Second-
+Moment Growth Clipping (SMGC) (Appendix C). They are described in the Appendix because
+they are not central to the paper and their impact on the validation loss is modest.
+3
+TRAINING nGPT
+In this section, we recall the principal design choices of nGPT and describe the modiﬁcations used to
+train it with modern MoE models such as Nemotron-3 (Blakeman et al., 2025; Waleffe et al., 2024).
+7
+
+
+3.1
+NORMALIZATION AND SCALING FACTORS
+In nGPT, we constrain all parameter vectors that form matrices to have unit norm by normalizing
+them along the embedding dimension (e.g., dmodel = 1024). In distributed settings, normalization
+must be applied to the parameters on which the optimizer operates. A common implementation bug
+is to normalize the instantiated model parameters while leaving the optimizer parameters uncon-
+strained.
+Activations h are also normalized to unit norm when they are recombined with the stream:
+h ←Norm(h + αA ⊙(hA −h)) ,
+(19)
+h ←Norm(h + αM ⊙(hM −h)) ,
+(20)
+where αA ∈Rdmodel
+≥0
+and αM ∈Rdmodel
+≥0
+are learnable parameters, called eigen learning rates, applied
+to the unit-normalized outputs of the attention/state-space model (SSM) and MLP/MoE blocks,
+hA = Norm(ATTN(h)) and hM = Norm(MLP(h)), respectively.
+The presence of nonlinear elements in the network may render products of normalized vectors too
+constrained. nGPT introduced a trainable vector sqk ∈Rdk to rescale normalized queries q and
+keys k (see QKNorm (Henry et al., 2020; Nguyen & Salazar, 2019)):
+q ←Norm(q) ⊙sqk,
+(21)
+k ←Norm(k) ⊙sqk.
+(22)
+Similarly, the intermediate activations u of the MLP/MoE block are rescaled by a trainable vector
+su ∈RdMLP:
+u ←u ⊙su.
+(23)
+This may be particularly important for activations such as GELU or SwiGLU, whose inputs must be
+at an appropriate scale to preserve nonlinearity. For squared ReLU, the role of this scale differs from
+that for saturating or gated nonlinearities: positive rescaling does not change the activation support,
+but it changes the output magnitude quadratically.
+For any trainable vector of scaling parameters such as sa, nGPT uses two scalars, sa,init and sa,scale.
+Each entry of sa is initialized to sa,scale, while the forward pass uses the effective scaling vector
+seﬀ
+a = sa
+sa,init
+sa,scale
+.
+(24)
+This allows us to control the effective learning rate of seﬀ
+a
+by adjusting sa,scale while keeping the
+global learning rate unchanged.
+3.2
+CHANGES SPECIFIC TO MAMBA-2 AND MOE
+We investigated various normalization options for Mamba-2 components (Dao & Gu, 2024) and
+found that both its input and output projections can be normalized. After removing RMSNorm from
+the Mamba-2 block, we introduce a trainable scalar smamba to rescale the input activations and place
+the inputs to SiLU at an appropriate scale. Similarly, we introduce a trainable scalar smoe for the
+MoE block to place the inputs to the sigmoid router at an appropriate scale. In both cases, vectors, as
+in RMSNorm, could be used instead of scalars. However, we did not observe a signiﬁcant difference
+between the two choices. The scalar choice preserves an isotropic scaling interpretation within the
+hyperspherical view. The vector choice is also compatible with this view and can be interpreted as a
+diagonal preconditioner.
+3.3
+SUMMARY OF MODIFICATIONS
+The recipe for converting the baseline hybrid Mamba-2–TransformerMoE model into its normalized
+version is as follows:
+1. Remove normalization layers such as RMSNorm and LayerNorm. Remove weight decay.
+8
+
+
+2. Use GatedAdamW without weight decay (thus, GatedAdam). Apply Pre-Moment Tangent
+Projection to parameter vectors selected for normalization. Set the gating hyperparameter a
+to 0.5; with the Adam-equivalent epsilon setting, a = 1 recovers Adam. Apply an Angular
+Step Cap θmax(t) to normalized non-embedding vectors, with an optional warmup over
+the ﬁrst twarmup iterations. After each GatedAdam update, normalize all selected rows or
+columns of the input and output embedding, attention, MoE, router, and Mamba projection
+matrices. Parameters not selected for normalization are trained with Adam (GatedAdam
+with a = 1).
+3. Change the softmax scaling factor in attention from 1/√dk to √dk. Normalize and rescale
+q and k as in Equations 21 and 22, with sqk,init = sqk,scale = 1.
+4. Implement the rescaling of the intermediate state of the MoE/MLP block using Equa-
+tion 23, where su uses su,init = 1 and su,scale = 1.
+5. Implement activation normalization for each recombination as in Equations 19 and 20
+with αA,init = αM,init = 0.1 (which may be on the order of 1/nlayers) and αA,scale =
+αM,scale = 1.
+6. Implement activation scaling for Mamba-2 with smamba,init
+=
+0.5√dmodel and
+smamba,scale = 1 and for MoE with smoe,init = 0.5√dmodel and smoe,scale = 1.
+7. Implement the rescaling of logits using Equation 2 with sz,init = 1 and sz,scale = 1.
+8. Apply Logit Gradient Preconditioning with q = 1.
+9. Apply Post-Moment Exploration Noise using the hard-threshold proﬁle at each iteration
+starting from the ﬁrst one, τv = 10−10, cj,t = 1/
+p
+dj, and λnoise = 10.
+10. Apply Second-Moment Growth Clipping after the ﬁrst 500 iterations, with R = 100,
+smin = 10−10.
+11. In contrast to the original nGPT parameterization, we change sz,scale, αA,scale, αM,scale,
+and sqk,scale from 1/√dmodel to 1. To compensate for this reparameterization, we set their
+effective peak learning rates to 0.5, 0.2, 0.2, and 0.2, respectively. In our experiments, we
+did not ﬁnd it necessary to scale these learning rates with model size.
+4
+EXPERIMENTS
+4.1
+EXPERIMENTAL SETUP
+All experiments use models and data developed by the Nemotron Team (Blakeman et al., 2025).
+More speciﬁcally, we use the scaling ladder developed by Khona et al. (2026), which consists of
+Nemotron-3 Nano models with progressively increasing widths and depths. The model labels refer
+to total parameter counts. We consider the following models: 1B (0.21B active parameters per to-
+ken, 88B training tokens), 2B (0.37B active, 140B training tokens), 4B (0.61B active, 215B training
+tokens), 7B (0.91B active, 310B training tokens), and 14B (1.74B active, 560B training tokens).
+Thus, the number of training tokens is approximately 320–420 times the number of active parame-
+ters, excluding the input embeddings (Khona et al., 2026). Additional details of the ladder models
+are omitted because they have not yet been fully described by their authors.
+For readability, we refer to a Nemotron-3-style hybrid Mamba–Transformer model as GPT and to
+its normalized counterpart as nGPT. The baseline model and results were provided by Khona et al.
+(2026), together with the following recommended hyperparameters: β1 = 0.9, β2 = 0.95, and
+weight decay of 0.1. After a warmup over 1B tokens, the peak learning rate was set to 2.2 × 10−3
+for the 1B model, 2.0 × 10−3 for the 2B model, 1.8 × 10−3 for the 4B model, 1.6 × 10−3 for the 7B
+model, and 1.4 × 10−3 for the 14B model. The learning rate followed the Warmup-Stable-Decay
+(WSD) schedule (Xing et al., 2018; Hu et al., 2024) and decayed to 1% of its peak value.
+For nGPT, we use the proposed logarithmic decay schedule with ρ = 0.05 (see Figure 3). The
+learning rates of all parameters follow this global decay schedule, subject to the parameter-speciﬁc
+multipliers and warmups described below. In particular, (i) the learning rates of sz and all Mamba
+parameters except the output projections are warmed up during the ﬁrst 10% of training, and (ii) the
+Angular Step Cap for all normalized non-embedding vectors is increased from 0◦to 1.0◦over the
+same period. We use these warmups in all reported nGPT runs. Their endpoint and duration were
+9
+
+
+1020
+1021
+1.6
+1.65
+1.7
+1.75
+1.8
+1.85
+1.9
+1.95
+2
+2.05
+1020
+1021
+1.25
+1.3
+1.35
+1.4
+1.45
+1.5
+1.55
+1.6
+1.65
+Figure 5: Scaling results for hybrid Mamba-2–Transformer MoE models trained with AdamW (de-
+noted as GPT AdamW) and their normalized versions trained with GatedAdam (denoted as nGPT
+GatedAdam). Five model sizes (by total number of parameters) are considered: 1B, 2B, 4B, 7B,
+and 14B (Khona et al., 2026). The 14B nGPT model trained with GatedAdam incurs about 6%
+overhead; one could therefore shift the corresponding nGPT results by 6% along the x-axis. We do
+not make this adjustment because the measured overhead is not necessarily attributable to increased
+FLOPs.
+Table 1: Scaling results for hybrid Mamba-2–Transformer MoE models trained with AdamW (de-
+noted as GPT AdamW) and their normalized versions trained with GatedAdam (denoted as nGPT
+GatedAdam). Five model sizes (by total number of parameters) are considered: 1B, 2B, 4B, 7B, and
+14B (Khona et al., 2026).
+Model size
+Tokens
+Training loss
+Validation loss
+GPT
+nGPT
+Diff.
+Diff. %
+GPT
+nGPT
+Diff.
+Diff. %
+1B
+88B
+2.0561
+1.9946
+0.0615
+2.99%
+1.6435
+1.5881
+0.0554
+3.37%
+2B
+140B
+1.9053
+1.8648
+0.0405
+2.13%
+1.5230
+1.4829
+0.0401
+2.63%
+4B
+215B
+1.7994
+1.7573
+0.0421
+2.34%
+1.4330
+1.3928
+0.0402
+2.81%
+7B
+310B
+1.7251
+1.6849
+0.0402
+2.33%
+1.3680
+1.3310
+0.0370
+2.70%
+14B
+560B
+1.6207
+1.5812
+0.0395
+2.44%
+1.2827
+1.2501
+0.0326
+2.54%
+selected in smaller-scale experiments and were not systematically retuned jointly with the global
+and parameter-speciﬁc learning rates for the present scaling ladder.
+The peak learning rate for nGPT is set to 0.24/√dmodel and subsequently decays to zero. For pa-
+rameter vectors in the routed and shared expert matrices, we multiply the learning rate by 1.5, while
+for router parameter vectors, we multiply it by 2.0. These multipliers were selected based on exper-
+iments with smaller models. They may be unnecessary; for example, some of their beneﬁt might
+be recovered by adjusting the global peak learning rate. However, computational constraints did not
+allow us to test this possibility at scale. The baseline GPT uses ǫ = 10−8. For GatedAdam, we set
+ǫgate = 10−8 and ǫnum = 10−14, and use β1 = β2 = 0.975.
+We enable Second-Moment Growth Clipping after the ﬁrst 500 optimizer steps and set R = 100.
+This deliberately permissive threshold is intended to suppress only extreme gradient spikes while
+leaving typical gradients unchanged. In our experiments, values as low as R = 2, as well as disabling
+clipping altogether, resulted in comparable ﬁnal performance. We therefore regard this mechanism
+primarily as a conservative safeguard against rare optimization instabilities rather than as an essential
+component of the training recipe.
+10
+
+
+gate eps
+num eps
+Figure 6: Histogram of second-moment scales and the corresponding GatedAdam gate. Solid curves
+show the distributions of log10
+√
+ˆv across optimizer parameters for different model sizes using the
+left logarithmic axis. Dashed curves show the coordinate-wise GatedAdam gate on the right axis,
+ga(s) = σ(a [log(s + ǫnum) −log(ǫgate)]), where s =
+√
+ˆv. Vertical reference lines mark ǫgate,
+ǫnum, and the medians of the distributions. The ﬁgure shows which parts of the optimizer state lie
+in the ǫ-dominated regime and how the choice of a changes the transition from suppressed to fully
+active updates.
+0
+100
+200
+300
+400
+500
+1.6
+1.65
+1.7
+1.75
+1.8
+1.85
+1.9
+1.95
+2
+0
+100
+200
+300
+400
+500
+1.25
+1.3
+1.35
+1.4
+1.45
+1.5
+1.55
+1.6
+Figure 7: Training (left) and validation (right) losses as functions of the number of training tokens for
+the MoE model with 14B total parameters and 1.74B active parameters per token. We compare the
+GPT baseline trained with AdamW and its normalized nGPT counterpart trained with GatedAdam.
+4.2
+EXPERIMENTAL RESULTS
+Figure 5 and Table 1 show the training and validation losses obtained by GPT and nGPT for models
+ranging from 1B to 14B total parameters. nGPT consistently achieves losses that are approximately
+11
+
+
+0.22
+0.24
+0.26
+0.28
+0.3
+0.32
+0.34
+0.36
+0
+2
+4
+6
+8
+10
+12
+14
+0.43%
+0.27%
+0.39%
+0.42%
+0.38%
+0.29%
+0.86%
+0.62%
+0.50%
+0.55%
+0.48%
+0.54%
+0.50%
+0.41%
+0.43%
+0.47%
+0.64%
+1B
+2B
+4B
+7B
+Figure 8: Validation loss comparison between nGPT trained by GatedAdam with a = 0.5 and
+with a = 1 (gating of Adam) for models with 1B, 2B, 4B, and 7B total parameters. The a = 0.5
+setting uses a peak learning rate of 0.24/√dmodel, whereas the peak learning rate for a = 1 is
+tuned separately for each model size. The vertical axis reports La=1 −La=0.5, so positive values
+indicate an advantage for a = 0.5. Percentage labels report 100(La=1 −La=0.5)/La=1, and ﬁlled
+pentagrams mark the best available a = 1 result for each model size.
+2.5% lower. The 14B results for both methods deviate slightly from the overall scaling trend, poten-
+tially because this model has a different allocation of parameters across components and is trained
+for a shorter token horizon relative to its size.
+Figure 6 shows the distributions of the bias-corrected Adam second-moment scale
+√
+ˆv used by
+GatedAdam at the end of training for the 4B, 7B, and 14B models. Most parameter coordinates
+in these distributions belong to MoE layers. The median
+√
+ˆv decreases from 2.8 × 10−9 for the 4B
+model (dmodel = 1280) to 1.4 × 10−9 for the 14B model (dmodel = 2048). This is only a median-
+based estimate because the distribution is broad and the gate acts coordinate-wise. The distribution
+of
+√
+ˆv is asymmetric, with a relatively ﬂat left tail that is largely attributable to parameters in the
+input and output embeddings.
+As shown in Figure 6, coordinates with small
+√
+ˆv can receive gate values that are numerically close to
+zero. Setting a to a smaller value, such as 0.5, increases the gate values, and therefore the effective
+update magnitudes, for coordinates with
+√
+ˆv < ǫgate. We also investigated scheduling ǫgate as a
+function of model size or setting it based on tensor statistics. The results of this investigation are
+outside the scope of the current paper.
+Figure 7 shows the convergence curves for the GPT and nGPT versions of the MoE model with 14B
+total parameters and 1.74B active parameters per token. The shape of the GPT curve is strongly af-
+fected by the WSD schedule. The nGPT curve is characterized by a slower initial decrease followed
+by faster convergence later in training, consistent with the behavior observed in Loshchilov et al.
+(2024). This behavior is consistent with parameter normalization making the effective step size
+more directly controlled by the learning rate schedule. Training and validation losses are evaluated
+on different data distributions and therefore have different absolute scales; comparisons should be
+made between GPT and nGPT within each split. The ﬁgure shows that nGPT reaches the same
+training and validation losses using approximately half as many training tokens as the GPT baseline
+trained with AdamW.
+Gating with a = 0.5 versus a = 1.
+The main GPT–nGPT comparison changes both the model pa-
+rameterization and the training recipe and therefore should not be interpreted as an isolated compar-
+ison between Adam and GatedAdam. To estimate the contribution of gating within the normalized
+model, Figure 8 compares nGPT with a = 0.5, using a peak learning rate of 0.24/√dmodel, against
+nGPT with a = 1 (Adam’s gating), for which the peak learning rate is tuned separately at each model
+size. All other components of the nGPT training recipe are applied in both cases, so the a = 1 run
+12
+
+
+is not a standalone Adam baseline. The advantage of a = 0.5 remains modest across model sizes
+and is substantially smaller than the total gap between GPT and nGPT reported in Table 1. This
+suggests that the overall improvement arises primarily from the normalized parameterization and
+the complete training recipe rather than from GatedAdam alone. At the matched validation-loss
+levels considered here, interpolation of the loss–token curves indicates that the a = 0.5 runs require
+approximately 15–20% fewer training tokens than the best available a = 1 runs.
+The ablation studies for Pre-Moment Tangent Projection and Post-Moment Exploration Noise are
+provided in Appendix B and Appendix D, respectively. Their effects on the validation loss are rather
+modest.
+5
+CONCLUSION
+This paper presents a practical recipe for training nGPT with modern hybrid Mixture-of-Experts
+models and demonstrates a substantial improvement in data efﬁciency. Further work may extend the
+evaluation to larger models and investigate hyperparameter scaling rules.
+ACKNOWLEDGMENTS
+We thank Roger Waleffe for providing the source code and logs for the baseline GPT experiments
+with AdamW. We thank Mikail Khona, Kwangjun Ahn, and Roger Waleffe for providing the scaling
+ladder used in our experiments. Finally, we thank Mostofa Patwary, Mohammad Shoeybi, and the
+entire Nemotron Team (Blakeman et al., 2025) for their contributions to the development of the
+Nemotron open models.
+REFERENCES
+Aaron Blakeman, Aaron Grattaﬁori, Aarti Basant, Abhibha Gupta, Abhinav Khattar, Adi Renduch-
+intala, Aditya Vavre, Akanksha Shukla, Akhiad Bercovich, Aleksander Ficek, et al. Nemotron 3
+nano: Open, efﬁcient mixture-of-experts hybrid mamba-transformer model for agentic reasoning.
+arXiv preprint arXiv:2512.20848, 2025.
+Minhyung Cho and Jaehyung Lee. Riemannian approach to batch normalization. Advances in
+Neural Information Processing Systems, 30, 2017.
+Tri Dao and Albert Gu.
+Transformers are SSMs: Generalized models and efﬁcient algorithms
+through structured state space duality. In Proceedings of the 41st International Conference on
+Machine Learning, volume 235 of Proceedings of Machine Learning Research, pp. 10041–10071.
+PMLR, 2024.
+J¨org K. H. Franke, Michael Hefenbrock, Gregor Koehler, and Frank Hutter. Constrained parameter
+regularization. arXiv:2311.09058, 2023.
+Alex Henry, Prudhvi Raj Dachapally, Shubham Shantaram Pawar, and Yuxuan Chen. Query-key
+normalization for transformers. In Findings of the Association for Computational Linguistics:
+EMNLP 2020, pp. 4246–4253. Association for Computational Linguistics, 2020. doi: 10.18653/
+v1/2020.ﬁndings-emnlp.379.
+Shengding Hu, Yuge Tu, Xu Han, Chaoqun He, Ganqu Cui, Xiang Long, Zhi Zheng, Yewei Fang,
+Yuxiang Huang, Weilin Zhao, et al. Minicpm: Unveiling the potential of small language models
+with scalable training strategies. arXiv preprint arXiv:2404.06395, 2024.
+Tianjin Huang, Ziquan Zhu, Gaojie Jin, Lu Liu, Zhangyang Wang, and Shiwei Liu. SPAM: Spike-
+aware adam with momentum reset for stable LLM training. arXiv preprint arXiv:2501.06842,
+2025.
+Tero Karras, Miika Aittala, Jaakko Lehtinen, Janne Hellsten, Timo Aila, and Samuli Laine. Analyz-
+ing and improving the training dynamics of diffusion models. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pp. 24174–24184, 2024.
+13
+
+
+Mikail Khona, Kwangjun Ahn, Roger Waleffe, Mostofa Patwary, and Mohammad Shoeybi. Personal
+communication, 2026. Personal communication.
+Maxim Kodryan, Ekaterina Lobacheva, Maksim Nakhodnov, and Dmitry P Vetrov. Training scale-
+invariant neural networks on the sphere can happen in three regimes. NeurIPS, 2022.
+Atli Kosson, Bettina Messmer, and Martin Jaggi. Rotational equilibrium: How weight decay bal-
+ances learning across neural networks. arXiv:2305.17212, 2023.
+Weiyang Liu, Yan-Ming Zhang, Xingguo Li, Zhiding Yu, Bo Dai, Tuo Zhao, and Le Song. Deep
+hyperspherical learning. Advances in neural information processing systems, 30, 2017.
+Weiyang Liu, Zhen Liu, Zhiding Yu, Bo Dai, Rongmei Lin, Yisen Wang, James M Rehg, and
+Le Song. Decoupled networks. In Proceedings of the IEEE Conference on Computer Vision and
+Pattern Recognition, pp. 2771–2779, 2018.
+Yang Liu, Jeremy Bernstein, Markus Meister, and Yisong Yue. Learning by turning: Neural archi-
+tecture aware optimisation. In International Conference on Machine Learning, pp. 6748–6758.
+PMLR, 2021.
+Ilya Loshchilov. Weight norm control. arXiv preprint arXiv:2311.11446, 2023.
+Ilya Loshchilov and Frank Hutter. SGDR: Stochastic gradient descent with warm restarts. arXiv
+preprint arXiv:1608.03983, 2016.
+Ilya Loshchilov and Frank Hutter. Decoupled weight decay regularization. In ICLR, 2019.
+Ilya Loshchilov, Cheng-Ping Hsieh, Simeng Sun, and Boris Ginsburg. nGPT: Normalized trans-
+former with representation learning on the hypersphere. arXiv e-prints, pp. arXiv–2410, 2024.
+Pascal Mettes, Elise Van der Pol, and Cees Snoek. Hyperspherical prototype networks. NeurIPS,
+2019.
+Toan Q. Nguyen and Julian Salazar. Transformers without tears: Improving the normalization of
+self-attention. In Proceedings of the 16th International Conference on Spoken Language Trans-
+lation. Association for Computational Linguistics, 2019.
+Tim Salimans and Durk P Kingma. Weight normalization: A simple reparameterization to accelerate
+training of deep neural networks. NeurIPS, 2016.
+Roger Waleffe, Wonmin Byeon, Duncan Riach, Brandon Norick, Vijay Korthikanti, Tri Dao, Albert
+Gu, Ali Hatamizadeh, Sudhakar Singh, Deepak Narayanan, et al. An empirical study of mamba-
+based language models. arXiv preprint arXiv:2406.07887, 2024.
+Feng Wang, Xiang Xiang, Jian Cheng, and Alan Loddon Yuille. Normface: L2 hypersphere em-
+bedding for face veriﬁcation. In Proc. of the 25th ACM nternational conference on Multimedia,
+2017.
+Tongzhou Wang and Phillip Isola. Understanding contrastive representation learning through align-
+ment and uniformity on the hypersphere. In ICML, 2020.
+Chen Xing, Devansh Arpit, Christos Tsirigotis, and Yoshua Bengio. A walk with sgd. arXiv preprint
+arXiv:1802.08770, 2018.
+Jiacheng Xu and Greg Durrett.
+Spherical latent spaces for stable variational autoencoders.
+arXiv:1808.10805, 2018.
+14
+
+
+A
+GATEDADAMW’S GATE WITHOUT AN EXPLICIT SIGMOID
+The sigmoid-of-log gate has an equivalent power-law form. For each coordinate with dt,i > 0,
+γt,i =
+1
+1 + exp
+
+−a log dt,i
+ǫgate
+
+(25)
+=
+1
+1 + (ǫgate/dt,i)a
+(26)
+=
+d a
+t,i
+d a
+t,i + ǫ a
+gate
+.
+(27)
+Thus, in vector notation,
+γt =
+d a
+t
+d a
+t + ǫ a
+gate
+,
+(28)
+where powers, divisions, and additions are applied coordinate-wise. The adaptive part of the update
+can therefore be written without an explicit sigmoid as
+γt ⊙ˆmt
+dt
+=
+d a−1
+t
+d a
+t + ǫ a
+gate
+⊙ˆmt.
+(29)
+This form makes the power-law dependence on dt explicit. In particular, when a = 1,
+γt ⊙ˆmt
+dt
+=
+ˆmt
+dt + ǫgate
+.
+(30)
+Hence, if ǫnum = 0 and ǫgate = ǫ, the adaptive update reduces to the standard AdamW update.
+B
+PRE-MOMENT TANGENT PROJECTION
+For parameter vectors constrained to the unit hypersphere, only the tangent component of the gradi-
+ent contributes to the ﬁrst-order change after normalization. We therefore optionally project the
+gradient onto the tangent space before the ﬁrst- and second-moment updates of GatedAdamW.
+Tangent-space gradient projection is an established operation in Riemannian optimization meth-
+ods for scale-invariant parameters (Cho & Lee, 2017). We do not claim the projection itself as a
+novel contribution; we use the descriptive term Pre-Moment Tangent Projection to emphasize that it
+is applied before both optimizer moments are updated and to provide a concise reference within this
+paper. For each normalized vector w and its gradient g, we replace
+g ←g −w
+⟨w, g⟩
+max(⟨w, w⟩, ǫproj).
+(31)
+When ∥w∥2 = 1, this projection simply removes the radial component ⟨w, g⟩w, and the safeguard
+ǫproj = 10−12 is inactive. GatedAdamW’s moment estimates are then updated using the projected
+gradient. Thus, the moments do not accumulate radial gradient components that would subsequently
+be discarded by normalization. Unlike a fully Riemannian Adam update, this procedure does not
+parallel-transport the ﬁrst-moment estimate after the parameter update.
+In the distributed implementation, the dot products and squared norms are computed over each
+complete normalized row or column vector, even when the vector is split across distributed optimizer
+shards. The required statistics are all-reduced before the local gradient shards are modiﬁed.
+Figure 9 illustrates the effect of Pre-Moment Tangent Projection. It slightly improves the ﬁnal
+validation loss for the 1B model, while its effect is smaller for the 7B model.
+C
+SECOND-MOMENT GROWTH CLIPPING (SMGC)
+To limit the effect of isolated gradient spikes on the moment estimates, we optionally clip each scalar
+gradient coordinate using only its own second-moment history. Let vi denote the existing bias-
+uncorrected second-moment state for coordinate i, and let k be the number of completed optimizer
+15
+
+
+0.22
+0.24
+0.26
+0.28
+0.3
+0.32
+0
+1
+2
+3
+4
+5
+6
+7
+0.37%
+0.30%
+0.23%
+0.13%
+0.13%
+0.10%
+0.05%
+0.15%
+1B
+7B
+Figure 9: Validation loss change after removing Pre-Moment Tangent Projection from nGPT
+for models with 1B and 7B total parameters.
+The default nGPT uses a peak learning rate of
+0.24/√dmodel, whereas for the case without projections the peak learning rate is tuned separately
+for each model size.
+steps. We deﬁne
+¯vi = max
+ vi,
+ 1 −βk
+2
+
+s2
+min
+
+,
+(32)
+CR =
+s
+R −β2
+1 −β2
+,
+(33)
+where smin is a ﬂoor expressed in bias-corrected
+√
+ˆv units and R ≥1 controls the maximum per-
+mitted one-step growth relative to ¯vi. The gradient is then replaced coordinate-wise by
+gi ←sign(gi) min
+ |gi|, CR
+√¯vi
+
+.
+(34)
+Because vi ≤¯vi, the subsequent second-moment update satisﬁes
+v+
+i = β2vi + (1 −β2)g2
+i ≤R¯vi.
+(35)
+For coordinates above the ﬂoor, ¯vi = vi, and the rule directly bounds the growth of the second
+moment by v+
+i ≤Rvi. For coordinates below the ﬂoor, the bound is instead deﬁned relative to the
+ﬂoor. The clipped gradient is used to update both the ﬁrst- and second-moment estimates.
+Clipping is applied after gradient unscaling and, when enabled, Pre-Moment Tangent Projection,
+but before the ﬁrst- and second-moment updates of GatedAdamW. It may be activated only after
+a prescribed number of optimizer steps to allow the second-moment statistics to initialize. Unlike
+global norm clipping, SMGC uses no statistics from other coordinates or parameters. Because it
+operates coordinate-wise, however, it may change the direction of a multidimensional gradient.
+SMGC is closely related to the spike-aware gradient clipping used in SPAM (Huang et al., 2025),
+which identiﬁes unusually large gradients relative to AdamW’s running second-moment estimate
+and rescales them before they enter the moment updates. Unlike SPAM, we do not periodically
+reset the ﬁrst- and second-moment states. Instead, the clipping threshold is parameterized directly
+through the maximum permitted one-step second-moment growth factor R, together with a ﬂoor for
+coordinates with little second-moment history and an optional delayed activation period.
+16
+
+
+Figure 10: Evolution of the number of parameter coordinates with exactly zero gradient for models
+with 1B, 2B, 4B, and 7B total parameters. Solid curves show the default nGPT runs with Post-
+Moment Exploration Noise (PMEN, λnoise = 10), while dashed curves show otherwise matched
+runs without exploration noise (λnoise = 0). The zero-gradient count is divided by dmodel to facili-
+tate comparison across model widths. The annotations show the validation loss change.
+D
+POST-MOMENT EXPLORATION NOISE (PMEN)
+We optionally inject a parameter-space perturbation after the optimizer moment update. Let ewj,t
+denote the post-GatedAdamW candidate for a parameter vector wj ∈Rdj, and let αj,t denote the
+current scheduled learning rate of parameter group j, including any parameter-speciﬁc multiplier
+and warmup. We associate each coordinate with an activity scale
+sj,i,t = √vj,i,t,
+(36)
+where vj,i,t is Adam’s raw, bias-uncorrected second-moment state after the current moment update.
+Let ψ(s; τv) ≥0 be a non-increasing noise proﬁle and let cj,t be a reference coordinate scale. At
+selected optimizer steps, we draw independent Rademacher signs ξj,i,t ∈{−1, +1} and apply
+e
+wj,t ←e
+wj,t + αj,tλnoisecj,t (ψj,t ⊙ξj,t) ,
+(37)
+where
+[ψj,t]i = ψ(sj,i,t; τv).
+(38)
+Here, λnoise controls the overall perturbation strength, ψ distributes it across second-moment scales,
+and cj,t speciﬁes its reference scale.
+A sparse hard-threshold variant is obtained with
+ψstep(s; τv) = I[s ≤τv].
+(39)
+Setting τv = 0 restricts the perturbation to coordinates whose second-moment state is exactly zero.
+A smooth alternative is
+ψb(s; τv) =
+1
+1 + (s/τv)b ,
+τv > 0,
+(40)
+where b > 0 controls the sharpness of the transition. As b →∞, this proﬁle approaches the hard-
+threshold rule, apart from its value exactly at s = τv.
+One possible reference scale is
+cj,t =
+1
+p
+dj
+,
+(41)
+17
+
+
+which normalizes the perturbation at the vector level. An Adam-relative alternative is
+cj,t = cAdam =
+s
+1 −β1
+1 + β1
+,
+(42)
+which approximates the coordinate-wise root-mean-square normalized Adam update under station-
+ary random gradients. In this parameterization, λnoise measures the perturbation relative to the
+coordinate-wise stochastic update scale of Adam.
+For the hard-threshold proﬁle, if kj coordinates are selected, then
+∆wnoise
+j,t
+2
+2 = α2
+j,tλ2
+noisec2
+j,tkj.
+(43)
+For a unit-normalized vector and a sufﬁciently small perturbation, the ﬁrst-order angular displace-
+ment is bounded by this Euclidean perturbation norm.
+The perturbation is applied after the Adam moment update and the GatedAdamW parameter correc-
+tion, and therefore does not enter either moment estimate. For normalized non-embedding parame-
+ters covered by ASC, the Angular Step Cap is subsequently applied to the combined optimizer and
+noise displacement, followed by the usual nGPT normalization. PMEN may be delayed, applied
+periodically, and enabled or disabled for embedding and output matrices.
+Figure 10 illustrates the effect of PMEN. Solid curves denote GatedAdam runs with λnoise = 10, the
+value used in our baseline experiments, whereas dashed curves denote otherwise matched noise-free
+runs with λnoise = 0. The runs with PMEN achieve slightly lower validation loss, although the
+improvement is small and does not exceed 0.1%. Without PMEN, the number of parameter coor-
+dinates with exactly zero gradients increases with model size even after normalization by dmodel.
+With PMEN, the normalized count remains approximately stable, with only a small increase for the
+largest model.
+At the end of training, approximately 1.4% of the input-embedding parameter coordinates in the
+4B model have
+√
+ˆv = 0, indicating that their Adam second-moment states have never received a
+nonzero gradient contribution. For the input embeddings, this is consistent with some token IDs
+never appearing in the training data. Approximately 0.7% of the routed-expert parameter coordi-
+nates also have
+√
+ˆv = 0. PMEN is intended to reduce the likelihood that weakly updated parameter
+coordinates become permanently inactive and to preserve their opportunity to receive useful gradi-
+ents later in training. Although PMEN reduces both the number of coordinates with zero gradients
+and the number with
+√
+ˆv = 0, we do not yet observe a substantial improvement in ﬁnal loss.
+18
