@@ -1,0 +1,574 @@
+Title: AdapterMoE: A Two-Stage Hard-Routing Mixture-of-Experts Architecture for Multi-Crop Disease Recognition with Calibrated Rejection and Incremental Learning
+
+URL Source: https://arxiv.org/pdf/2608.08808v1
+
+Published Time: Tue, 11 Aug 2026 01:28:36 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+> 1
+
+# AdapterMoE: A Two-Stage Hard-Routing Mixture-of-Experts Architecture for Multi-Crop Disease Recognition with Calibrated Rejection and Incremental Learning 
+
+Pin-Hsun Huang and Shaou-Gang Miaou 
+
+Abstract —Timely identification of crop diseases is critical to food security, and multi-crop recognition has a natural divide-and-conquer structure – a good fit for Mixture-of-Experts (MoE). Conventional soft-routing MoE, however, learns this assignment freely through end-to-end training, which tends to let a few ex-perts dominate ( expert collapse ) with no semantic correspondence to the crops, and such models further face high retraining costs for new crops, unstable rejection of non-target inputs, and an accuracy ceiling largely saturated across competing methods. We therefore shift the objective from maximizing accuracy toward a trade-off among deployment cost, scaling flexibility, and rejection stability, and adopt deterministic hard routing instead. We propose AdapterMoE, a two-stage hard-routing architecture: a RouterHead first classifies the crop and rejects non-target crops via a Maximum Softmax Probability (MSP) threshold, with a dual-gate out-of-distribution (OOD) module (Energy + 
+
+K-nearest-neighbor) intercepting distribution-shifted inputs; five per-crop Adapters atop a frozen EfficientNet-B0 backbone then discriminate among diseases, each independently calibrated via Temperature Scaling. Because experts are hard-isolated at the data level, the architecture avoids expert collapse by design and exposes an add_crop interface, whereby adding a crop is a local operation rather than a full retrain. On PlantVillage (5 crops, 26 classes), across a fair five-system comparison under five random seeds, AdapterMoE attains accuracy statistically indis-tinguishable from the best competing systems (Macro-F1 within a 0.24-point band) while cutting training cost to ∼9% of the full-network baselines, expanding to a new crop in 1.14 minutes on average, and exhibiting the lowest cross-seed rejection-accuracy variance of all five systems. A zero-shot evaluation on the field-condition PlantDoc dataset shows the dual-gate module rejects true out-of-distribution crops at 95 .7 ± 2.8% , while in-domain classification degrades sharply under covariate shift – a limitation we attribute honestly to dataset shift rather than to the routing design. AdapterMoE’s contribution is therefore not a state-of-the-art accuracy claim but a reproducible, transparently reported trade-off point for deployment cost, extensibility, and rejection reliability. 
+
+Index Terms —Mixture-of-Experts, hard routing, crop disease recognition, out-of-distribution rejection, calibration, incremental learning, multi-objective trade-off 
+
+I. I NTRODUCTION 
+
+# CONTINUED population growth and accelerating climate change have made food security one of the most closely watched issues in modern agriculture, and plant disease re-mains one of the principal threats to crop yield. A global 
+
+The authors are with the Department of Electronic Engineering, Chung Yuan Christian University, Taoyuan, Taiwan. Corresponding author: Shaou-Gang Miaou (e-mail: miaou@cycu.edu.tw). 
+
+synthesis by Savary et al. [1] estimates that pathogens and pests reduce the yield of the world’s major staple crops – wheat, rice, maize, potato, and soybean – by 17.2% to 30.0% annually, a scale of loss with direct consequences for food supply and national agricultural economies. Diagnosis has traditionally relied on farmers’ field experience, which is slow and whose quality depends on individual knowledge and observation conditions; the pressures of expanding cultivated area and an aging agricultural workforce make the limits of manual diagnosis increasingly apparent. Deep-learning-based image recognition has opened new possibilities for automated diagnosis. Hughes and Salathé [2] released the PlantVillage dataset in 2015 – roughly 54k labeled images spanning 14 crops and 38 disease-or-healthy classes captured under controlled conditions – which quickly became the field’s most widely used benchmark, with subsequent CNN-based work routinely exceeding 99% accuracy on it. Ferentinos [3], however, showed in 2018 that models trained only on such laboratory-condition imagery degrade markedly on real field photographs, exposing a persistent gap between 
+
+controlled benchmarks and field deployment . Moving existing methods from the lab to practice therefore still requires con-fronting data diversity, rejection capability, and interpretability. In practice, a user-submitted leaf photograph may span sev-eral crops and may also contain inputs the training data never covered – new cultivars, background weeds, or simply a photo that is not a leaf at all. This creates a dual requirement: multi-crop recognition and rejection of non-target inputs . Most ex-isting work, however, targets fine-grained classification within a single crop and rarely treats cross-crop feature interference and open-set inputs systematically. This work asks how to design a single end-to-end system that satisfies both multi-crop classification accuracy and reliable rejection of non-target inputs at once. 
+
+A. Motivation and Problem Statement 
+
+Closer inspection of existing approaches surfaces four core, mutually reinforcing challenges. 
+
+(1) Cross-crop feature interference. A single flat classifier trained directly over all 26 classes must learn discriminative boundaries for 5 crops and 25 leaf classes within one shared feature space, even though different crops differ substantially in leaf shape, texture, and color (a grape leaf and a tomato arXiv:2608.08808v1 [cs.CV] 9 Aug 2026 2
+
+leaf look very different), while diseases within the same crop can look nearly identical. This “large inter-crop, small intra-crop” heterogeneity forces a single feature extractor to compromise between distinguishing crops and discriminating fine-grained disease, and the resulting monolithic feature space is difficult to maintain: adding a crop touches the shared representation and forces full retraining, with no structured pathway for rejecting non-target crops. We frame multi-crop disease recognition as a “triage, then diagnose” pipeline: the system first identifies which crop an image belongs to, then hands it to that crop’s own specialist for fine-grained diagnosis. 
+
+(2) The need to reject an “Others” category. Deployed inputs may be a non-target crop, a novel disease absent from the label set, or not a leaf at all. A system forced to classify over a fixed 25-class label set will produce confident, wrong predictions for such inputs – with real consequences in agriculture, such as misapplied pesticide. Because most prior evaluations use closed test sets only, this failure mode is rarely exposed. We treat Others-rejection as a first-class objective, quantified by a dedicated Others Accuracy ( OAcc ) metric. 
+
+(3) Structural collapse of soft-routing Mixture-of-Experts (MoE). MoE is a natural fit for cross-crop hetero-geneity – different experts can specialize in different crops – but Shazeer et al. [4] document expert collapse in end-to-end soft-routing MoE: a few experts, selected more often early in training, are reinforced and come to dominate while the rest atrophy. We additionally observe that even with an auxiliary load-balancing loss, gate weights remain markedly uneven (Section IV-G7); this structural failure mode is difficult to remove through auxiliary losses alone once it is baked into the architecture. 
+
+(4) A systemic lack of uncertainty quantification. Re-jection thresholds in prior work are mostly set empirically. Maximum Softmax Probability (MSP) [5] is widely used, but modern deep networks are systematically overconfident [6], so raw MSP deviates from the true posterior and a threshold on it lacks a clean statistical interpretation. These four issues are mutually entangled: pursuing accuracy alone cannot solve rejection; adding a rejection mechanism without probability calibration yields an unreliable threshold; and adopting an MoE architecture without addressing collapse can make the system more brittle, not less. This work proposes a single integrated architecture that addresses all four simul-taneously. 
+
+B. Contributions 
+
+We pursue an integrated architecture addressing all four challenges above, with contributions at four levels: 1) Architecture. AdapterMoE: a two-stage hard-routing ar-chitecture built from a shared frozen EfficientNet-B0 back-bone, a RouterHead, five per-crop Adapters, and a Di-rectHead, with dual-gate routing (MSP + Energy + KNN) directing each input down one of four decision paths (High-confidence, Low-confidence fusion, Others-reject, or out-of-distribution (OOD)-reject). Deterministic routing elim-inates soft-routing’s expert collapse by design (Challenge 3) while an independently calibrated Temperature Scaling per branch gives the MSP threshold and dual-gate OOD mechanism a genuine probabilistic reading (Challenges 2 and 4). Backbone freezing with feature caching also lets the main pipeline train at a small fraction of the other systems’ cost – though, as made explicit in Section IV-C, this stems from the frozen-backbone-plus-caching training paradigm and is orthogonal to the hard-vs-soft routing question itself. The dual-gate OOD mechanism’s benefit under in-distribution-only evaluation is itself small and seed-dependent (Section IV-G4), so we report it as aconditional, deployment-dependent contribution rather than an unconditional improvement. 2) Incremental-learning interface. The add_crop interface (Challenge 1) lets a new crop be added by training one new Adapter and lightly fine-tuning the Router and DirectHead, leaving all other crop modules untouched; existing crops’ rejection accuracy remains stable throughout expansion (Section III-G). No other system in our comparison offers this capability. 3) Rejection stability. Across five random seeds, evaluated in a fair comparison framework against three flat base-lines and one soft-routing MoE baseline (Section III-H), AdapterMoE attains the highest mean Others-Accuracy and the lowest cross-seed standard deviation of all five systems – a property directly relevant to writing a deployment service-level agreement. 4) Transparency. On this task, accuracy has saturated: all four strong systems’ Macro-F1 scores fall within a 0.24-point band, and we do not claim a state-of-the-art accuracy result. We instead report low-cost extensibility as the most robust contribution, and disclose every negative or condi-tional finding – including that AdapterMoE’s Macro-F1 is marginally below the soft-routing baseline’s (within that baseline’s own cross-seed standard deviation) – alongside the evidence for it. The remainder of the paper is organized as follows. Sec-tion II surveys related work in crop disease recognition, Mixture-of-Experts, and rejection/uncertainty quantification. Section III details the AdapterMoE architecture. Section IV reports the five-system comparison, incremental learning, ab-lations, and an external zero-shot evaluation on PlantDoc. Section V discusses limitations, and Section VI concludes with future directions. II. R ELATED WORK 
+
+A. Deep Learning for Crop Disease Recognition 
+
+Datasets and CNN backbones. PlantVillage [2] established the field’s most-used benchmark, and early CNN work regu-larly exceeded 99% accuracy on it. Ferentinos [3] showed that this controlled-condition accuracy does not transfer to field photographs, tracing the gap to covariate shift at the dataset level: PlantVillage images have clean, uniform backgrounds and a single centered leaf, while field images have clutter, variable lighting, occlusion, and inconsistent framing – adataset-level mismatch rather than an architectural flaw. We retain PlantVillage as our primary set for comparability with prior work, while probing this exact limitation in Section IV-J. 3
+
+For backbones, He et al.’s ResNet [7] (skip connections; ResNet-18, 11.2M parameters) has long served as a standard leaf-classification baseline, and Simonyan and Zisserman’s VGG [8] was an early but less parameter-efficient alternative. Tan and Le’s EfficientNet [9] scales depth, width, and reso-lution jointly via a compound coefficient φ; EfficientNet-B0 (4.04M parameters) reaches higher ImageNet accuracy than ResNet-18 at roughly a third of the parameters, making it a common recent choice for this task, and we adopt it as our shared backbone after comparing both in preliminary trials. 
+
+Vision Transformers. Dosovitskiy et al.’s ViT [10] treats an image as a sequence of patch tokens processed by self-attention, triggering a broader shift in computer vision back-bones; Liu et al.’s Swin Transformer [11] adds hierarchical shifted-window attention, and Touvron et al.’s DeiT [12] uses distillation to reduce ViT’s dependence on large-scale pretraining. We nonetheless adopt a CNN backbone rather than a ViT for four reasons. First, PlantVillage’s ∼54k images are a moderate-scale dataset relative to ImageNet, and ViT’s generalization at this scale depends more heavily on large-scale pretraining than a CNN’s does. Second, our central contribution is the routing and rejection mechanism, not the backbone itself, so a mature, stable CNN backbone lets us isolate the methodological contribution. Third, ViT’s infer-ence latency and memory footprint exceed a comparable CNN’s, working against future edge deployment. Fourth – and most directly supported by our own results – Section IV-B shows that the CNN backbones we do compare (SimpleCNN, ResNet-18, EfficientNet-B0) already land within one standard deviation of one another in Macro-F1, indicating that backbone representational capacity is not the current bottleneck on this task; introducing a more complex, more data-hungry ViT at this point would be a poor allocation of modeling effort. We therefore leave ViT-family backbones (including Swin and DeiT) as future integration work. 
+
+Classification versus detection. Some prior work frames crop disease recognition as object detection – localizing a leaf or lesion before classifying the crop within it – rather than as whole-image classification. We frame it as clas-sification for three reasons. First, PlantVillage images are single-leaf, pre-cropped, and centered, with no bounding-box annotation; building a detection-ready dataset is outside our current scope. Second, our target deployment scenario is a user photographing a single leaf at close range (e.g., a phone-app diagnosis feature), where detection’s core problem – localizing multiple targets in a cluttered scene – is not the binding constraint; detection’s advantage shows up specifically when a raw field photo contains multiple plants, multiple leaves, and background clutter, which is outside our current data and application scope. Third, the two framings are not mutually exclusive: detection can be layered in front of our classifier as a pre-processing stage that crops a single leaf out of a cluttered raw photo before handing it to our recognition system, which we list as future work (Section VI-B). 
+
+B. Mixture-of-Experts 
+
+The core idea of Mixture-of-Experts is divide-and-conquer: a complex input space is split into subtasks, each handled by its own expert network, with a gate or router deciding each expert’s participation. Jacobs et al. [13] laid the theoretical foundation in 1991 with Adaptive Mixtures of Local Experts :a gating network produces per-expert weights from the input, and the final output is their weighted combination, trained end-to-end so that experts differentiate naturally through compe-tition for data. The key insight – that not every input need be processed by the same network – is especially apt for heterogeneous tasks such as multi-crop, multi-disease classi-fication, where a single network must otherwise compromise across sub-distributions. This original design used soft (dense) gating, however, so every expert executes a forward pass for every input, and compute grows linearly with the number of experts. Shazeer et al. [4] brought MoE to the large-model era via sparsely-gated Top-K routing, activating only the K (typically 1–2) highest-weighted experts per input and decoupling model capacity from per-input compute – but this introduced expert collapse: experts selected more often early in training receive more gradient signal, become more competitive, and are selected even more, starving the rest, which Shazeer et al. miti-gate with an auxiliary load-balancing loss. Follow-ups simplify or soften this routing: Fedus et al.’s Switch Transformer [14] uses Top-1 routing at trillion-parameter scale, and Puigcerver et al.’s Soft MoE [15] replaces the discrete Top-K operation with soft per-token weighting. In vision, Riquelme et al.’s V-MoE [16] integrated sparse gating into ViT at ImageNet scale; Mu and Lin’s 2025 survey [17] finds expert collapse and load imbalance remain the central open challenges for soft-routing MoE across vision, language, and multimodal settings. Applying this line of work directly to a medium-scale, strongly heterogeneous task such as multi-crop disease recog-nition runs into two structural issues. First, a load-balancing loss can mitigate collapse at the level of expert utilization but does not eliminate it: our own controlled ablation (Sec-tion IV-G7) shows that even with the loss enabled, the soft-routing baseline still exhibits a maximum gate probability of MaxGate ≈ 0.35 across five seeds – and disabling the loss drives MaxGate to 0.81 , a clear single-expert-dominance regime. Second, conventional MoE designs presume expert specialization should emerge from end-to-end data competition rather than from a semantic prior; when the input space has an explicit semantic hierarchy (crop, then disease), letting experts differentiate freely discards the interpretable correspondence to actual crops. These two limitations directly motivate our shift to two-stage hard routing (Section III). 
+
+C. Rejection and Uncertainty Quantification 
+
+Closed-set classification assumes every test sample belongs to a known class, but deployed systems routinely see inputs that do not – a non-target crop, or a disease absent from the training label set. A rejection mechanism lets the model say “I should not answer this” instead of emitting a confident wrong prediction. Hendrycks and Gimpel [5] proposed Maximum Softmax Probability (MSP) as a simple baseline: correctly classified in-distribution samples tend to have higher MSP than misclassified or OOD ones, so a single scalar threshold 4
+
+suffices for basic rejection without modifying or retraining the model. MSP has two known weaknesses, however: modern deep networks are systematically overconfident, so MSP can be high even for wrong predictions, and MSP has no inherent probabilistic meaning – an MSP of 0.7 does not mean a true 70% posterior – so a threshold on it lacks statistical grounding. Guo et al. [6] used Expected Calibration Error (ECE) [18] to show systematically that modern deep networks such as ResNet and DenseNet, despite high top-1 accuracy, are markedly overconfident, and proposed Temperature Scaling :dividing the logit vector by a single scalar temperature T
+
+before the softmax, fit on a held-out calibration split by min-imizing negative log-likelihood. Temperature Scaling leaves the model’s arg-max prediction unchanged, requires fitting only one parameter (converging in seconds), and typically drives ECE from several percentage points to near zero – performance competitive with more complex calibrators such as Platt scaling or isotonic regression. We independently calibrate the Router, each Expert, and the DirectHead, which is necessary precisely because they output different numbers of classes (6, 3–10, and 26 respectively) and are therefore not comparable on a raw-logit scale. Beyond softmax-based rejection, Liu et al.’s Energy score [19] uses the full logit vector rather than only the top-1 probability, and Sun et al.’s deep-KNN detector [20] instead measures distance in feature space to a bank of training-set embeddings; both target OOD inputs that MSP alone may miss. We build on both: an Energy score and a KNN-distance signal, combined by AND logic, form the second gate in our dual-gate rejection module (Section III-C). 
+
+D. Positioning 
+
+Our work sits at the intersection of three lines above. On the application spectrum, we target a multi-crop, multi-disease, Others-aware task rather than pushing marginal backbone accuracy within a single crop – and, following Ferentinos [3], we treat closed-set accuracy as necessary but not sufficient for deployment quality. On the MoE spectrum, we replace end-to-end soft gating with a two-stage hard-routing design that eliminates expert collapse by construction rather than mitigat-ing it after the fact, at the cost of requiring an explicit semantic hierarchy in the task (which multi-crop disease recognition naturally provides). On the rejection/uncertainty spectrum, we integrate point-estimate MSP rejection with Temperature-Scaling-based calibration and an auxiliary Energy+KNN gate within a single pipeline – a combination we find little prece-dent for in the crop-disease literature, and which we view as the paper’s most specific positioning: bridging the structural task-decomposition literature with the calibrated-uncertainty-quantification literature. III. M ETHOD 
+
+A. Overview 
+
+AdapterMoE is a two-stage hard-routing architecture with six functional modules. Given an input leaf image, the pipeline runs: feature extraction → crop routing with dual-gate OOD detection → per-branch Temperature Scaling → disease clas-sification, terminating in one of four mutually exclusive deci-sion paths (Others-reject, high-confidence Adapter-only, low-confidence log-odds fusion, or OOD-reject). Figure 1 shows the full pipeline; Figure 2 illustrates the incremental-learning interface described in Section III-G. The design can be read by analogy to hospital triage: the RouterHead is the intake desk routing a patient to the right specialist or turning them away (Others); the five per-crop Adapters are specialists who only diagnose within their own crop; and the DirectHead is an emergency room providing backup when the Router is unsure or an Adapter’s judgment sits near a decision boundary. This yields two benefits: adding a crop is like hiring one specialist rather than restaffing the hospital ( add_crop , Section III-G), and since Adapters share no gradients, the architecture is immune by construction to soft-routing’s expert collapse. 
+
+Stage 1 (Router). The system first resizes the input to 
+
+224 × 224 RGB and extracts a 1280-d feature h(x) from a shared, frozen EfficientNet-B0 backbone. The RouterHead is a 6-way classifier over {Apple, Corn, Grape, Potato, Tomato, Others}. If the arg-max class is Others, the sample is rejected immediately (Path 0) and the pipeline terminates. 
+
+Stage 2 (Expert). If the Router selects one of the five target crops, the sample is handed to that crop’s Adapter, which classifies only among that crop’s own disease classes (e.g., 4 for Apple, 10 for Tomato). Because each Adapter is trained solely on its own crop’s sub-dataset, its feature space is far simpler than a flat 26-way classifier’s – the central source of hard routing’s advantage over a monolithic model. 
+
+Path selection. Before reaching the Adapter, non-Others samples pass through a dual-gate OOD check (Section III-C); survivors are then split by the Router’s calibrated MSP into a high-confidence zone ( MSP ≥ 0.55 , Path 1: Adapter output used directly) and a low-confidence zone ( MSP < 0.55 , Path 2: Adapter and DirectHead logits combined by fixed-weight log-odds fusion, Section III-E). This two-zone design applies a cheaper decision rule to confident samples and a more conservative, multi-branch one to uncertain samples. 
+
+DirectHead safety net. An independent 26-way flat clas-sifier, DirectHead, is trained on the same flat 26-class con-figuration used to evaluate all five systems (Section III-H). It is not a primary classifier but a fallback: architecturally, it is the same family as the flat EfficientNet-B0 baseline, but here it functions only as one input to the low-confidence fusion rule, giving the system a "universal backup" so that a Router misjudgment at a decision boundary does not cascade into total failure. 
+
+Calibration layer. Because the Router (6-way), each Expert (3–10-way), and DirectHead (26-way) output different num-bers of classes, their raw logits are not directly comparable. Each of the seven branches (Router, five Adapters, Direct-Head) is independently fit with a scalar Temperature Scaling parameter (Section III-F), after which MSP carries a genuine probabilistic meaning and the two-zone threshold and log-odds fusion are built on a consistent probability scale. 
+
+Parameter budget. The full AdapterMoE pipeline uses a single ImageNet-pretrained, frozen EfficientNet-B0 backbone 5
+
+with seven lightweight heads (one RouterHead, five per-crop Adapters, one DirectHead) attached, for a total of 11.31M parameters – essentially the same order as the flat EfficientNet-B0 baseline (4.04M) and the soft-routing baseline (11.25M), enabling a like-for-like comparison (Section IV-B). 
+
+B. Dataset and Preprocessing 
+
+We use PlantVillage [2], selecting five crops – Apple, Corn, Grape, Potato, Tomato – comprising 25 leaf classes (including each crop’s healthy class), plus an “Others” class built from PlantVillage images of crops outside this set (e.g., pepper, strawberry, cherry), for 26 classes total. Class counts are im-balanced: Tomato has the most sub-classes (10) and Potato the fewest (3), making the Tomato Adapter the system’s heaviest-loaded sub-classifier (see the ablation in Section IV-G1). We derive three data configurations from this source, matched to each module’s training need: (i) a crop-level 
+
+configuration (6 classes: 5 crops + Others) for the Router, which merges all diseases within a crop into one class and explicitly decouples crop identification from disease diagnosis at the data level; (ii) a flat 26-class configuration, shared across all five systems for training the flat baselines and ClassicalMoE_Shared and for unified evaluation (also Direct-Head’s own training set); and (iii) five per-crop sub-datasets for Adapter training, each containing only that crop’s 3–10 disease classes. All three configurations are split into Train/Val/Test at a fixed ratio. Following the independent-calibration-set practice of Guo et al. [6], we further split each Val set 1:1 into val_a 
+
+(used only for loss monitoring, not for any decision) and 
+
+val_b (used exclusively, after training is complete, to fit each branch’s Temperature Scaling parameter, with no gradient or early-stopping role) – and this split is performed independently for the Router, each Expert, and DirectHead so that no branch’s calibration data is shared with another’s. All images are resized to 224 × 224 and normalized with ImageNet statistics ( μ = (0 .485 , 0.456 , 0.406) , σ =(0 .229 , 0.224 , 0.225) ). Training-time augmentation uses two intensities: a conservative transform for the 25 named disease classes (random horizontal flip, ±15 ◦ rotation, light color jitter of ±20% on brightness/contrast/saturation) chosen to avoid destroying the fine lesion, curl, and discoloration textures that disease recognition depends on; and a stronger transform for Others (adding vertical flip, ±30 ◦ rotation, ±30% color jitter, 
+
+±0.1 hue jitter, and 30% probability random erasing) intended to widen Others’ visual diversity so the Router learns a general “does not resemble any target crop” boundary rather than memorizing the specific Others training images. We apply the same Others-augmentation policy to all five systems in the comparison for fairness. We repeat every experiment under five random seeds 
+
+{42 , 123 , 456 , 789 , 2026 }, use deterministic computation throughout (at a measured 5–10% training-speed cost), and report all headline metrics as mean ± sample standard deviation (obtained with an unbiased estimate of sample variance). 
+
+C. Stage 1: Router and Others Rejection 
+
+The RouterHead is a lightweight MLP over the shared 1280-d feature: Linear(1280 →256) → LayerNorm → ReLU →
+
+Dropout(0 .1) → Linear(256 →6) , roughly 0.33M parameters, with no backbone of its own. It is trained with Adam at a lower initial learning rate ( 5×10 −4 versus 10 −3 elsewhere) and label smoothing of 0.05 (not used elsewhere), both chosen to reduce cross-seed variance in Router quality, for 15 epochs (matching DirectHead). Rejection uses a two-layer rule on top of the calibrated softmax output. First, if the arg-max class is Others, the sample is rejected immediately (Path 0), at minimal computational cost. Second, for samples whose arg-max is one of the five crops, we additionally require MSP ≥ θ (we use θ = 0 .55 ) to trust that assignment with high confidence; below threshold, the sample is instead routed to the low-confidence fusion path (Section III-E). Threshold sensitivity is examined directly in Section IV-G8. As a complementary OOD signal, we add an Energy score [19], defined for a logit vector z ∈ RK and temperature 
+
+τ as 
+
+E(x; f ) = −τ log 
+
+> K
+
+X
+
+> i=1
+
+exp( zi/τ )
+
+!
+
+, (1) which we use at τ = 1 following the original authors’ recommendation that larger τ flattens the score and reduces its discriminative power between in- and out-of-distribution samples, so that 
+
+E(x) = − log 
+
+> K
+
+X
+
+> i=1
+
+exp( zi)
+
+!
+
+. (2) This τ is a fixed constant inside the Energy computation, unrelated to the learned Temperature Scaling parameter T of Section III-F. Where MSP uses only the top-1 probability, Energy uses the whole logit vector and typically takes larger values for inputs far from the training distribution. Rather than an arbitrary Energy threshold, we set it (and, analogously, a K-Nearest-Neighbor (KNN) distance threshold over an L2-normalized 1280-d feature bank with k = 50 , where k denotes the number of nearest neighbors) from the in-distribution validation split at a target true-positive rate of 0.95. A sample is flagged OOD (Path 3, forced to Others) only when both 
+
+signals fire – an AND rule chosen over OR or either alone in Section IV-G4. This gate is independent of the MSP threshold: MSP governs the high/low-confidence split within accepted target-crop samples, while the OOD gate catches samples routed to a crop with high top-1 probability but a weak overall logit profile – an overconfidence failure mode MSP alone can miss. Because the raw θ = 0 .55 threshold has no probabilistic meaning without calibration, we fit a Router-specific Temper-ature Scaling parameter on the val_b split (Section III-F); after calibration, “ MSP ≥ 0.55 ” means, to a good approxima-tion, “the model’s posterior probability that this is a target crop exceeds 55%,” rather than simply an empirically convenient softmax cutoff. 6Input leaf image 
+
+224 ×224 ×3 Shared frozen EfficientNet-B0 backbone (4.04M params) 
+
+Path 0 : Others direct-reject RouterHead 6-way (5 crops + Others) 
+
+Path 3 : OOD reject Dual-gate OOD (Energy + KNN) 
+
+Stage 1 
+
+arg-max =Others not Others both fire Per-crop Adapter (1-of-5 selected) DirectHead safety net (26-way) Confidence router (calibrated MSP) 
+
+Path 1 (High): Adapter only 
+
+Path 2 (Low): Adapter ⊕ DirectHead fusion 
+
+Stage 2 
+
+passed (target crop) high low Output: 25 disease classes (incl. healthy), or Others 
+
+> Temperature Scaling :calibrates all 7 heads
+> add_crop : incremental interface, existing weights frozen
+> Spans whole pipeline
+
+Fig. 1: AdapterMoE overall architecture. The shared frozen backbone feeds RouterHead, which first separates Others from the five target crops (Path 0 if Others) and, for samples it assigns to a crop, passes them to a dual-gate Energy-AND -KNN check that screens for distribution shift (Path 3 if both fire); samples surviving both checks then reach the selected crop’s Adapter and the DirectHead safety net, whose outputs a calibrated-MSP confidence router combines into a high-confidence path (Adapter only) or a low-confidence path (log-odds fusion) on the way to the final prediction. Temperature Scaling and the add_crop incremental interface (bottom) apply across this entire pipeline rather than to any single stage (Sections III-F and III-G). 
+
+D. Stage 2: Per-Crop Adapters 
+
+Each Adapter (we use “Expert” and “Adapter” interchange-ably) handles only its own crop’s disease classes – 4 for Apple, Corn, and Grape, 3 for Potato, 10 for Tomato – and is trained only on that crop’s own sub-dataset, never seeing another crop’s images or the Others class. This is the key structural difference from soft routing: expert specialization here is enforced at the data level, not left to emerge from gating dynamics during training. The main pipeline uses a three-step lightweight design. Step 1 (backbone pre-calibration and freezing): an ImageNet-pretrained EfficientNet-B0 is briefly fine-tuned end-to-end for 3 epochs on the flat 26-class training configuration – enough to adapt it somewhat to plant-leaf image statistics – and then frozen entirely; all subsequent training operates on cached features rather than re-running the backbone. Step 2 (lightweight heads on frozen features): the RouterHead as above ( ∼0.33M); a per-crop AdapterHead using a Squeeze-and-Excitation (SE) block [21] (reduction ratio 8) followed by Linear(1280 →512) → ReLU → Dropout(0 .2) →7
+
+Linear(512 →#classes ), about 1.07M parameters each for Ap-ple/Corn/Grape/Potato ( StandardAdapter ); and, for the heavier 10-class Tomato task, an enhanced variant with SE reduction ratio 4, a two-layer MLP ( 1024 →512 ), LayerNorm, GELU, dropout 0.3, and label smoothing 0.05, at about 2.67M pa-rameters ( TomatoEnhancedAdapter ); plus a DirectHead as a single linear layer ( 1280 →26 , ∼0.03M), cheap enough to train in minutes directly on cached features. The SE block rescales each feature channel by a learned, sigmoid-bounded importance weight, x′ 
+
+> ch
+
+= sch · xch , where xch is the original activation of channel ch and sch ∈ (0 , 1) is its learned per-channel gate, letting each Adapter learn which of the shared 1280 feature channels matter most for its own crop. Step 3 (feature caching): since the backbone is frozen, every training image’s backbone feature is fixed across epochs, so it is computed once and cached; subsequent epochs read the cache directly. This yields roughly a 13 × training speedup for the Adapter stage relative to full backbone fine-tuning (the five Adapters together train in about 0.20 minutes; see Section IV-C for the full-system cost comparison). Adapters are trained with Adam (lr = 10 −3), Cosine Annealing, for a fixed 30 epochs with early stopping dis-abled (to avoid seed-dependent training-length variation), us-ing unweighted cross-entropy (plus label smoothing 0.05 for the Tomato-enhanced variant only). Because each Adapter is trained fully independently, adding or replacing one crop’s Adapter never requires touching another crop’s weights – the direct source of the modular-maintenance advantage exploited by add_crop (Section III-G). 
+
+E. DirectHead and Log-Odds Fusion 1) Feature flattening: An Adapter’s output dimensionality equals its crop’s disease-class count (3–10), but the system’s final decision must live in the shared 26-class space. We therefore maintain a local-to-flat index map recording which flat-space index each of a crop’s local classes corresponds to, and fill every flat-space position outside that crop’s class range with a large negative constant ( −1 × 10 4) as an “impossible” marker; after softmax, these positions carry negligible prob-ability mass. This lets each Adapter “speak only for its own classes” – e.g., the Apple Adapter explicitly abstains on the other 22 classes – so that an Adapter’s error on classes it was never trained on cannot systematically contaminate the fusion step below. 
+
+2) Log-odds fusion: The low-confidence path combines the calibrated, flattened Expert logit ze ∈ R26 with the calibrated DirectHead logit zd ∈ R26 by a fixed per-class linear combination: 
+
+zfused [c] = α·ze[c]+(1 −α)·zd[c], ∀c ∈ { 1, . . . , 26 }, (3) with the final prediction and probability given by 
+
+ˆy = arg max  
+
+> c
+
+zfused [c], pfused [c] = exp( zfused [c]) 
+
+P26  
+
+> j=1
+
+exp( zfused [j]) .
+
+(4) Because logits are (up to a translation) log-odds (Sec-tion III-F), Equation 3 is a log-odds-scale weighted combi-nation of two branches’ evidence, which is why calibrating ze
+
+and zd onto a common probability scale before fusing them (Section III-F) is a precondition for this combination to be statistically meaningful rather than an arbitrary heuristic. We fix α = 0 .6 rather than tuning it against validation ac-curacy, keeping fusion behavior reproducible across seeds and keeping any hard-vs-soft routing comparison uncontaminated by an extra tuned parameter. Because the low-confidence path (Path 2) triggers on only about 0.02% of test samples in our PlantVillage setting (Section IV-E), α’s influence on headline accuracy here is minimal; its value lies not in optimizing a fusion ratio but in providing a bounded-risk fallback for the rare case where Router and Adapter are simultaneously uncertain. We recommend a dedicated sensitivity analysis for deployments with more pronounced distribution shift, where this path is expected to trigger more often (Section IV-G2). 
+
+3) Two-zone path selector: The Router’s calibrated MSP is a continuous confidence signal in [0 , 1] rather than a binary trust decision, so the system splits it into two zones: a high-confidence zone (Path 1) where the Adapter output is trusted directly, and a low-confidence zone (Path 2) where Adapter and DirectHead are fused as above. This gives the routing decision a graceful-degradation property: when the Expert’s confidence is insufficient, the system automatically broadens its evidence base rather than forcing a single mechanism to always be right. Combined with the dual OOD gate, the final decision resolves into four mutually exclusive paths:  
+
+> •
+
+Path 0 (Others-direct): calibrated Router arg-max is Oth-ers; cheapest path, terminates immediately.  
+
+> •
+
+Path 1 (high-confidence): MSP ≥ 0.55 ; the flattened Adapter arg-max is used directly, with no DirectHead com-putation.  
+
+> •
+
+Path 2 (low-confidence fusion): MSP < 0.55 ; Adapter and DirectHead are combined via Equation 3.  
+
+> •
+
+Path 3 (OOD-reject): the Energy and KNN gates both fire; output forced to Others. This lets the system spend computation proportionally to a sample’s difficulty: confident samples cost one Router pass plus one Adapter pass, while uncertain samples pay one addi-tional DirectHead pass for extra robustness. Path usage rates and their conditional accuracies are reported in Section IV-E. 
+
+F. Calibration Framework 
+
+For a K-class branch, let z(x) ∈ RK be the pre-softmax logit vector and y the ground-truth label. Temperature Scal-ing [6] fits a single scalar T > 0 per branch by minimizing Negative Log-Likelihood (NLL) on a held-out calibration split 
+
+Dcalib (our val_b ): 
+
+T ∗ = arg min  
+
+> T > 0
+
+LNLL (T ) = − 1
+
+Ncal 
+
+> Ncal
+
+X
+
+> i=1
+
+log softmax 
+
+ zi
+
+T
+
+
+
+[yi] ,
+
+(5) solved with L-BFGS (typically converging within 20–30 of a 200-step budget), with T clamped to [0 .3, 10 .0] to avoid numerical instability from a poorly conditioned fit. We cali-brate the Router, each of the five Adapters, and DirectHead independently on their own val_b splits – seven scalar temperatures in total, taking roughly 1–2 minutes on a single 8
+
+GPU as a one-time, offline step after training. This puts Router, Adapter, and DirectHead outputs on a common, trustworthy probability scale; gives the MSP thresholds θreject and θhigh an actual probabilistic reading rather than an arbitrary logit cutoff; and lets add_crop (Section III-G) inherit a stable calibration baseline so newly added crops do not disturb existing crops’ rejection behavior. Calibration quality (ECE before/after and the learned T values) is reported in Section IV-G3. 
+
+G. The add_crop Incremental-Learning Interface 
+
+To support the realistic scenario of new crops arriving after deployment, we expose an add_crop interface whose core principle is that existing Adapter weights never change .Concretely, it runs four steps: (1) instantiate a new per-crop Adapter and train it only on the new crop’s sub-dataset; (2) expand the Router’s output layer from K to K+1 classes and fine-tune it on the union of existing crops, the new crop, and Others; (3) similarly fine-tune DirectHead, whose flat output space grows accordingly; and (4) incrementally extend the KNN feature bank with the new crop’s backbone features. Because the backbone stays frozen throughout, every step operates purely on the cached 1280-d feature space (Figure 2). In our three-system comparison, add_crop is unique to AdapterMoE: the flat baselines must expand their output layer and retrain end-to-end, and ClassicalMoE_Shared’s gate allocation is disrupted by a new crop and likewise requires full retraining. Hard routing turns “add a crop” into an additive operation rather than a redo – we view this as the single most practically consequential difference between hard and soft routing exposed by our experiments (quantified in Section IV-F). 
+
+H. Five-System Fair Comparison Framework 
+
+Our central claim is that two-stage hard routing dominates soft routing and monolithic flat classification on three axes – training cost, new-crop extensibility, and rejection stability – not on accuracy. Establishing this requires all systems to be evaluated under one task definition, one data configuration, and one evaluation protocol. 
+
+Flat classification baselines. We implement three variants trained directly on the flat 26-class configuration with no rout-ing or decomposition: SimpleCNN , a four-layer convolutional network with global average pooling ( ∼0.10M parameters) included purely to establish a task-difficulty floor; ResNet-18 [7] ( ∼11.2M parameters) with a linear ( 512 →26 ) head; and EfficientNet-B0 [9] ( ∼4.04M parameters) with a linear (1280 →26 ) head, both ImageNet-pretrained. All three train with Adam ( lr = 10 −3) for 40 epochs with no early stopping, and reject Others via the same MSP < θ = 0 .55 rule as AdapterMoE. 
+
+ClassicalMoE_Shared (soft-routing MoE baseline). This is the original dense-gating MoE of Jacobs et al. [13] – not Shazeer et al.’s sparse Top-K variant [4] and not Puigcerver et al.’s token-level Soft MoE [15] – with five experts, one per target crop, and every expert participating in every forward pass at a learned weight. A shared ImageNet-pretrained ResNet-18 backbone (trained end-to-end, unlike AdapterMoE’s frozen backbone) feeds five independent lin-ear Expert heads ( 512 →26 each) and a linear Gating head (512 →5); the final prediction is y = P 
+
+> i
+
+gi · Expert i(x)
+
+with g = softmax(Gating( x)) . Total parameters ( ∼11.25M) closely match AdapterMoE’s 11.31M, supporting a like-for-like comparison at matched capacity. To counter expert col-lapse, we enable a load-balancing auxiliary loss (coefficient 0.01) following Shazeer et al. [4], LLB = γ2(importance ) + 
+
+γ2(load ), where importance is each expert’s total gate weight within a batch, load is each expert’s Top-1 selection count, and 
+
+γ is the coefficient of variation (std/mean); we write the full variant name as ClassicalMoE_Shared_LB but abbreviate to ClassicalMoE_Shared throughout, and validate the necessity of this loss directly in Section IV-G7. Notably, Classical-MoE_Shared has no dedicated Others-rejection mechanism: Others is simply one of the 26 classes an Expert Head can output – an inherent limitation of this soft-routing design and a key point of contrast with AdapterMoE’s explicit two-stage rejection. 
+
+AdapterMoE training pipeline. The main system trains in five stages: Stage 0 backbone pre-calibration and freezing (3 epochs, ∼3.15 min/seed); Stage 1 RouterHead ( ∼0.15 min); Stage 2 the five Adapters ( ∼0.20 min combined, via feature caching); Stage 3 DirectHead ( ∼0.04 min); and Stage 4 Temperature Scaling and OOD calibration for all seven branches plus Energy/KNN threshold fitting ( ∼0.05 min). Table I summarizes the four defining differences among the three system families. 
+
+Unified task and evaluation split. All five systems solve the identical task – output one of 25 disease classes, or Others – and are evaluated on the same flat 26-class test split (N =1 ,999 ; Others = 681 samples, ≈ 34% ; the remaining 25 classes each have 50 samples except three Corn classes with slightly larger raw counts of 59, 77, and 82), fixed identically across all five seeds. Test-set metrics are computed once per run with no test-time hyperparameter tuning; all systems share identical augmentation, optimizer, batch size, and seed schedule, so the only varying factor is architecture itself. 
+
+I. Training Configuration and Evaluation Metrics 
+
+All systems use Adam [22] ( lr = 10 −3, weight decay 10 −4)with Cosine Annealing [23] ( ηmin = 10 −5), batch size 32, and 224 ×224 inputs; early stopping is disabled everywhere in the main pipeline. Key threshold constants are shared across systems: θreject = θhigh = 0 .55 , Energy/KNN thresholds set at a 0.95 true-positive-rate quantile on in-distribution validation data, and fusion weight α = 0 .6. We do not employ Aug-Mix [24] or CutMix [25] in the reported experiments; both are mature, well-validated augmentation techniques and we list their integration as future work rather than as part of the present system. We report four primary classification metrics. Disease Ac-curacy restricts to the 25 named disease classes (excluding Others): 
+
+DAcc = 1
+
+Ndisease 
+
+X
+
+> i∈Disease
+
+1[ˆ yi = yi], (6) 9
+
+(a) Flat baseline / ClassicalMoE_Shared 
+
+> Backbone (retrain) Existing heads (retrain) Gate / output dim (retrain) New crop class(es) added
+> Entire system retrained (∼40 min/seed)
+
+(b) AdapterMoE ( add_crop )
+
+> Backbone (frozen, untouched) Existing Adapters (untouched) Router + DirectHead (light fine-tune)
+> +1 new Adapter
+> (trained fresh) KNN bank (incremental update)
+> Local operation (∼1.14 min/crop)
+
+Fig. 2: Adding a new crop. (a) Flat baselines and the soft-routing MoE baseline must retrain the backbone, existing heads, and the output layer or gate end to end. (b) AdapterMoE’s add_crop interface freezes the backbone and existing Adapters, training only one new Adapter and lightly fine-tuning the Router and DirectHead. 
+
+TABLE I: Defining differences among the three system families compared in this work. 
+
+Flat baselines ClassicalMoE_Shared AdapterMoE 
+
+Routing None Soft (learned gate) Hard (deterministic Router) Others rejection MSP post-hoc No dedicated mechanism Explicit Router-stage rejection Expert collapse risk N/A Present; needs LB loss Precluded by design New-crop training cost Full retrain Full retrain One Adapter + light fine-tune 
+
+where 1[·] is the indicator function, equal to 1 if its argument holds and 0 otherwise. Others Accuracy measures rejection recall on the Others class: 
+
+OAcc = 1
+
+Nothers 
+
+X
+
+> i∈Others
+
+1[ˆ yi = Others ]. (7) Overall Accuracy is computed across all 26 classes, and Macro-F1 – our headline metric, robust to class imbalance – averages per-class F1 unweighted over K = 26 classes: 
+
+Macro -F1 = 1
+
+K
+
+> K
+
+X
+
+> c=1
+
+F1 c, F1 c = 2PcRc
+
+Pc + Rc
+
+, (8) where Pc and Rc are the precision and recall of class c
+
+computed in the standard way (i.e., Pc is the fraction of samples predicted as class c that truly belong to class c, and 
+
+Rc is the fraction of true class-c samples correctly predicted as class c). For calibration quality we report Expected Calibration Error (ECE, 15 bins) [18] and NLL (Section III-F), and for the OOD gate, true/false positive rates and the Area Under the ROC Curve (AUROC). IV. E XPERIMENTS 
+
+A. Setup 
+
+All experiments run on a single machine (NVIDIA RTX 4070, 12GB; Intel Core i5-13500; 64GB DDR5 RAM; PyTorch 2.5.1+cu121; Python 3.10.19), with all randomness sources fixed and deterministic kernels en-abled. Five full training-and-evaluation repetitions (seeds 
+
+{42 , 123 , 456 , 789 , 2026 } – chosen arbitrarily and fixed in ad-vance, not individually meaningful) across the main pipeline, all baselines, and every ablation total approximately 820 GPU-minutes ( ≈13.7 hours); every number reported below is an independent from-scratch run under this budget, with no cross-version weight reuse or extrapolation. 
+
+B. Main System Comparison 
+
+Table II reports the five systems’ core performance, aggre-gated as mean ± std over five seeds on the shared N =1 ,999 
+
+flat 26-class test split. Three observations stand out. First, the four strong systems (ResNet-18, EfficientNet-B0, ClassicalMoE_Shared, Adapter-MoE) land within a 0.24-point Macro-F1 band (97.51–97.75); ClassicalMoE_Shared’s edge over AdapterMoE (0.24 points) is smaller than ClassicalMoE_Shared’s own cross-seed stan-dard deviation (0.46), and AdapterMoE’s gaps to ResNet-18 (0.09) and EfficientNet-B0 (0.08) are smaller still – all four differences sit inside statistical noise. On this controlled benchmark, accuracy has saturated to the point of losing discriminative power, which is our explicit reason for not building this paper’s argument around an accuracy claim. Second, AdapterMoE’s training cost is a clear outlier in the good direction: 3.59 ± 0.23 minutes per seed against 
+
+40 .31 (ClassicalMoE_Shared), 39 .89 (ResNet-18), and 43 .57 
+
+(EfficientNet-B0) – respectively 8.9% , 9.0% , and 8.2% of those costs, an 11 –12 × efficiency gain, achieved because only 7.30M trainable parameters (RouterHead, five Adapters, DirectHead, and seven temperature scalars) are ever updated, and every image passes through the backbone exactly once across the entire training process (Section IV-C discusses precisely what this efficiency gain should and should not be attributed to). Third, AdapterMoE’s OAcc is simultaneously 10 
+
+TABLE II: Main results: five systems, five-seed mean ± std on the shared test split. Bold marks AdapterMoE’s two standout metrics (Train time, OAcc ), discussed in the text; all other cells are reported as plain numbers to avoid implying an accuracy ranking that this paper does not claim (see Section IV-B).                                             
+
+> System Macro-F1 ↑Overall ↑DAcc ↑OAcc ↑Train (min) ↓Params (M) ↓Infer (ms) ↓
+> SimpleCNN 74.50 ±1.01 74.30 ±1.14 77.85 ±1.21 67.43 ±2.98 40.44 ±3.22 0.10 0.75 ±0.10 ResNet-18 97.60 ±0.46 98.13 ±0.39 97.60 ±0.38 99.15 ±0.59 39.89 ±2.12 11.19 2.56 ±0.10 EfficientNet-B0 97.68 ±0.16 97.98 ±0.29 98.09 ±0.12 97.77 ±0.93 43.57 ±2.97 4.04 7.53 ±0.32 ClassicalMoE_Shared 97.75 ±0.46 98.23 ±0.34 97.63 ±0.42 99.38 ±0.32 40.31 ±2.10 11.25 2.85 ±0.15 AdapterMoE (ours) 97.51 ±0.34 98.06 ±0.35 97.33 ±0.48 99.47 ±0.17 3.59 ±0.23 11.31 7.56 ±0.16 Note: AdapterMoE’s DAcc (97.33) is numerically the lowest among the four strong systems, not the highest – reported plainly rather than obscured. Params and Infer are shown for reference: SimpleCNN’s low values reflect low capacity and should be read alongside its far lower accuracy, not as a favorable trade-off.
+> SimpleCNN ResNet-18 EffNet-B0 ClassMoE AdapterMoE (ours)
+
+020 40 
+
+> Training time (min/seed)
+
+Fig. 3: Training cost by system (mean ± std, five seeds). Adapter-MoE’s advantage comes from frozen-backbone feature caching, not from hard routing per se (see caveat above). 
+
+the highest of all five systems ( 99 .47% ) and the most stable (std = 0 .17% , the lowest of the five) – 3.5× more stable than ResNet-18, 5.5× more stable than EfficientNet-B0, and 1.9×
+
+more stable than ClassicalMoE_Shared. 
+
+C. Training Cost 
+
+Table III restates training cost relative to two natural refer-ence points. 
+
+A necessary caveat. This cost gap primarily reflects a difference in training paradigm – AdapterMoE uses a frozen backbone with feature caching and updates only lightweight heads, while every other system fine-tunes its full network end to end – and not, by itself, a difference between hard and soft routing . The roughly 12 × figure should therefore be read as the advantage of “frozen backbone plus feature caching” over “end-to-end fine-tuning,” a training-paradigm axis that is largely orthogonal to the hard-vs-soft routing axis. Quantifying the impact of routing strategies on training costs separately would require a controlled comparison in which both systems freeze their backbone – an experiment we did not run and flag explicitly as future work (Section VI-B). Figure 3 visualizes this same comparison directly. 
+
+D. Rejection Stability 
+
+Table IV restates OAcc stability directly, expressed as a multiple of AdapterMoE’s own standard deviation. The practical stakes of cross-environment stability are con-crete: differing field lighting, hardware-specific numerical er-ror, and differing deployment-version floating-point behavior 
+
+> SimpleCNN ResNet-18 EffNet-B0 ClassMoE AdapterMoE (ours)
+> 60 80 100
+> Others Accuracy (%)
+
+Fig. 4: Others Accuracy by system, with error bars showing cross-seed standard deviation. AdapterMoE combines the highest mean with the tightest spread. 
+
+are all, statistically, akin to varying the random seed. Alarger OAcc standard deviation means rejection behavior drifts when the deployment environment changes, undermining any commitment to a bounded false-positive rate; AdapterMoE’s lowest-of-five standard deviation indicates its rejection bound-ary is the least sensitive to random initialization among the systems compared, which is what makes a deployment service-level commitment on rejection behavior plausible in the first place. Figure 4 plots this comparison, with error bars showing the cross-seed spread. 
+
+E. Path Routing and Inference Latency 
+
+Table V reports AdapterMoE’s usage rate and conditional accuracy for each of its four decision paths. Two points follow. First, the Path-0 usage rate ( 33 .79% )closely tracks Others’ true test-set share (681 /1,999 ≈
+
+34 .07% ), indicating the Router discriminates Others almost perfectly on this benchmark. Second, Path 2 (the fusion path) triggers on only 0.02% of samples – on PlantVillage, the dual-gate-plus-DirectHead machinery is almost never exercised in the main pipeline. We read this plainly as DirectHead degenerating, on this particular benchmark, into an insurance 
+
+mechanism: normally inactive, but present so that the system still has a fallback decision-maker when the Router fails at a genuine boundary case; we expect its value to become visible specifically in deployments with more pronounced distribution shift, which we probe directly in Section IV-J. On latency, AdapterMoE’s per-image inference time is 
+
+7.56 ± 0.16 ms, of which the backbone forward pass accounts for ≈ 7.11 ms ( ≈ 94% ), with RouterHead ( 0.21 ms) and the Adapter ( 0.24 ms) contributing the rest and DirectHead adding 11                                             
+
+> TABLE III: Training cost relative to ClassicalMoE_Shared and to ResNet-18 (five-seed mean ±std; independent from-scratch measurements). System Train (min) ↓vs. ClassicalMoE_Shared vs. ResNet-18 SimpleCNN 40.44 ±3.22 100.3% 101.4% ResNet-18 39.89 ±2.12 99.0% 100% (ref.) EfficientNet-B0 43.57 ±2.97 108.1% 109.2% ClassicalMoE_Shared 40.31 ±2.10 100% (ref.) 101.1% AdapterMoE (ours) 3.59 ±0.23 8.9% 9.0% TABLE IV: Cross-seed rejection stability: OAcc mean, standard deviation, and the ratio of each system’s std to AdapterMoE’s. System OAcc ↑OAcc std std ratio SimpleCNN 67.43% 2.98% 17.5 ×
+> ResNet-18 99.15% 0.59% 3.5 ×
+> EfficientNet-B0 97.77% 0.93% 5.5 ×
+> ClassicalMoE_Shared 99.38% 0.32% 1.9 ×
+> AdapterMoE (ours) 99.47% 0.17% 1.0 ×(ref.)
+
+negligibly (a linear layer on an already-computed frozen feature). This is nearly identical to plain EfficientNet-B0’s 7.53 
+
+ms – the shared-backbone design means adding five Adapters and a RouterHead costs only 0.03 ms of additional latency, supporting AdapterMoE’s viability for edge deployment. 
+
+F. Incremental Learning with add_crop 
+
+We simulate the realistic scenario of crops arriving one at a time after deployment, adding Apple → Corn → Grape →
+
+Potato → Tomato in sequence to an initially empty Adapter-MoE instance and tracking both the time each step takes and whether previously added crops’ recognition degrades. Table VI reports the five-seed average. Two conclusions follow, plotted directly in Figure 5. First, expanding by one crop costs 1.14 minutes on average (Steps 2–5, range 1.08 –1.29 ), ≈ 35 × faster than Classical-MoE_Shared’s 40 .31 -minute from-scratch retrain and ≈ 35 ×
+
+faster than ResNet-18’s 39 .89 minutes; Step 1 (Apple) takes longer ( 4.30 min) because it must additionally build the KNN bank and initialize the Router’s training data from scratch. Second, OAcc stays in a tight 99 .35 –99 .77% band throughout expansion – adding crops barely perturbs existing crops’ rejection behavior. The low DAcc in Steps 1–4 is by design, not a defect: crops not yet added are, correctly, treated by the Router as non-target and routed to rejection, and this rising curve is itself evidence that add_crop behaves as intended; by Step 5, with all five crops present, DAcc reaches 
+
+97 .50% , matching the main pipeline’s 97 .33% within cross-seed standard deviation. A seed-level check (comparing Step-5 DAcc against the from-scratch main pipeline’s DAcc for each of the five seeds) shows 4 of 5 seeds at or above the main pipeline’s accuracy (mean +0 .16 points), with seed 789 the sole exception ( −0.68 points) – a discrepancy we trace in Section IV-H to that seed’s OOD gate happening to perform unusually well in the from-scratch run specifically, an advantage tied to a particular backbone-and-KNN-bank state that does not carry over once the KNN bank is rebuilt incrementally.        
+
+> Apple +Corn +Grape +Potato +Tomato
+> 050 100
+> Crop added (cumulative) Metric (%) DAcc Macro-F1 OAcc
+> Fig. 5: Metric trajectory during add_crop expansion. DAcc and Macro-F1 rise as crops are added (by design, since not-yet-added crops are correctly routed to Others); OAcc stays flat, showing existing crops are undisturbed.
+
+G. Ablation Studies 
+
+We report eight ablations, each run under the full five-seed protocol. The first four validate core design choices in the main system; the remaining four are controlled comparisons that isolate specific claims (Adapter irreplaceability, the necessity of the load-balancing loss, and threshold stability). 
+
+1) Tomato Adapter capacity: Tomato is the heaviest sub-task (10 classes) and the largest Adapter, making it the most overfitting-prone branch. We compare the standard architecture (Std_r8) against three enhanced variants (Enh_r4, Enh_r8, Enh_r16, where r is the SE reduction ratio), reported in Table VII. Three findings. First, the enhanced variants lead Std_r8 by only ≈ 0.19 points on L2 Tomato F1, a gap smaller than either variant’s own cross-seed standard deviation – accuracy alone does not justify the added capacity. Second, the enhanced variants’ real advantage is calibration quality: Std_r8’s Tomato temperature is 2.184 ± 0.650 (severely overconfident and unstable across seeds), while all three enhanced variants sit near T ≈ 0.80 with roughly one-sixth the cross-seed standard deviation, plausibly attributable to the enhanced variant’s label smoothing. Third, on parameter cost, Enh_r4 (our main-pipeline choice) costs 1.60M more than Std_r8; since the three enhanced variants are statistically indistinguishable from each other on accuracy, Enh_r16 is a reasonable lower-parameter alternative, and Std_r8 itself (using 40% of Enh_r4’s parame-ters) remains defensible if inference latency is the deployment priority, since its accuracy gap is within noise. 
+
+2) Dual-gate parameter scan: why we did not run a full grid: We originally planned a three-dimensional grid scan over (θhigh , α, DirectHead on/off ). An early pilot scan showed that, under the main PlantVillage configuration, the Low-Path usage rate stayed between 0.0% and 0.4% across every 12                                                                           
+
+> TABLE V: AdapterMoE path usage and conditional accuracy (five-seed mean ±std). Path Usage rate Conditional accuracy Path 1 – High (Adapter-led) 65.73 ±0.16% 97.63 ±0.27% Path 2 – Low (fusion) 0.02 ±0.03% –Path 0 – Reject (Others-direct) 33.79 ±0.32% 99.59 ±0.28% Path 3 – OOD-reject (dual-gate) 0.46 ±0.20% –
+> TABLE VI: Five-step add_crop expansion (five-seed mean ±std, except Step time). Step Crop added DAcc (%) OAcc (%) Overall (%) Macro-F1 (%) Step time (min) 1Apple 14.92 ±0.19 99.65 ±0.17 43.78 ±0.14 17.25 ±0.13 4.30 2+Corn 34.61 ±0.33 99.77 ±0.08 56.81 ±0.21 32.45 ±0.22 1.11 3+Grape 49.71 ±0.19 99.74 ±0.19 66.75 ±0.18 47.99 ±0.17 1.10 4+Potato 60.97 ±0.32 99.62 ±0.30 74.14 ±0.22 59.56 ±0.25 1.08 5+Tomato 97.50 ±0.39 99.35 ±0.17 98.13 ±0.24 97.63 ±0.33 1.29
+> TABLE VII: Tomato Adapter variants (five-seed mean ±std). Flat F1 is computed after mapping to the 26-class space. Enh_r4 (*) is the main-pipeline choice. Variant Flat F1 Params (M) T
+> Enh_r16 0.9598 ±0.0075 2.05 0.803 ±0.064 Enh_r8 0.9593 ±0.0061 2.26 0.826 ±0.086 Enh_r4* 0.9577 ±0.0045 2.67 0.805 ±0.103 Std_r8 0.9578 ±0.0064 1.07 2.184 ±0.650
+
+combination tested, meaning α and the DirectHead toggle had a measurable effect on essentially no samples – all 24 grid combinations produced identical DAcc /OAcc /Overall/Macro-F1 to the precision we measured. We therefore stopped the full grid rather than spend compute confirming a null result already visible in the pilot, and instead report the main pipeline’s directly measured Low-Path rate of 0.02% (Section IV-E), consistent with the pilot. This null result does not mean the two-zone design is useless – it means it is an insur-ance mechanism whose value is invisible on a saturated, in-distribution benchmark and is expected to surface specifically when MSP is more broadly depressed (e.g., OOD-heavy or low-data deployments). We retain θhigh = 0 .55 , α = 0 .6, and DirectHead enabled in the main pipeline because no better alternative was identified and because DirectHead remains useful as a fallback for add_crop and for distribution-shifted deployment (Section IV-J). 
+
+3) Temperature Scaling calibration: Table VIII reports ECE before/after calibration and the learned temperatures for all seven branches – included specifically to make the calibration mechanism auditable rather than reporting only a summary improvement. Calibration succeeds for six of seven branches (ECE reduc-tions of 29–100%), but Adapter_Corn is a consistent failure across all five seeds: its temperature ranges from 0.65 to 3.14 
+
+(a 5× spread) and post-calibration ECE remains at 4.31% .We attribute this to Corn’s four classes containing at least one visually near-identical disease pair ( Cercospora leaf spot and Northern Leaf Blight), whose probability sharpness is plausibly not correctable by a single scalar T . We disclose this as a known limitation and list a targeted Corn Adapter redesign – e.g., per-class temperature vectors or class-balanced         
+
+> 13510 15 20 30 96 97 98
+> main pipeline (E3) mean-best (E20) Backbone pre-calibration epochs Macro-F1 (%)
+> Fig. 6: Macro-F1 vs. backbone pre-calibration epochs (five-seed mean). The main pipeline uses E3 for speed; accuracy keeps rising through E20 before overfitting sets in at E30.
+
+sampling – as future work (Section VI-B). 
+
+4) OOD gate configuration: We compare five OOD-gate configurations – disabled, Energy-only, KNN-only, Energy 
+
+AND KNN (main pipeline), and Energy OR KNN – in Table IX. D4’s Macro-F1 gain over D1 (disabled) is only +0 .07 
+
+points, within noise, and 4 of the 5 seeds show D4 no better than D1; the average advantage is driven almost entirely by a single seed (789, +0 .80 points). Two conclusions follow. First, 
+
+AND is the right combination logic: OR (D5) reaches 99 .91% OAcc but at the cost of over-rejection, dragging DAcc down to 
+
+94 .42% (−2.91 points versus D4); neither single signal alone matches AND ’s robustness. Second, and more importantly, this result exposes the OOD gate’s conditional value: because its average benefit traces to one seed-789 outlier – the same seed whose add_crop run reverses direction (Section IV-F) – we do not claim the OOD gate is unconditionally better than disabling it under in-distribution-only evaluation; we expect its value to appear reliably only on genuinely out-of-distribution inputs, which we test directly in Section IV-J. 
+
+5) Backbone pre-calibration epoch sweep: The main pipeline uses 3 epochs of backbone pre-calibration before freezing, chosen for speed; Figure 6 sweeps 7 values to check whether this is actually a good trade-off point. The mean-optimal point is 20 epochs ( +0 .48 Macro-F1 points over E3, at a cost of +21 min/seed); 30 epochs shows overfitting-driven regression. This is the clearest demonstration that AdapterMoE is not a fixed “fast but capped” point but a slidable cost–accuracy curve: a user willing to spend +21 13                                                                                       
+
+> TABLE VIII: Calibration results per branch (five-seed mean ±std). Tis post-clamp (bounds [0 .3,10 .0] ); # low is how many of the 5 seeds hit the lower clamp bound. Branch ECE before (%) ECE after (%) Reduction T(mean ±std) # low (of 5) Router 4.88 ±0.16 0.55 ±0.22 88.9% 0.51 ±0.07 0/5 Adapter_Apple 2.66 ±1.64 0.00 99.9% 0.33 ±0.07 4/5 Adapter_Corn 5.12 ±1.36 4.31 ±1.22 15.8% 1.70 ±1.19 0/5 Adapter_Grape 2.28 ±0.84 0.00 100.0% 0.31 ±0.01 2/5 Adapter_Potato 7.77 ±1.31 0.00 100.0% 0.30 ±0.00 5/5 Adapter_Tomato 4.47 ±1.41 2.52 ±0.69 40.2% 0.82 ±0.11 0/5 DirectHead 1.47 ±0.66 1.01 ±0.47 29.3% 0.80 ±0.11 0/5
+> TABLE IX: OOD gate configuration comparison (five-seed mean ±std). Variant Macro-F1 DAcc OAcc OOD-reject rate D1: disabled 97.44 ±0.12 97.59 ±0.33 98.77 ±0.88 0.00% D2: Energy only 96.33 ±0.43 94.89 ±0.75 99.91 ±0.08 2.38% D3: KNN only 97.32 ±0.40 96.86 ±0.51 99.47 ±0.17 0.91% D4: Energy AND KNN (main) 97.51 ±0.34 97.33 ±0.48 99.47 ±0.17 0.46% D5: Energy OR KNN 96.13 ±0.39 94.42 ±0.72 99.91 ±0.08 2.83%
+> Apple Corn Grape Potato Tomato
+> −40
+> −30
+> −20
+> −10 0
+> DAcc drop (percentage points) DirectHead fallback Router_top1 fallback Router_direct fallback
+> Fig. 7: DAcc drop after removing one Adapter, by fallback rule (Table X). Every fallback, for every crop, loses double digits – no substitute comes close to the removed Adapter’s function.
+
+min/seed can reach 97 .98% Macro-F1, exceeding Classical-MoE_Shared’s 97 .75% main result. We note, however, that seed-level preferences diverge (2 of 5 seeds favor E15, 2 favor E20, 1 favors E30), so E20’s mean-optimal status is an averaging effect, not a majority-vote result, and any future adoption of E20 as a new default would need re-validation on more seeds before being described as an unambiguous improvement. 
+
+6) Control baseline: Adapter irreplaceability: The core methodological assumption behind per-crop Adapters is that each one learns crop-specific fine-grained discrimination that cannot be substituted by the Router or by another Adapter. We test this by removing one Adapter at a time and re-routing its crop’s samples through three fallback rules: DirectHead Fallback (send the removed crop’s samples to the flat 26-way DirectHead), Router_top1 Fallback (predict that crop’s single most frequent training disease as a constant guess), and Router_direct Fallback (route through the Router’s crop decision, then to DirectHead). Table X reports the resulting drop in DAcc for the affected crop. Figure 7 plots this same result: every fallback, for every crop, produces a double-digit accuracy drop; Tomato’s removal is the most damaging ( −36 .42 points), consistent with its ten-class burden. No fallback rule comes close to recovering the removed Adapter’s function – neither routing to the flat 26-way DirectHead nor falling back on the Router’s crop-level decision substitutes for per-crop fine-grained discrimination. This directly supports the two-stage design (crop routing and disease classification are genuinely separate competencies) and, by extension, add_crop ’s premise that a new crop re-quires its own new Adapter rather than a re-purposed existing module. 7) Control baseline: load-balancing loss in Classical-MoE_Shared: ClassicalMoE_Shared enables a load-balancing (LB) auxiliary loss by default (coefficient 0.01). We test whether this is actually load-bearing by comparing it against an otherwise-identical variant with LB disabled (Table XI); MaxGate is the largest of the five experts’ gate probabilities (near 1 indicates single-expert dominance, i.e., collapse), and Gate-γ is the coefficient of variation of the gate distribution. Disabling LB drives MaxGate from 0.35 to 0.81 (as high as 0.99 for some seeds) – soft-routing MoE reliably collapses onto a dominant expert without this constraint. Enabling LB suppresses MaxGate back to 0.35 , but at a cost of 1.03 Macro-F1 points, revealing a genuine structural trade-off between enforced load balance and accuracy that a soft-routing design cannot escape: with LB, collapse is avoided but accuracy is taxed; without LB, accuracy improves but collapse re-turns. This validates our choice to enable LB in Classical-MoE_Shared (making it the honest strongest version of the soft-routing baseline), and more importantly demonstrates why 
+
+we adopt hard routing instead: AdapterMoE avoids collapse through an a-priori semantic decomposition (crop → disease) built into the architecture, not through an auxiliary loss applied after the fact to patch a design that would otherwise collapse. 
+
+8) Control baseline: MSP threshold stability: The main pipeline fixes the Others-rejection threshold at θreject = 0 .55 . A practical deployment risk is that this value might need delicate tuning and might not tolerate operator drift (e.g., a technician nudging it to 0.40 or 0.80). We swept θ ∈ [0 .40 , 0.80] 
+
+and computed DAcc ’s per-seed range (max − min) for EfficientNet-B0 versus AdapterMoE: averaged across seeds, the flat baseline’s DAcc swings by 8.99 points as θ varies 14                                           
+
+> TABLE X: DAcc drop (percentage points) after removing one Adapter, by fallback rule. Removed crop # classes DirectHead FB Router_top1 FB Router_direct FB Apple 4−14.98 −11.31 −15.07 Corn 4−19.74 −13.54 −19.74 Grape 4−14.85 −10.96 −14.83 Potato 3−11.21 −7.56 −11.31 Tomato 10 −36.42 −32.75 −36.56
+> TABLE XI: ClassicalMoE_Shared with and without the load-balancing loss (five-seed mean ±std). Variant DAcc (%) Macro-F1 (%) MaxGate Gate-γ
+> With LB (= ClassicalMoE_Shared) 96.36 ±2.27 93.04 ±2.04 0.350 ±0.116 0.524 ±0.286 No LB 97.69 ±0.16 94.07 ±0.16 0.807 ±0.160 1.585 ±0.308
+
+(as much as 15 .02 points for seed 2026), while AdapterMoE swings by only 0.47 points – roughly a 19 × difference in threshold sensitivity. This is a second, independent line of evidence for rejection stability, complementing Section IV-D’s same-θ-across-seeds result with a same-seed-across-θ result: together they show AdapterMoE’s rejection behavior is robust both to random initialization and to operator-level threshold drift, both of which are realistic sources of variation across field deployments with different lighting, hardware, and per-sonnel. 
+
+H. Cross-Seed Variance 
+
+Table XII reports AdapterMoE’s per-seed metrics to show the individual seed values underlying the mean ± std sum-maries used elsewhere. Seed 789 is the clear outlier: it reaches AdapterMoE’s best Macro-F1 ( 98 .07% , +1 .65 σ) and is also the seed whose OOD gate most clearly helps (Section IV-G4); the same seed, however, reverses direction in the add_crop 
+
+experiment ( −0.68 points versus its own from-scratch run, Section IV-F). Taken together, this cross-validates our reading that seed 789’s main-pipeline advantage stems from an inci-dental pairing of a particular backbone state with a particular KNN bank, not from a stable property of the architecture. Seed 42 is AdapterMoE’s weakest seed ( 97 .18% , −0.97 σ); we note this seed happens to favor ResNet-18-backboned sys-tems (the flat ResNet-18 baseline and ClassicalMoE_Shared), putting AdapterMoE’s EfficientNet-B0-backboned pipeline at a relative disadvantage specifically on this seed. For compari-son, ClassicalMoE_Shared’s own Macro-F1 standard deviation (0.46 ) is 1.35 × AdapterMoE’s ( 0.34 ), driven largely by a seed-123 outlier ( 97 .03% , −1.56 σ) whose training curve shows an early sharp dip – consistent with soft-routing’s gate allocation being more sensitive to random seed than hard routing’s de-terministic assignment – and this is, incidentally, the one seed on which AdapterMoE actually beats ClassicalMoE_Shared outright ( 97 .47% vs. 97 .03% ). 
+
+I. Qualitative Error Analysis 
+
+On seed 42’s test set, ClassicalMoE_Shared and Adapter-MoE agree, and are correct, on over 96% of samples, indicat-ing the two very different routing strategies converge to highly similar decisions on this controlled benchmark; successful                                    
+
+> TABLE XII: AdapterMoE per-seed results underlying the five-seed summaries reported elsewhere. Seed Macro-F1 (%) DAcc (%) Overall (%) OAcc (%) 42 97.18 96.89 97.70 99.27 123 97.47 97.19 97.95 99.41 456 97.29 97.04 97.85 99.41 789 98.07 98.10 98.60 99.56 2026 97.54 97.42 98.20 99.71 mean 97.51 97.33 98.06 99.47 std 0.34 0.48 0.35 0.17
+
+cases cluster around clear lesion patterns with Router MSP near 1.00. Among the samples both systems misclassify, we identify four recurring failure patterns: (i) within-crop confusion at high confidence – e.g., Corn’s Common Rust mistaken for Cercospora leaf spot, or Tomato’s Early Blight for Target Spot, both with MSP ≈ 1.00 , indicating the model can be confidently wrong on genuinely ambiguous within-crop pairs; (ii) OOD false rejection – in-distribution samples (e.g., a healthy Apple leaf at MSP = 0 .95 ) incorrectly flagged as Others by the dual gate, reflecting conservative over-rejection; (iii) Others false acceptance – a true Others sample passing through at moderate confidence ( MSP = 0 .63 ) and being misclassified as a target-crop disease, reflecting a gap in the opposite direction; and (iv) Router cross-crop misrouting –a Tomato sample routed to the Apple Adapter at the Router stage itself, which then confidently (but wrongly) classifies it as an Apple disease. Notably, failure mode (i) occurs after cor-rect crop routing, meaning further improvement here requires strengthening within-crop fine-grained discrimination (e.g., the Tomato Target-Spot-specific direction in Section VI-B), not adjusting the routing mechanism itself. The recurrence of high-MSP errors across these cases is consistent with the accuracy-saturation picture of Section IV-B: even where the model is wrong, its confidence often remains high. 
+
+J. External Zero-Shot Evaluation on PlantDoc 
+
+Sections IV-B–IV-I evaluate entirely within PlantVillage, whose Others class – built from other PlantVillage crops such as pepper, strawberry, and cherry – still shares PlantVillage’s laboratory-condition visual statistics with the five target crops. A stricter test of the dual-gate mechanism requires images 15                  
+
+> TABLE XIII: PlantDoc OOD-rejection rate, aggregate and by rejec-tion path (five-seed mean ±std). Metric Mean ±std Overall OOD-rejection rate (9 classes) 95.69% ±2.78% via Path 0 (Router →Others) 77.59% ±8.30% via Path 3 (Energy+KNN gate) 18.10% ±6.95%
+
+the model never saw during training and that were captured under genuinely different conditions. We therefore evaluate AdapterMoE, zero-shot and with no fine-tuning or domain adaptation, on PlantDoc [26], a dataset of web- and field-sourced plant photographs. 
+
+1) Motivation and design: PlantDoc’s background, light-ing, leaf framing, and resolution differ sharply from PlantVil-lage’s studio conditions, making it a direct probe of covariate-shift tolerance. Of PlantDoc’s 28 classes, 19 map onto our Flat-26 label space (the in-mapping subset) and 9 belong to crops outside our five targets (Bell pepper, Blueberry, Cherry, Peach, Raspberry, Soyabean, Squash, Strawberry, etc.), which we treat as genuine OOD samples. Because our training data contains zero PlantDoc images and we perform no PlantDoc-specific tuning, this is a strict zero-shot external evaluation. 
+
+2) Dataset and class mapping: Merging PlantDoc’s train and test splits gives 2,922 images; after class mapping, the in-mapping subset totals 2,101 images (across the 19 non-Others classes) and the OOD subset totals 821 images. Six of our Flat-26 classes have no corresponding PlantDoc samples (e.g., Apple_Black_rot, Corn_healthy) and are excluded from this evaluation; class correspondence was established via keyword matching on crop name and 1–2 distinguishing disease terms, then manually verified. We report two independent metrics: the OOD-rejection rate 
+
+on the 821 OOD samples (fraction correctly output as Others, via either Path 0 or Path 3), and in-mapping cross-domain accuracy on the 2,101 in-mapping samples (fraction correctly assigned to their true Flat-26 class; a false rejection here counts as an error). 
+
+3) Result 1: dual-gate OOD rejection generalizes: Ta-ble XIII reports the aggregate and per-class OOD-rejection rate. Per-class rejection rates range narrowly from 93 .01% (Bell pepper leaf spot) to 99 .29% (Peach leaf), with all 9 OOD classes above 93% and a cross-seed standard deviation of only 2.78% overall – no OOD class fails systematically. Most rejection is handled by the Router itself ( 77 .59% ); the dual OOD gate catches an additional 18 .10% of cases the Router routes to a target crop, the two mechanisms acting complementarily. This is, to our knowledge, the first evaluation of this dual-gate design against a genuinely external, field-condition OOD source rather than an in-distribution proxy, and it substantially strengthens the case that the gate generalizes beyond the benchmark it was tuned on. 
+
+4) Result 2: in-mapping cross-domain classification degrades sharply: Table XIV reports in-mapping performance in aggregate; per-class accuracy ranges from Corn_Gray_leaf_spot’s outlying 61 .49 ± 15 .56% down to several classes near 0–5% (e.g., Tomato_leaf (healthy) at                        
+
+> TABLE XIV: PlantDoc in-mapping cross-domain classification (five-seed mean ±std). Metric Mean ±std In-mapping cross-domain accuracy 11.01% ±1.13% Fraction falsely rejected 68.60% ±5.86% via Path 0 (Router →Others) 41.97% ±6.10% via Path 3 (OOD gate) 26.62% ±5.00% Fraction reaching Path 1 (classified) 31.09% ±5.83%
+
+0.38 ± 0.86% ), with Corn_Gray_leaf_spot’s relatively strong showing plausibly explained by its field images happening to share PlantVillage’s characteristic large-leaf, texture-dominant framing more than most other classes do. In-mapping accuracy of 11 .01% sits roughly 87 points below PlantVillage’s own 97 .70% , with 68 .60% of in-mapping samples falsely rejected rather than misclassified into a wrong disease. 
+
+5) Failure mode: covariate shift and conservative rejection: 
+
+This degradation is consistent with a covariate shift between PlantVillage (clean or single-color background, leaf as the dominant subject, controlled uniform lighting, close-range single-leaf framing, standardized resolution) and PlantDoc (cluttered field background, leaf sometimes a small fraction of the frame, variable natural lighting with shadow, medium-to-long range and multi-leaf framing, inconsistent resolution). This gap is well documented in prior work: Mohanty et al. [27] report a PlantVillage-trained CNN’s field-image accu-racy falling from 99 .35% to roughly 31% (a 68-point drop), and our own 87-point gap is consistent with that magnitude; Singh et al. [26], in introducing PlantDoc, likewise empha-size this dataset gap and recommend fine-tuning or domain adaptation for cross-domain use. We characterize AdapterMoE’s dual-gate behavior under this shift as conservative rejection : when an input’s features lie far from the training distribution, the dual gate cannot distinguish “wrong species” (semantic shift, correctly the target of rejection) from “right species, very different capture conditions” (covariate shift, which we would prefer to classify correctly), and defaults to rejecting both. This has genuine practical value in an agricultural-diagnosis setting: true OOD crops are correctly rejected 95.69% of the time, avoiding confidently wrong recommendations, and even for in-mapping samples that are falsely rejected, rejection is a comparatively safe failure mode relative to a confident wrong answer, since a rejected sample can be routed to manual review rather than acted on directly. The dual gate converts cross-domain degradation into rejection rather than misclassification, giving the system a form of explicit failure awareness – but this same behavior means the system, as trained, is not a direct substitute for a model trained on or adapted to field imagery. 
+
+6) Conclusions and limitations of the PlantDoc evaluation: 
+
+Three conclusions follow. First, the dual-gate mechanism is effective against semantic shift, generalizing to true OOD field photographs at 95 .69 ± 2.78% with no per-class systematic failure – direct evidence the design is not merely overfit to PlantVillage’s own Others construction. Second, cross-domain classification capability is bounded by covariate shift, consis-16 
+
+tent with prior literature. Third, the dominant failure mode is conservative rejection rather than silent misclassification, which is the safer of the two failure directions for this application but is not itself a solution. We do not claim AdapterMoE, as trained here, is di-rectly deployable on raw field photographs. Closing this gap would require one of: (a) collecting field imagery for fine-tuning; (b) unsupervised domain adaptation to shrink the PlantVillage–PlantDoc feature gap; or (c) augmentation strate-gies (background randomization, cropping, blur) that increase the backbone’s covariate-shift tolerance – all of which we leave to future work. We also note caveats specific to this evaluation: five-seed standard deviations remain subject to small-sample effects; PlantDoc is a single external dataset whose distribution does not represent every field scenario, and extending validation to datasets such as IP102 or PlantNet is future work; the OOD gate’s thresholds were fit purely on PlantVillage in-distribution data (a 0.95 TPR target), so, following Vishwakarma et al. [28], this ID-only calibration bounds TPR but gives no guarantee on FPR under a different OOD distribution, meaning the rejection rate reported here reflects a zero-shot, arguably worst-case scenario that a small amount of PlantDoc-aware calibration could likely improve; and some in-mapping classes have very few samples (e.g., only 2 for Tomato_two_spotted_spider_mites_leaf), so their individual per-class accuracy is not statistically representative. V. D ISCUSSION AND LIMITATIONS 
+
+A. Accuracy Saturation and Dataset Scope 
+
+As established in Section IV-B, all four strong systems occupy a 0.24 -point Macro-F1 band, smaller than several systems’ own cross-seed standard deviation; this saturation is why we build the paper’s argument around cost, extensibil-ity, and stability rather than accuracy, and the epoch sweep (Figure 6) confirms this is a configurable trade-off rather than a hard ceiling. A related scope limitation: PlantVillage is laboratory-condition data, and our Others class is built from other PlantVillage crops that still share its studio-like visual statistics. The Router’s ≈ 99% in-benchmark Others-rejection rate should therefore be read as performance within a labo-ratory visual regime ; Section IV-J’s field-condition evaluation shows this does not fully transfer to natural backgrounds. 
+
+B. Conditional and Negative Results 
+
+We summarize here, for visibility, the findings from Sec-tion IV-G that are explicitly conditional or negative rather than restating their evidence: (i) the dual-gate OOD mechanism’s benefit is not seed-robust under in-distribution-only evaluation (Section IV-G4), though it generalizes well to genuine external OOD data (Section IV-J); (ii) Adapter_Corn’s calibration fails consistently across all five seeds (Section IV-G3); (iii) the mean-optimal backbone pre-calibration epoch count (E20) is an averaging artifact, not a majority preference, across seeds (Section IV-G5); (iv) Tomato_Target_Spot is a reproducible cross-seed weak point, trailing the best competing system’s F1 by 0.1–10.4 points on every seed (Section IV-I discusses this failure mode qualitatively); and (v) the low-confidence fusion path is essentially inactive on PlantVillage, functioning as dor-mant insurance rather than an active mechanism (Sections IV-E and IV-G2). We report these because we consider disclosing them part of the paper’s contribution, not an afterthought. 
+
+C. Sample-Size and Scope Limitations 
+
+Five seeds is a training-time-constrained compromise; a regulatory or safety-critical application would warrant a larger seed budget than we allocate here. Separately, prior PlantVil-lage state-of-the-art results generally come from larger capac-ity and longer training chasing marginal accuracy gains; at 11.31M parameters, AdapterMoE is not built to compete on that axis, and we do not claim otherwise. We also explored, at the design stage, an independent-backbone variant (one full EfficientNet-B0 per crop, ≈28M parameters, ≈70 min to train) but found it strictly worse on both training cost and inference latency than the shared-frozen-backbone design reported here, and did not pursue it further; a rigorous paired comparison between the two is left for future work. VI. C ONCLUSION AND FUTURE WORK 
+
+A. Conclusion 
+
+We presented AdapterMoE, a multi-crop disease recognition system built around two-stage hard routing, dual-gate rejection (MSP + Energy + KNN), per-branch Temperature Scaling calibration, and an add_crop incremental-learning interface, validated within a fair five-system comparison framework on PlantVillage’s 26-class task across five random seeds. Four conclusions follow. First , AdapterMoE’s clearest advantages are cost, extensibility, and stability: a frozen backbone with feature caching cuts per-seed training cost to roughly one-tenth of ClassicalMoE_Shared’s, add_crop removes the need for full retraining when a new crop arrives, and AdapterMoE’s cross-seed OAcc standard deviation is the lowest of all five systems. Second , accuracy has saturated across the four strong systems (a 0.24-point Macro-F1 band, smaller than several systems’ own cross-seed standard deviation), so we do not center the paper’s claim on outperforming on accuracy; the epoch sweep shows this is a configurable trade-off, not a hard ceiling. Third , calibration is broadly consistent across seeds and branches, though the Corn Adapter exposes a genuine lim-itation of scalar temperature calibration that we disclose rather than paper over. Fourth , the dual-gate OOD mechanism’s benefit under in-distribution-only evaluation is conditional and seed-dependent, so we do not claim it unconditionally superior to disabling it – though PlantDoc shows it generalizes well against genuine external OOD samples. Taken together, AdapterMoE’s contribution is not a claim of superior accu-racy, but a reproducible, transparently reported trade-off point among deployment cost, extensibility, and rejection stability, at a moment when accuracy alone has stopped differentiating competing designs on this benchmark. 
+
+B. Future Work 
+
+Short term. (i) Raising backbone pre-calibration from 3 to 20 epochs, which reaches the five-seed mean-optimal accuracy 17 
+
+(+0 .48 Macro-F1 points) at a cost of +21 min/seed, though seed-level preference divergence (Section IV-G5) means this would need broader re-validation before being adopted as a new default. (ii) A conditional OOD gate, toggled by the Router’s own Others-accuracy signal – enabled when it falls below 0.985 (as in seed 789) and disabled otherwise (as in the other four seeds) to avoid the side effects seen in Section IV-G4 – with an anticipated Macro-F1 gain of 
+
++0 .10 to +0 .20 points, at the cost of added implementation complexity. (iii) Reverting the Tomato Adapter to Std_r8, whose Overall Macro-F1 is nearly identical to the enhanced variant we currently ship ( 0.9754 vs. 0.9755 ) at 40% of the parameter cost – a reasonable choice when inference latency is the deployment priority. 
+
+Medium term. (i) A fundamental redesign of the Corn Adapter – e.g., class-balanced sampling, distillation from the Router, a deeper Adapter body, or a per-class (vec-tor) temperature rather than a scalar one – to address its consistent calibration failure. (ii) Targeted optimization for Tomato_Target_Spot, AdapterMoE’s one consistent cross-seed weak point, via more aggressive disease-specific augmenta-tion. 
+
+Long term. (i) Sample-level (rather than batch-level) online incremental learning, updating the Router, Adapter, and KNN bank per image rather than per crop-batch. (ii) Routing vi-sualization and interpretability tooling, surfacing the features driving each sample’s path assignment to build practitioner trust in agricultural deployment. (iii) A front-end object-detection stage (Section II-A) that crops a single leaf from a cluttered raw field photo before handing it to this classification system, extending the method’s applicable scope from close-range single-leaf photography to unconstrained field imagery – directly targeting the covariate-shift limitation quantified in Section IV-J. REFERENCES [1] S. Savary, L. Willocquet, S. J. Pethybridge, P. Esker, N. McRoberts, and A. Nelson, “The global burden of pathogens and pests on major food crops,” Nature Ecology & Evolution , vol. 3, no. 3, pp. 430–439, 2019. [2] D. P. Hughes and M. Salathé, “An open access repository of images on plant health to enable the development of mobile disease diagnostics,” 
+
+arXiv:1511.08060 , 2015. [3] K. P. Ferentinos, “Deep learning models for plant disease detection and diagnosis,” Computers and Electronics in Agriculture , vol. 145, pp. 311– 318, 2018. [4] N. Shazeer et al., “Outrageously large neural networks: The sparsely-gated mixture-of-experts layer,” in Proc. Int. Conf. Learn. Represent. (ICLR) , 2017. [5] D. Hendrycks and K. Gimpel, “A baseline for detecting misclassified and out-of-distribution examples in neural networks,” in Proc. Int. Conf. Learn. Represent. (ICLR) , 2017. [6] C. Guo, G. Pleiss, Y. Sun, and K. Q. Weinberger, “On calibration of modern neural networks,” in Proc. Int. Conf. Mach. Learn. (ICML) ,2017, pp. 1321–1330. [7] K. He, X. Zhang, S. Ren, and J. Sun, “Deep residual learning for image recognition,” in Proc. IEEE Conf. Comput. Vis. Pattern Recognit. (CVPR) , 2016, pp. 770–778. [8] K. Simonyan and A. Zisserman, “Very deep convolutional networks for large-scale image recognition,” in Proc. Int. Conf. Learn. Represent. (ICLR) , 2015. [9] M. Tan and Q. Le, “EfficientNet: Rethinking model scaling for convolu-tional neural networks,” in Proc. Int. Conf. Mach. Learn. (ICML) , 2019, pp. 6105–6114. [10] A. Dosovitskiy et al., “An image is worth 16 ×16 words: Transformers for image recognition at scale,” in Proc. Int. Conf. Learn. Represent. (ICLR) , 2021. [11] Z. Liu et al., “Swin Transformer: Hierarchical vision Transformer using shifted windows,” in Proc. IEEE/CVF Int. Conf. Comput. Vis. (ICCV) ,2021, pp. 10012–10022. [12] H. Touvron, M. Cord, M. Douze, F. Massa, A. Sablayrolles, and H. Jégou, “Training data-efficient image Transformers & distillation through attention,” in Proc. Int. Conf. Mach. Learn. (ICML) , 2021, pp. 10347–10357. [13] R. A. Jacobs, M. I. Jordan, S. J. Nowlan, and G. E. Hinton, “Adaptive mixtures of local experts,” Neural Computation , vol. 3, no. 1, pp. 79–87, 1991. [14] W. Fedus, B. Zoph, and N. Shazeer, “Switch Transformers: Scaling to trillion parameter models with simple and efficient sparsity,” Journal of Machine Learning Research , vol. 23, no. 120, pp. 1–39, 2022. [15] J. Puigcerver, C. Riquelme, B. Mustafa, and N. Houlsby, “From sparse to soft mixtures of experts,” arXiv:2308.00951 , 2023. [16] C. Riquelme et al., “Scaling vision with sparse mixture of experts,” in 
+
+Adv. Neural Inf. Process. Syst. (NeurIPS) , 2021, pp. 8583–8595. [17] S. Mu and S. Lin, “A comprehensive survey of mixture-of-experts: Algorithms, theory, and applications,” arXiv:2503.07137 , 2025. [18] M. P. Naeini, G. F. Cooper, and M. Hauskrecht, “Obtaining well calibrated probabilities using Bayesian binning,” in Proc. AAAI Conf. Artif. Intell. , 2015, pp. 2901–2907. [19] W. Liu, X. Wang, J. D. Owens, and Y. Li, “Energy-based out-of-distribution detection,” in Adv. Neural Inf. Process. Syst. (NeurIPS) ,2020, pp. 21464–21475. [20] Y. Sun, Y. Ming, X. Zhu, and Y. Li, “Out-of-distribution detection with deep nearest neighbors,” in Proc. Int. Conf. Mach. Learn. (ICML) , 2022, pp. 20827–20840. [21] J. Hu, L. Shen, and G. Sun, “Squeeze-and-Excitation networks,” in Proc. IEEE Conf. Comput. Vis. Pattern Recognit. (CVPR) , 2018, pp. 7132– 7141. [22] D. P. Kingma and J. Ba, “Adam: A method for stochastic optimization,” in Proc. Int. Conf. Learn. Represent. (ICLR) , 2015. [23] I. Loshchilov and F. Hutter, “SGDR: Stochastic gradient descent with warm restarts,” in Proc. Int. Conf. Learn. Represent. (ICLR) , 2017. [24] D. Hendrycks, N. Mu, E. D. Cubuk, B. Zoph, J. Gilmer, and B. Lak-shminarayanan, “AugMix: A simple data processing method to improve robustness and uncertainty,” in Proc. Int. Conf. Learn. Represent. (ICLR) ,2020. [25] S. Yun, D. Han, S. J. Oh, S. Chun, J. Choe, and Y. Yoo, “CutMix: Regu-larization strategy to train strong classifiers with localizable features,” in 
+
+Proc. IEEE/CVF Int. Conf. Comput. Vis. (ICCV) , 2019, pp. 6023–6032. [26] D. Singh, N. Jain, P. Jain, P. Kayal, S. Kumawat, and N. Batra, “PlantDoc: A dataset for visual plant disease detection,” in Proc. 7th ACM IKDD CoDS and 25th COMAD (CoDS-COMAD) , 2020, pp. 249– 253. [27] S. P. Mohanty, D. P. Hughes, and M. Salathé, “Using deep learning for image-based plant disease detection,” Frontiers in Plant Science , vol. 7, art. no. 1419, 2016. [28] H. Vishwakarma, H. Lin, and R. K. Vinayak, “Taming false positives in out-of-distribution detection with human feedback,” in Proc. Int. Conf. Artif. Intell. Statist. (AISTATS) , 2024.

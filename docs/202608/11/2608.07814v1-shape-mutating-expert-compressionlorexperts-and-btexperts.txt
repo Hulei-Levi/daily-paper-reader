@@ -1,0 +1,429 @@
+Title: Shape Mutating Expert Compression:LorExperts and BTExperts
+
+URL Source: https://arxiv.org/pdf/2608.07814v1
+
+Published Time: Tue, 11 Aug 2026 00:19:23 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# Shape Mutating Expert Compression: LorExperts and BTExperts 
+
+Inesh Chakrabarti * Sourjya Roy * Bowen Bao Thiago Crepaldi Spandan Tiwari Ashish Sirasao Advanced Micro Devices 
+
+{inesh.chakrabarti, sourjya.roy, bowen.bao}@amd.com {thiago.crepaldi, spandan.tiwari, ashish.sirasao}@amd.com 
+
+Abstract 
+
+Mixture-of-Experts (MoE) language models de-liver high capacity at low per-token compute, but deploying them cheaply requires compress-ing their many expert weight matrices. Expert 
+
+pruning (e.g., REAP) and merging reduce cost but sacrifice accuracy and require retraining the router ; low-rank delta decomposition of ex-perts (e.g., D 2-MoE) preserves all experts and the router, but degrades sharply as the expert count grows because a single shared compo-nent cannot approximate many near-orthogonal experts. Because MoE expert weights are near-orthogonal, a single shared component (as in prior delta decomposition) scales poorly with the expert count; we show that experts nonethe-less organize into functional co-activation com-munities that are decoupled from weight simi-larity. Building on this, we introduce LorEx-perts , a router-preserving compression method that clusters experts, keeps one full-precision 
+
+dominant per cluster, and represents the remain-ing members as low-rank corrections to their local dominant. LorExperts retains all experts and the original router (no router retraining). At ∼50% expert compression on Qwen3-30B-A3B and Gemma-4-26B-A4B, LorExperts pre-serves downstream accuracy and perplexity bet-ter than the baselines on most of the tasks; the margin over D 2-MoE grows with expert count E. We further give a reconstruction fine-tuning procedure for LorExperts, and BTEx-perts, a tree organization of dominants and cor-rections that enables inference-time amortiza-tion of shared computation. 
+
+1 Introduction 
+
+Large language models (LLMs) have improved rapidly as dense transformers have scaled to hun-dreds of billions of parameters (Brown et al., 2020; Chowdhery et al., 2023; Touvron et al., 2023). Scal- 
+
+> *Equal contribution.
+
+ing a dense model, however, means paying for ev-ery parameter on every token. Sparse Mixture-of-Experts (MoE) architectures ease this by adding capacity while holding the cost of each forward pass roughly constant. An MoE layer keeps E sep-arate experts, and for every token a small router activates only k ≪ E of them, leaving the rest idle (Jiang et al., 2024; Yang et al., 2025; Dai et al., 2024). Because total capacity is decoupled from the compute spent per token, models can grow to hundreds of billions of parameters without a com-parable rise in inference floating-point operations (FLOPs). The difficulty is that this capacity lives almost entirely in the experts, and each expert is as large as a dense feed-forward block. Since only a few are active per token, MoE inference is limited by the memory traffic of loading expert weights rather than by arithmetic (Eliseev and Mazur, 2023). Re-cent architectures push this further, favoring more experts that are each smaller and more special-ized, and configurations of E=128 are now com-mon (Dai et al., 2024; Yang et al., 2025). As this expert budget grows, serving the models afford-ably comes down to compressing the experts. The aim is to shrink their memory footprint without losing quality, and without disturbing the routing the model has already learned. 
+
+1.1 Related Work Expert pruning. Pruning removes low-importance experts. Candidates are chosen by activation frequency or by an importance criterion, as in REAP (Lasby et al., 2026). The approach is simple and reduces both storage and per-token compute. However, it discards model capacity and 
+
+changes the set of experts the router can select .The router is therefore miscalibrated after pruning and must be adjusted or retrained. Accuracy also degrades on the capabilities carried by the removed experts. The relative merit of pruning and merg-arXiv:2608.07814v1 [cs.LG] 7 Aug 2026 ing is benchmark-dependent. On discriminative metrics such as perplexity and multiple-choice ac-curacy, merging has been reported to do better (Li et al., 2024). On generative tasks, REAP (Lasby et al., 2026) finds the opposite. It attributes the gap to an irreducible error in merging, which arises from the loss of independent routing control over the combined experts. 
+
+Expert merging. Merging fuses similar experts into fewer experts. M-SMoE (Li et al., 2024) groups experts by the cosine similarity of their router logits and merges each group by frequency-weighted averaging. HC-SMoE (Chen et al., 2025) instead clusters experts by the similarity of their output activations, which makes the grouping less dependent on routing statistics. Like pruning, merg-ing shrinks the expert set and usually requires the router to be re-calibrated or retrained. Its quality depends on how losslessly similar experts can be fused. 
+
+Low-rank / delta decomposition. A third family preserves all experts and the router . It writes each expert as a shared component plus a low-rank per-expert delta, in the spirit of LoRA (Hu et al., 2022). D2-MoE (Gu et al., 2025) uses a shared (Fisher) mean with per-expert singular value decomposition (SVD) deltas. SD-MoE (Huang et al., 2026) in-stead uses a spectral shared component. Because the expert set and the routing are unchanged, no router retraining is required , which is attractive in practice. Their quality, though, is bounded by how well a single shared component plus a small delta can approximate each expert. 
+
+Neuron permutation symmetry. Feed-forward neurons have no canonical ordering. Two function-ally related networks can match closely only after a permutation of their hidden units. This symme-try is well studied in model merging, for example the activation and weight matching used in Git Re-Basin (Ainsworth et al., 2023). We reuse this align-ment machinery when forming inter-expert residu-als. 
+
+1.2 Motivation 
+
+We build on delta decomposition, the most deployment-friendly of these families, because it leaves every expert and the router in place. Its limitation is scale. A single shared component cannot represent a growing expert set, since one global anchor sits far from most experts in a large, diverse pool. MoE expert weights are also near-orthogonal , so a small low-rank delta still leaves a large residual. As a result, single-anchor methods degrade as E grows (Sec. 2). We address this with two ideas. The first is to use 
+
+multiple local anchors . Instead of one global root, we cluster the experts and keep a full-precision 
+
+dominant per cluster, so every anchor stays close to its members and the method scales with E. The second is to exploit permutation symmetry. Two experts may be similar only up to a neuron per-mutation , so we align each member’s neurons to its dominant before forming the low-rank residual (Sec. 3). Throughout, every expert and the original router are left untouched, with no rerouting and no router retraining. 
+
+Contributions. 
+
+• Analysis (Sec. 2). We characterize the “orthogonal-experts” problem: why a sin-gle shared component scales poorly as E
+
+grows, and we measure the functional struc-ture that survives it—co-activation communi-ties, and their projection-specific dissociation from weight similarity. We then quantify the two things a compression budget actually buys (Sec. 2.3): expert spectra decay only slowly, so rank is expensive, while routing is strongly concentrated—the 64 busiest of 128 experts absorb 94 .5% of routed visits—so retaining a well-chosen minority exactly is cheap. To-gether these motivate the asymmetric budget LorExperts uses. • LorExperts (Sec. 3). A router-preserving compression method that clusters experts, keeps one full-precision dominant per clus-ter, and encodes the remaining members as permutation-aligned low-rank corrections. Ev-ery expert and the original router are retained. • Fine-tuning (Sec. 4). A lightweight distilla-tion step that fits only the low-rank factors to the original expert outputs, while the domi-nants and the router stay frozen. • BTExperts (Sec. 5). A tree organization of dominants and corrections that amortizes shared computation at inference time. Router : top-k over all E experts (unchanged — every expert stays individually addressable) 
+
+Wd1 Wd1 +B1A1
+
+> cluster 1
+
+Wd2 Wd2 +B2A2
+
+> cluster 2
+
+Wd3 Wd3 +B3A3 
+
+> cluster k
+
+■ full-precision dominant (kept) ■ member ≈ dominant + rank-r correction BmAm               
+
+> Figure 1: LorExperts overview. Experts are clustered (by co-activation or weight similarity); each cluster keeps its highest-firing expert as a full-precision dominant Wdand represents every other member as Wd+BmAmwith a rank-rcorrection. Unlike single-shared-component decomposition, which uses one global root, LorExperts uses k
+> local dominants, so approximation quality does not collapse as the expert count Egrows. The router and all E
+> experts are preserved—no rerouting or retraining.
+
+2 Analysis: The Orthogonal-Experts Problem 
+
+This section motivates LorExperts (overview in Fig. 1) by characterizing why shared-component low-rank decomposition of MoE experts is hard, and identifying the structure that makes it tractable. 
+
+Setup: the single-anchor budget. Let an MoE layer have E experts with weight matrices We ∈
+
+RI×H . A single-shared-component method approx-imates We ≈ Wshared + ∆ e with ∆e low-rank, so its quality is bounded by how much of each ex-pert the one shared component can carry and how low-rank the leftover residual is. The difficulty is an accounting one: a single anchor is amortized across the whole pool, so as E grows it must sit close to ever more, ever more diverse experts at once. For experts that are close to mutually orthog-onal in weight space—as MoE experts are, and as the co-activation analysis below takes as its starting point—any one direction can align with only about 
+
+1/E of the pool’s inter-expert variance, leaving a near-full-rank residual for the per-expert delta to ab-sorb. Adding rank to ∆e does not fix this, because the residual is not low-rank to begin with. The remedy we pursue is therefore not a better global anchor but more anchors: k local dominants, each close to its own members (Sec. 3). What remains is to decide which experts belong together. 
+
+2.1 What the co-activation structure reveals 
+
+Although expert weights are near-orthogonal, the router induces rich, non-random functional struc-ture. The expert co-activation graph (edges weighted by normalized pointwise mutual infor-mation, NPMI), built across 13 datasets on Qwen3-30B-A3B (Fig. 2), exposes several properties that bear directly on the design choices—and failure modes—of prior compression methods. • Stable communities. Experts partition into consistent co-activation communities that per-sist across datasets—natural groups that Lor-Experts clusters over (motivating the Coact-NPMI / Msoft metrics, Sec. 3). • Depth-varying granularity. The number of co-activation communities grows with net-work depth. A uniform compression budget is therefore suboptimal, motivating per-layer treatment. • Domain specialists. Some communities are domain-general while others are strongly domain-specific: code and math (GSM8K) in-duce the most distinctive routing (visible as the colored communities in Fig. 2), whereas web text (C4, Wikipedia) tracks the consensus. These specialists are rare yet load-bearing for their domain. 
+
+Consequences for prior methods—and for Lor-Experts. This structure is exactly what the prior families endanger. Frequency-based pruning 
+
+(Sec. 1.1) discards precisely the rare domain spe-cialists that carry code/math ability, and merg-ing (Sec. 1.1) blurs distinct communities—both Figure 2: Expert co-activation structure at Qwen3-30B-A3B layer 23 as a backbone graph : experts are nodes, and each strong co-activation edge is colored by the dataset with the largest NPMI (code=green, math/GSM8K=red, web/wikitext=cyan, . . . ) and widened by its strength. Experts partition into stable communities even though their weights are near-orthogonal, and distinct domains induce visibly specialized structure. A raw heatmap view and clique statistics appear in Appendix B. 
+
+then force router re-calibration. LorExperts in-stead keeps every expert and the router intact, pre-serving this functional structure by construction. Moreover, the structure lives in the routing while the weights are near-orthogonal—a decoupling we measure directly (Sec. 2.2, Table 1)—so single-shared-component weight decomposition (Sec. 1.1) cannot exploit it, which is why LorExperts uses lo-cal per-cluster dominants rather than one global root. 
+
+2.2 The functional–weight dissociation is projection-specific 
+
+Do co-firing experts also have similar weights ? We correlate each expert pair’s co-activation (NPMI) with its weight cosine similarity, per layer and per projection (Table 1). The correlation is small but consistently significant for the gate projection (r ≈ 0.08 –0.21 , p < 10 −3) and effectively zero for up and down .The pattern is interpretable. The gate projection selects which inputs activate an expert, so co-firing experts share a weak alignment in what excites them; their actual computation (up , down ) is essen-tially orthogonal. Experts that fire together thus 
+
+Table 1: Correlation between expert co-activation (NPMI) and weight cosine similarity, by layer and pro-jection (Qwen3-30B-A3B). ∗∗ p < 10 −3, ∗p < 0.05 .                        
+
+> Layer gate up down mean L5 +0 .208 ∗∗ +0 .017 −0.026 ∗+0 .164 ∗∗
+> L11 +0 .085 ∗∗ +0 .010 +0 .006 +0 .078 ∗∗
+> L23 +0 .133 ∗∗ −0.005 +0 .009 +0 .115 ∗∗
+> L35 +0 .178 ∗∗ −0.001 +0 .020 +0 .160 ∗∗
+> L47 +0 .195 ∗∗ +0 .007 +0 .011 +0 .167 ∗∗
+
+respond to similar contexts but compute different things— complementary, not redundant . Even the gate correlation is small ( r ≤ 0.21 ), so experts remain largely near-orthogonal in weight space. This is precisely why routing-space structure is not recoverable by a shared-component weight decom-position, and why LorExperts corrects each expert against a local dominant rather than assuming a single shared low-rank basis across experts. 
+
+2.3 What the budget can buy: spectra and routing mass 
+
+Two measurable quantities decide how a compres-sion budget for an MoE layer is best spent: how fast expert spectra decay, which sets what a unit of rank Table 2: Fraction of squared Frobenius energy re-tained by a rank-r truncation of an expert matrix (I=768 , H=2048 , so rank 768 is lossless), mean over                                
+
+> gate /up /down of 12 experts per layer. The last row is what a flat spectrum ( r/ 768 ) would give.
+> Layer r=64 r=200 r=311 r=450 r=558
+> L5 0.266 0.565 0.724 0.860 0.929
+> L23 0.266 0.566 0.725 0.860 0.929
+> L40 0.248 0.548 0.712 0.853 0.926
+> mean 0.260 0.560 0.720 0.858 0.928
+> flat spectrum 0.083 0.260 0.405 0.586 0.727
+
+buys, and how concentrated the routing is, which sets what keeping a single expert exact buys. Mea-sured on Qwen3-30B-A3B, together they argue for exactly the asymmetric allocation LorExperts adopts. 
+
+Spectra decay, but slowly. Table 2 reports the fraction of squared Frobenius energy a rank-r trun-cation retains, averaged over the three projections of 12 experts at layers 5, 23 and 40. There is 
+
+genuine low-rank structure: rank 64 retains 26 .0% 
+
+where a perfectly flat spectrum would retain only 
+
+64 /768 = 8.3% . But the decay is shallow— reaching 72% of the energy already costs rank 311, i.e. 40% of the maximum rank 768. Rank is expen-sive on these matrices, so a budget spread thinly and uniformly across all E experts buys compara-tively little per expert; it is worth asking whether some of it is better spent keeping selected experts exactly. 
+
+Routing is strongly concentrated. Expert uti-lization is meanwhile far from uniform. Over five layers, the 64 busiest of the 128 experts absorb 
+
+94 .5% of routed token–expert visits, against the 
+
+50% that uniform routing would give, and 18–30 experts per layer are effectively dead ( < 10 −4 of traffic). Concentration this strong is what makes an asymmetric budget attractive: if a minority of experts carries almost all of the traffic, then hold-ing exactly those experts in full precision costs a well-understood share of the budget and removes approximation error where it is encountered most often. Taken together the two measurements motivate the shape of LorExperts: because rank is expen-sive, uniform low-rank treatment of every expert is a poor use of the budget; because routing is concen-trated, keeping a well-chosen minority exact covers most of what the router actually does. Retaining                      
+
+> Table 3: Routed token–expert visits absorbed by the
+> 64 busiest of E=128 experts, measured on WikiText-2. Uniform routing would give 0.500 . “Dead” counts experts receiving <10 −4of traffic.
+> Layer top-64 share dead experts L5 0.928 18
+> L12 0.950 22
+> L23 0.942 30
+> L31 0.961 27
+> L40 0.944 26
+> mean 0.945 24 .6
+
+a full-precision dominant per cluster and spend-ing only low-rank corrections on the remainder follows directly, and it is why LorExperts selects each cluster’s highest-firing member rather than its geometric center. One caveat qualifies how the dominant set should be read. Utilization here is measured on WikiText-2, and Sec. 2 shows that code and math induce visibly different communities, so the busy set is partly domain-dependent. This is a reason to keep every expert addressable rather than pruning the tail: the rare domain specialists are precisely the experts a single-domain utilization estimate will rank last. 
+
+2.4 Implication for method design 
+
+Two consequences drive LorExperts. First, use mul-tiple local anchors (per-cluster dominants) rather than one global root, so each anchor is close to its members and the residual it must correct is small—and the approach scales with E instead of degrading (ablated in Appendix A). Second, by Sec. 2.3, split the budget asymmetrically rather than uniformly: rank buys little on these spectra, while routing mass is concentrated enough that full-precision dominants pay for themselves—so a dominant should be chosen for the traffic it ab-sorbs. 
+
+3 LorExperts: Router-Preserving Low-Rank Expert Compression 
+
+3.1 Representation 
+
+Consider one MoE layer with E experts, each a set of weight matrices (gate, up, down) that we write jointly as We. LorExperts partitions the experts into k clusters. Within each cluster it keeps one 
+
+dominant expert at full precision and represents every other member m as a low-rank correction of its dominant, 
+
+Wm ≈ Wdominant + BmAm,
+
+rank( BmAm) = r, 
+
+with factors Bm ∈ Rd×r, Am ∈ Rr×d′
+
+. The dom-inant is stored exactly; each member costs only 
+
+Bm, A m. With k ≈ E/ 2 and r = 64 , expert pa-rameters are reduced by roughly one half; the ratio is controlled by k and r.
+
+3.2 Compression pipeline Stage 1 — Router profiling. We pass a small calibration set (C4, 64 sequences of length 2048) through the model with router hooks, accumulat-ing per-layer firing counts Ne. These counts seed clustering and dominant selection. Profiling only reads the router: LorExperts keeps all E experts and leaves the gate unchanged, unlike pruning or merging. 
+
+Stage 2 — Clustering. Per layer, we form a pair-wise distance matrix D = 1 − M with the di-agonal zeroed. We then run frequency-seeded k-medoids: the medoids start at the highest-firing experts, and the assign/update loop iterates to con-vergence. Seeding from frequently-used experts biases the dominants toward experts the router actu-ally selects. Each cluster’s dominant is its highest-firing member, with ties broken by co-activation centrality, and the remaining members are queued for reconstruction. An optional protection set can be pulled out as singleton clusters and kept at full precision. We compare three choices of the dis-tance M empirically (Sec. 6): weight cosine (WS-Frob), co-activation NPMI (Coact-NPMI), and soft co-activation ( Msoft ). 
+
+Stage 3 — Alignment and low-rank decomposi-tion. We apply three steps to each non-dominant member. (i) Neuron alignment. An expert’s hid-den feed-forward network (FFN) has no canonical ordering of its intermediate neurons, so a mem-ber may store corresponding neurons at different indices than its dominant. This inflates the naive residual Wm − Wdominant , which can be full-rank even when the experts match up to a permutation. Aligning networks by such permutations is well established in model merging (Ainsworth et al., 2023), and has been applied to experts before merg-ing in MoE compression (Li et al., 2024). We therefore align the member to its dominant before decomposing. Treating each neuron as the concate-nation of its gate, up, and down columns, we score neuron i of the dominant against neuron j of the member by the squared distance 
+
+Cij = ai − bj 22 = ∥ai∥2 + ∥bj ∥2 − 2 a⊤ 
+
+> i
+
+bj , (1) where ai = Wdom [: , i ] and bj = Wm[: , j ] are the concatenated neuron vectors. We then seek the permutation P of the member’s neurons that mini-mizes the total matching cost, 
+
+P ⋆ = arg min 
+
+> P
+
+X
+
+> i
+
+Ci, P (i), (2) which we solve exactly with the Jonker–Volgenant algorithm. Applying P ⋆ gives the aligned member 
+
+W Pm . The reported results use this alignment. 
+
+(ii) Truncated-SVD residual. We form the aligned residual and take its rank-r SVD, 
+
+R = W Pm − Wdominant ≈ UrΣrV ⊤ 
+
+> r
+
+, (3) computed with a randomized solver ( r = 64 ). Splitting the singular values symmetrically yields the low-rank factors 
+
+Bm = UrΣ1/2 
+
+> r
+
+, Am = Σ 1/2 
+
+> r
+
+V ⊤ 
+
+> r
+
+,
+
+so BmAm ≈ R. (4) 
+
+(iii) Installation. The member is replaced by a module that computes Wdominant + BmAm at infer-ence, while the dominants and the router remain untouched. 
+
+Stage 4 — Reconstruction fine-tuning. A short output-matching pass refines the factors (Sec. 4); it updates only Bm, A m.
+
+Variants. The framework is parameterized by the clustering distance M and an optional protection set, giving four variants we evaluate side by side (Sec. 6, Tables 4–5): • WS-Frob clusters on the weight-space Frobe-nius distance ∥Wi − Wj ∥F . It uses no router information, so it serves as a routing-agnostic reference. • WS-Frob+protK8 uses the same weight-space clustering but keeps eight full-precision protected experts per layer. This isolates the effect of protection on an otherwise routing-agnostic variant. • Coact-NPMI clusters on single-mixture rout-ing co-activation, measured as 1−NPMI over a mixed calibration set. It is our first routing-aware variant. • Msoft clusters on the cross-domain soft con-sensus 1 − Msoft , optionally with the router-identified protection list, and is our strongest variant. Because k and the protection set are tunable, we report it at several operating points to trace the compression–quality fron-tier. All variants share the pipeline above and differ only in the Stage-2 distance and whether a protection set is supplied. 
+
+3.3 Storage 
+
+For a cluster with a dominant and c members, stor-age is one full matrix plus c rank-r factor pairs, versus c+1 full matrices uncompressed. Summed over clusters, the layer’s expert parameters scale with the number of dominants (set by k) plus r
+
+times the number of members. Thus k and r jointly set the compression ratio, and every expert remains individually addressable by the unchanged router. 
+
+4 Reconstruction Fine-Tuning for LorExperts 
+
+Truncated-SVD (Stage 3) minimizes weight-space error; a short output-matching refinement then recovers the error that matters for the token distribution—at negligible cost. 
+
+Objective. On cached calibration activations x,we fit each member’s factors so its output matches the original expert’s, 
+
+min 
+
+> Bm,A m
+
+(Wdominant + BmAm) x − Wmx 2 
+
+> F
+
+,
+
+training only the rank-r factors Bm, A m; the domi-nant weights and the router are frozen. 
+
+Why it is cheap. Three properties make this the least costly stage of LorExperts: (i) it updates only the small rank-r factors—not the base model and not the router, so no gradients flow through ei-ther; (ii) the objective is local and per-member 
+
+and is evaluated on pre-cached activations, so there are no full-model forward/backward passes during fitting—just small matmuls; (iii) it is an activation-weighted low-rank regression , which admits a near-closed-form solution: whitening by the activation second moment and taking a (generalized) SVD of the residual recovers the optimal rank-r factors directly, in place of iterative gradient steps. Its wall-clock cost, and its quality contribution relative to the SVD initialization (Stage-3-only vs. Stage-3 +4), are reported with the calibration cost (Sec. 6). We expect the SVD initialization to do the heavy lifting and this stage to be a cheap refine-ment. 
+
+5 BTExperts: Tree Organization for Inference-Time Amortization 
+
+BTExperts organizes the dominants and their cor-rections in a binary tree. We emphasize up front what BTExperts is not : it does not improve com-pression quality . On near-orthogonal experts, shar-ing corrections across a hierarchy does not beat flat per-cluster decomposition: in a controlled study on Mixtral-8 ×7B ( E=8 ) at matched 7.5× com-pression, the hierarchical organization matches flat decomposition within noise in perplexity (PPL; 
+
+∆PPL = 0 .099 vs. 0.098 after reconstruction fine-tuning; 0.112 vs. 0.105 zero-shot, 3 seeds; Ap-pendix A). Its sole purpose is therefore inference-time amortization : components shared by several selected experts are computed once and reused. 
+
+5.1 Amortized forward pass 
+
+When multiple selected experts share a clus-ter (dominant) or a tree ancestor, the shared computation— xW ⊤ 
+
+> dominant
+
+and any shared correc-tion factors—is computed once per token and broadcast to those experts, rather than recomputed per expert. The tree (Fig. 3) makes this sharing ex-plicit: experts on the same path share the ancestors’ contributions. 
+
+5.2 Inference cost: theoretical FLOPs 
+
+Standard top-k routing evaluates k full experts per token, costing k · 2IH FLOPs and loading k full weight tensors. Pruning (REAP) does not reduce this: top-k still selects k full survivors , so per-token FLOPs and high-bandwidth memory (HBM) reads are unchanged (a 0× reduction—pruning saves storage, not per-token compute). BTExperts in-stead amortizes : when co-selected experts share a dominant, that dominant is computed once and only the cheap rank-r corrections are added per expert (Fig. 4). For such a group, speedup = k · 2IH 
+
+2IH + k · 2r(I + H) ≈ 1.9×
+
+for Mixtral-8 ×7B gate_proj (k=2 , I=14336 ,
+
+H=4096 , r=64 ). Because this projection is memory-bandwidth-bound (arithmetic intensity ≈
+
+1 FLOP/byte), the reduction is kernel-independent .Wroot                  
+
+> B6A6B7A7
+> −1+1
+> B4A4B5A5B2A2B3A3
+> −1+1 −1+1
+> e0e1e2e3e4e5e6e7
+> Figure 3: BTExperts tree ( E=8 ). Shared components near the root are computed once and amortized across experts that share a path; leaves are experts. The highlighted red path is path( e3). The tree is an inference-time organization, not a compression-quality mechanism.
+
+Two caveats keep it honest: the benefit is 
+
+routing-dependent (it applies only when the router co-selects experts from the same cluster), and it is shared with any single-shared-component method —D 2-MoE can amortize its shared base likewise. 
+
+6 Results 
+
+We evaluate on Qwen3-30B-A3B ( E=128 ) and Gemma-4-26B-A4B at ∼50% expert compres-sion, reporting perplexity on Wikitext-103 and downstream accuracy via the LM Evaluation Har-ness (MMLU, ARC-C, HellaSwag, WinoGrande, PIQA). We compare against merging (M-SMoE, HC-SMoE), pruning (Freq-Prune, REAP), and delta decomposition (D 2-MoE), all at matched com-pression (Tables 4–5). 
+
+Reading the tables. Freq-Prune is the strongest prior baseline, but LorExperts preserves knowledge and reasoning accuracy (MMLU, ARC-C, Hel-laSwag) markedly better: it leads across the board on Qwen3, and on both models holds MMLU/ARC well above the pruning and merging baselines, whereas D 2-MoE degrades sharply at this expert count. On Gemma, Freq-Prune retains lower PPL and higher commonsense (WinoGrande/PIQA), so LorExperts’s advantage is in preserved capability 
+
+rather than a clean sweep of every metric. As a side observation consistent with the near-orthogonality analysis (Sec. 2), LorExperts’s margin over single-root decomposition (D 2-MoE) widens as the expert count E grows—the regime where one shared com-ponent is least able to fit the experts. 
+
+Which variant to use. The routing-aware vari-ants win: the soft cross-domain consensus Msoft 
+
+is strongest (best MMLU on both models at ∼40– 50% compression), with Coact-NPMI close behind, because clustering by co-activation groups experts that are functionally related rather than merely close in weight space. Protecting the highest-firing experts also helps sharply (WS-Frob MMLU 
+
+42 .4 → 53 .7 on Qwen3 with protK8), since those load-bearing specialists are the costliest to approxi-mate. 
+
+6.1 Compression–quality frontier 
+
+The tables fix a single operating point, but the compression ratio is a knob we can turn. In Fig-ure 5 we sweep the Coact-NPMI variant on Qwen3-30B-A3B from 0 to about 50% expert compression and track perplexity alongside the five downstream tasks. Accuracy changes little through low and moderate compression, and the clearer drops set in only as the ratio nears 50% ; perplexity climbs slowly over the same range. Quality therefore falls off smoothly rather than all at once, and the 50% 
+
+end of the sweep reproduces the Coact-NPMI row of Table 4. In practice the ratio can then be tuned to a quality target rather than fixed in advance. 
+
+6.2 Calibration cost 
+
+Calibration time is dominated by fitting the low-rank factors, and this admits a large, analytically (a) Original       
+
+> token xWe1
+> 117 MB
+> We2
+> 117 MB out
+> 235M FLOPs, 235 MB
+> (b) REAP (pruned)
+> token xWe1
+> 117 MB
+> We2
+> 117 MB out
+> 235M FLOPs, 235 MB same per-token cost
+> (c) LorExperts +BTExperts
+> token xWdom
+> 117 MB
+> shared
+> Be1Ae1
+> 2.4 MB
+> Be2Ae2
+> 2.4 MB out
+> 122M FLOPs, 122 MB
+> ≈1.9 ×fewer
+
+Figure 4: Per-token forward pass (gate_proj, top-2 routing). (a) Original: two full expert matmuls. (b) REAP: identical per-token cost—pruning removes experts but top-k still runs k full survivors. (c) LorExperts +BTExperts for two co-selected experts sharing a dominant: the dominant is computed once and reused, plus two cheap rank-r
+
+corrections, cutting FLOPs and HBM reads ≈ 1.9× (kernel-independent). Adapted from the prior draft’s FLOP analysis. Table 4: Qwen3-30B-A3B ( ∼50% expert compression; uncompressed PPL = 8 .50 ). 
+
+Method Family PPL ↓ MMLU ARC-C HellaS WinoG PIQA Uncompressed — 8.50 77.8 52.6 59.6 71.0 79.4 M-SMoE merge 68.61 24.7 20.8 32.1 55.1 60.4 HC-SMoE merge 39.50 43.3 27.6 32.9 54.1 61.4 Freq-Prune prune 29.64 44.6 21.9 52.9 63.2 65.1 REAP prune 34.14 32.1 23.5 38.9 54.5 63.3 D2-MoE delta 23.58 45.7 40.8 51.7 66.9 70.5 LorExperts (WS-Frob) ours 12.36 42.4 32.4 55.5 71.1 76.4 LorExperts (WS-Frob+protK8) ours 11.79 53.7 41.1 55.7 71.0 76.9 LorExperts (Coact-NPMI) ours 12.20 54.1 37.1 52.6 68.4 75.3 LorExperts (M soft ) @40.6% ours 11.99 54.9 39.1 52.4 68.8 74.3 LorExperts (M soft ) @51% ours 15.37 46.0 28.8 45.5 63.8 68.4 
+
+guaranteed speedup. The reconstruction fine-tuning of Sec. 4 reaches the factors through ∼500 it-erative gradient steps over cached activations. That objective, however, is an activation-weighted low-rank regression , which has a closed-form optimum: whitening by the activation second moment and taking a single (generalized) SVD of the residual recovers the optimal rank-r factors directly. Re-placing the ∼500 optimization passes with one whitened SVD collapses the factor-fitting stage from O(T ) passes to O(1) —roughly two orders of magnitude (∼100 ×) less compute for that stage— while attaining the same rank-r optimum, so accu-racy is unchanged. Because factor fitting dominates the pipeline, this turns whole-model calibration into a short offline step rather than a bottleneck. We report this speedup as a relative multiplier; ab-solute wall-clock times are omitted. 
+
+7 Discussion 
+
+Why LorExperts works. The gains trace to one design choice grounded in Sec. 2: multiple local an-chors (per-cluster dominants) instead of one global root, so each anchor is close to its members and the method scales with E where single-root decompo-sition degrades. This preserves all experts and the original router. 
+
+Hessian-weighted fitting (ongoing work). 
+
+Sec. 6 introduces the activation-weighted closed-form solve as a way to replace the iterative recon-struction pass at equal quality. We note here that the same device is also a quality improvement in its own right over the plain-SVD default, and that it generalizes beyond the corrections. The default fit minimizes weight-space error 
+
+∥W − cW ∥F , which is not the quantity a layer emits. The error reaching the next layer is ∥X(W −
+
+cW )⊤∥F for the calibration activations X the router actually sends to that expert—a per-expert quantity Table 5: Gemma-4-26B-A4B ( ∼50% expert compression; uncompressed PPL ≈ 7.15 ).                                                                                      
+
+> Method Family PPL ↓MMLU ARC-C HellaS WinoG PIQA Uncompressed —∼7.15 74.3 64.5 63.4 76.1 82.2 M-SMoE @50% merge 14.94 27.8 38.9 74.8 73.7 79.2 HC-SMoE @50% merge 25.20 35.6 30.0 46.4 55.2 64.1 Freq-Prune @50% prune 11.57 34.8 48.5 79.6 74.6 81.3 REAP @50% prune 15.09 27.4 36.3 64.9 63.5 72.2 D2-MoE @50% delta 21.59 39.0 37.4 56.4 66.7 70.3 LorExperts (WS-Frob) @49.9% ours 13.50 26.3 36.4 74.4 74.4 78.0 LorExperts (WS-Frob+protK8) @49.9% ours 14.66 51.1 45.2 71.9 72.0 76.0 LorExperts (Coact-NPMI) @49.9% ours 14.42 50.1 42.7 55.5 68.0 68.8 LorExperts (M soft ) @41.4% ours 13.32 54.6 50.1 63.9 70.6 72.9 LorExperts (M soft ) @51.6% ours 18.54 47.4 38.8 48.4 62.4 65.8
+
+Figure 5: Compression–quality frontier for LorExperts (Coact-NPMI) on Qwen3-30B-A3B. As the expert com-pression ratio increases (top to bottom), downstream accuracy (MMLU, ARC-C, HellaSwag, WinoGrande, PIQA; bottom axis) stays near its uncompressed value through moderate compression and falls off mainly near 
+
+50% , while perplexity (dashed, top axis) rises gradually. 
+
+in an MoE, since each expert sees only its own slice of the tokens. With Ge = X⊤ 
+
+> e
+
+Xe = LeL⊤ 
+
+> e
+
+,minimizing the emitted error is again a truncation problem—of W L e rather than W —so it costs the same rank, the same storage r(I + H), and the same two matmuls at inference. In preliminary runs on Qwen3-30B-A3B this improves perplexity at matched storage for every variant we have tried. One MoE-specific caveat: Ge has H2 entries esti-mated from the tokens a single expert receives, so it needs substantially more calibration data than a diagonal or norm-based statistic, and experts that see fewer tokens than H rely on damping. The same reweighting extends to the shared com-ponents themselves, and there it also removes a structural weakness. For a shared component C
+
+serving expert set S with corrections Re, the opti-mal Hessian-weighted choice is closed-form, 
+
+C⋆ =
+
+h P 
+
+> e∈S
+
+(We − Re) Ge
+
+ih P 
+
+> e∈S
+
+Ge
+
+i−1
+
+,
+
+which is a traffic-weighted combination of the clus-ter rather than a member of it. Because C = 0 
+
+lies in the feasible set, a solved anchor can never be worse than using no anchor at all—a guarantee that selecting an existing expert as the dominant does not provide, and one that matters precisely when experts are near-orthogonal and the residual against another expert is larger than the expert it-self. Note that a solved anchor is no longer one of the experts, so the former dominant also needs a correction; at k=64 this is roughly a 10% increase in the expert budget, which must be returned by a small reduction in r. We are pursuing the full treatment, including its interaction with the BTEx-perts tree, where the component values change but the sharing structure—and hence the amortization factor—does not. 
+
+Limitations. 
+
+1. Calibration cost. Calibration is dominated by the per-member SVD and the short reconstruc-tion pass; a closed-form activation-weighted solve can replace the SVD (Sec. 6, Gate H) but is not yet the default. 2. Inference amortization is bounded. The BTExperts amortization benefit is routing-dependent and partly shared with any shared-component method; we report only fairly-baselined numbers (Sec. 5) and make no straw-man speedup claims. 
+
+8 Conclusion 
+
+We presented LorExperts , a router-preserving method for compressing Mixture-of-Experts weight matrices. Motivated by a mechanistic analysis of the “orthogonal experts” problem— experts are near-orthogonal in weight space yet or-ganize into functional co-activation communities— LorExperts keeps a full dominant per cluster and represents other experts as low-rank corrections to that local dominant, retaining all experts and the original router with no rerouting or router re-training. A lightweight reconstruction fine-tuning refines the factors, and BTExperts organizes domi-nants/corrections for inference-time amortization. Across Qwen3-30B-A3B and Gemma-4-26B-A4B at ∼50% expert compression, LorExperts preserves downstream capability—particularly knowledge- and reasoning-heavy accuracy (MMLU, ARC-C, HellaSwag)—better than prun-ing, merging, and single-shared-component de-composition (D 2-MoE), and its advantage over the latter grows with the expert count. 
+
+Future work. Higher-compression and full-model operating points; generation-benchmark evaluation; faster closed-form factor fitting at scale; and using the BTExperts structure for upcycling / MoE construction from dense checkpoints. 
+
+References 
+
+Samuel K. Ainsworth, Jonathan Hayase, and Siddhartha Srinivasa. 2023. Git re-basin: Merging models mod-ulo permutation symmetries. In International Con-ference on Learning Representations (ICLR) .Tom B. Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, Sandhini Agarwal, Ariel Herbert-Voss, Gretchen Krueger, Tom Henighan, Rewon Child, Aditya Ramesh, Daniel M. Ziegler, Jeffrey Wu, Clemens Winter, Christopher Hesse, Mark Chen, Eric Sigler, Mateusz Litwin, Scott Gray, Benjamin Chess, Jack Clark, Christopher Berner, Sam McCandlish, Alec Radford, Ilya Sutskever, and Dario Amodei. 2020. Language models are few-shot learners. In 
+
+Advances in Neural Information Processing Systems (NeurIPS) .I-Chun Chen, Hsu-Shen Liu, Wei-Fang Sun, Chen-Hao Chao, Yen-Chang Hsu, and Chun-Yi Lee. 2025. Retraining-free merging of sparse MoE via hierar-chical clustering. In International Conference on Machine Learning (ICML) , volume 267, pages 8594– 8620. Aakanksha Chowdhery, Sharan Narang, Jacob Devlin, Maarten Bosma, Gaurav Mishra, Adam Roberts, Paul Barham, Hyung Won Chung, Charles Sutton, Sebastian Gehrmann, Parker Schuh, Kensen Shi, Sasha Tsvyashchenko, Joshua Maynez, Abhishek Rao, Parker Barnes, Yi Tay, Noam Shazeer, Vin-odkumar Prabhakaran, Emily Reif, Nan Du, Ben Hutchinson, Reiner Pope, James Bradbury, Jacob Austin, Michael Isard, Guy Gur-Ari, Pengcheng Yin, Toju Duke, Anselm Levskaya, Sanjay Ghemawat, Sunipa Dev, Henryk Michalewski, Xavier Garcia, Vedant Misra, Kevin Robinson, Liam Fedus, Denny Zhou, Daphne Ippolito, David Luan, Hyeontaek Lim, Barret Zoph, Alexander Spiridonov, Ryan Sepassi, David Dohan, Shivani Agrawal, Mark Omernick, An-drew M. Dai, Thanumalayan Sankaranarayana Pil-lai, Marie Pellat, Aitor Lewkowycz, Erica Moreira, Rewon Child, Oleksandr Polozov, Katherine Lee, Zongwei Zhou, Xuezhi Wang, Brennan Saeta, Mark Diaz, Orhan Firat, Michele Catasta, Jason Wei, Kathy Meier-Hellstern, Douglas Eck, Jeff Dean, Slav Petrov, and Noah Fiedel. 2023. PaLM: Scaling language modeling with pathways. Journal of Machine Learn-ing Research , 24(240):1–113. Damai Dai, Chengqi Deng, Chenggang Zhao, R.X. Xu, Huazuo Gao, Deli Chen, Jiashi Li, Wangding Zeng, Xingkai Yu, Y. Wu, Zhenda Xie, Y.K. Li, Panpan Huang, Fuli Luo, Chong Ruan, Zhifang Sui, and Wen-feng Liang. 2024. DeepSeekMoE: Towards ultimate expert specialization in mixture-of-experts language models. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Vol-ume 1: Long Papers) , pages 1280–1297. Association for Computational Linguistics. Artyom Eliseev and Denis Mazur. 2023. Fast inference of mixture-of-experts language models with offload-ing. arXiv preprint arXiv:2312.17238 .Hao Gu, Wei Li, Lujun Li, Qiyuan Zhu, Mark G. Lee, Shengjie Sun, Wei Xue, and Yike Guo. 2025. Delta decompression for MoE-based LLMs compression. In International Conference on Machine Learning (ICML) , volume 267, pages 20497–20514. Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen. 2022. LoRA: Low-rank adaptation of large language models. In International Conference on Learning Representations (ICLR) .Ruijun Huang, Fang Dong, Xin Zhang, Hengjie Cao, Zhendong Huang, Anrui Chen, Jixian Zhou, Mengyi Chen, Yifeng Yang, Mingzhi Dong, Yujiang Wang, Jinlong Hou, Qin Lv, Robert P. Dick, Yuan Cheng, Fan Yang, Tun Lu, Chun Zhang, and Li Shang. 2026. SD-MoE: Spectral decomposition for effective expert specialization. arXiv preprint arXiv:2602.12556 .Albert Q. Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch, Blanche Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Emma Bou Hanna, Florian Bressand, Gi-anna Lengyel, Guillaume Bour, Guillaume Lam-ple, Lélio Renard Lavaud, Lucile Saulnier, Marie-Anne Lachaux, Pierre Stock, Sandeep Subramanian, Sophia Yang, Szymon Antoniak, Teven Le Scao, Théophile Gervet, Thibaut Lavril, Thomas Wang, Timothée Lacroix, and William El Sayed. 2024. Mix-tral of experts. arXiv preprint arXiv:2401.04088 .Mike Lasby, Ivan Lazarevich, Nish Sinnadurai, Sean Lie, Yani Ioannou, and Vithursan Thangarasa. 2026. REAP the experts: Why pruning prevails for one-shot MoE compression. In International Conference on Learning Representations (ICLR) .Pingzhi Li, Zhenyu Zhang, Prateek Yadav, Yi-Lin Sung, Yu Cheng, Mohit Bansal, and Tianlong Chen. 2024. Merge, then compress: Demystify efficient SMoE with hints from its routing policy. In International Conference on Learning Representations (ICLR) .Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timothée Lacroix, Baptiste Rozière, Naman Goyal, Eric Hambro, Faisal Azhar, Aurelien Rodriguez, Armand Joulin, Edouard Grave, and Guillaume Lample. 2023. LLaMA: Open and efficient foundation language models. arXiv preprint arXiv:2302.13971 .An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, Chujie Zheng, Dayi-heng Liu, Fan Zhou, Fei Huang, Feng Hu, Hao Ge, Haoran Wei, Huan Lin, Jialong Tang, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxi Yang, Jing Zhou, Jingren Zhou, Junyang Lin, Kai Dang, Keqin Bao, Kexin Yang, Le Yu, Lianghao Deng, Mei Li, Mingfeng Xue, Mingze Li, Pei Zhang, Peng Wang, Qin Zhu, Rui Men, Ruize Gao, Shixuan Liu, Shuang Luo, Tianhao Li, Tianyi Tang, Wenbiao Yin, Xingzhang Ren, Xinyu Wang, Xinyu Zhang, Xu-ancheng Ren, Yang Fan, Yang Su, Yichang Zhang, Yinger Zhang, Yu Wan, Yuqiong Liu, Zekun Wang, Zeyu Cui, Zhenru Zhang, Zhipeng Zhou, and Zihan Qiu. 2025. Qwen3 technical report. arXiv preprint arXiv:2505.09388 .
+
+A Ablations 
+
+Tree vs. flat (quality). A recurring question is whether organizing the low-rank corrections as a hierarchy (BTExperts) helps compression quality 
+
+relative to flat per-cluster decomposition. Table 6 answers it in a controlled study on Mixtral-8 ×7B (E=8 ) at matched compression: the two are in-distinguishable within noise, both zero-shot and after reconstruction fine-tuning. This confirms that BTExperts is a quality-neutral inference-time 
+
+organization (Sec. 5), not a compression-quality mechanism—its value is amortization, not accu-racy. 
+
+B Additional Co-Activation Views 
+
+The backbone graph in the main text (Fig. 2) sum-marizes the co-activation structure at layer 23. Fig-ure 6 shows the same kind of structure as a raw 
+
+Table 6: Tree (BTExperts) vs. flat per-cluster decom-position on Mixtral-8 ×7B ( E=8 ; layer 16, rank 32, 3 seeds), at matched compression. ∆PPL is the increase over the uncompressed baseline (lower is better); the hierarchy matches flat decomposition within noise.          
+
+> Method comp ∆PPL (zero-shot) ∆PPL (+recon-FT) BTExperts (tree) 7.5×0.112 ±0.012 0.099 ±0.011
+> D2-MoE (flat) 7.4×0.105 ±0.011 0.098 ±0.010
+
+Figure 6: Union-mean NPMI co-activation matrix at Qwen3-30B-A3B layer 47 (over 13 datasets), experts re-ordered by community: co-firing experts form clear diagonal blocks even though their weights are near-orthogonal. 
+
+NPMI heatmap at a late layer, and Fig. 7 reports how the dense co-activation cliques shift with net-work depth. Figure 7: Per-layer counts of dense expert cliques by size (Qwen3-30B-A3B). Both the number and the size of co-activation cliques vary with depth, so a uniform per-layer compression budget is suboptimal.

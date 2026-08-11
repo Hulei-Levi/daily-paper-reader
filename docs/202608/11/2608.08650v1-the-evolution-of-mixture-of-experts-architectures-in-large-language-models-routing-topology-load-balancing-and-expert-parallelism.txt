@@ -1,0 +1,1089 @@
+Title: The Evolution of Mixture-of-Experts Architectures in Large Language Models: Routing, Topology, Load Balancing, and Expert Parallelism
+
+URL Source: https://arxiv.org/pdf/2608.08650v1
+
+Published Time: Tue, 11 Aug 2026 01:36:15 GMT
+
+Number of Pages: 30
+
+Markdown Content:
+LLM MoE Architecture Evolution 
+
+# The Evolution of Mixture-of-Experts Architectures in Large Language Models 
+
+# Routing, Topology, Load Balancing, and Expert Parallelism 
+
+Jiguo Li 1
+
+jiguolee@gmail.com August 2026 
+
+Abstract 
+
+Mixture-of-Experts models increase parameter capacity while keeping the computation activated by each token bounded, but their architectural evolution cannot be explained by a chronological list of model releases alone. This techni-cal survey synthesizes primary papers, official technical reports, and prior surveys to organize modern Mixture-of-Experts systems along five coupled dimensions: expert granularity, expert topology, routing freedom, the scope of load balancing, and execution structure. We describe eight architectural milestones as a dependency graph with six mainline developments and two orthogonal branches, rather than as eight successive generations. We then analyze individual systems through four control planes: Expert Topology, Routing, Balance, and Expert Parallelism. These planes specify which experts exist, which experts process each token, how aggregate load is controlled, and how selected computation is mapped onto physical devices. The framework connects algorithmic choices such as Top-k routing, shared experts, fine-grained experts, and dynamic expert composition with systems concerns including token dispatch, device placement, all-to-all communication, and communication-computation overlap. We conclude with equal-budget pretraining experiments, quality and systems metrics, and open research questions. The main trend is a shift from merely activating more sparse parameters toward decoupling semantic routing, computational budgets, and physical execution. 
+
+Keywords: large language models; Mixture-of-Experts; sparse routing; load balancing; Expert Parallelism; dynamic com-putation; ScMoE 
+
+Key point: The eight milestones describe historical bottleneck migration, whereas the four control planes provide a structural view of an individual MoE system. They are complementary views, not two competing stage taxonomies. 
+
+> 1
+
+This report was completed with the assistance of Codex. 
+
+1arXiv:2608.08650v1 [cs.CL] 9 Aug 2026 LLM MoE Architecture Evolution CONTENTS 
+
+# Contents 
+
+1 Problem Definition and Analysis Scope 32 Unified formalization: What does MoE simultaneously optimize? 3
+
+2.1 Token-choice MoE . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 32.2 Three goals of capacity, quality and system efficiency . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 32.3 Four control planes: object, decision, control and execution . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 3
+
+3 Eight Evolutionary Milestones: Criteria, Mainline, and Branches 4
+
+3.1 Dense/Soft MoE: Statistical division of labor rather than computational sparsity . . . . . . . . . . . . . . . . . . . . . . 53.2 Sparse conditional computation: Top-k establishes capacity leverage . . . . . . . . . . . . . . . . . . . . . . . . . . . . 53.3 Transformer MoE and Expert Parallel . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 63.4 Open-Weight Coarse-Grained MoE . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 63.5 Shared + fine-grained experts . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 73.6 Ultra-sparse scaling . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 73.7 Dynamic compute: from fixed Top-k to token-dependent budget . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 73.8 Semantic routing decoupled from physical execution . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 8
+
+4 Expert topology: object layer 85 Routing: decision-making layer 96 Balance: control layer 10 
+
+6.1 Sequence/batch-wise expert balance . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 10 6.2 Device/node/communication-aware balance . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 10 6.3 Auxiliary-Loss-Free Load Balancing . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 10 6.4 Runtime expert placement . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 10 
+
+7 Expert Parallel: Execution Layer 11 8 The Modern Mainline and Frontier Branches 11 9 Experimental Design for Foundation-Model Pretraining 12 10 Open Questions 12 
+
+10.1 What is the correct unit of analysis for Specialization? . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 12 10.2 Where Is the Systems Optimum at Higher Sparsity? . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 13 10.3 Can Load Balancing Move Primarily to Runtime? . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 13 10.4 How Dynamic Compute Meets Tail Latency SLAs . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 13 10.5 How Can Post-Training Preserve Router Stability? . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 13 
+
+11 Summary and Outlook 13 A Architecture Evolution Cheat Sheet 13 References 15 
+
+2LLM MoE Architecture Evolution 2 UNIFIED FORMALIZATION: WHAT DOES MOE SIMULTANEOUSLY OPTIMIZE? 
+
+# 1 Problem Definition and Analysis Scope 
+
+Classic MoE research asks how a gating network allocates examples to local experts. Sparse MoE for large language mod-els adds a stricter requirement: total parameter capacity should grow without a proportional increase in the parameters and computation activated by each token. Existing surveys provide complementary perspectives: Cai et al. organize algorithms, systems, and applications into a full-stack taxonomy[1]; Liu et al. analyze model, system, and hardware optimizations for inference[2]; and Zhu et al. place MoE within a broader landscape of sparse attention, state-space models, and hybrid archi-tectures[3]. Rather than repeating a model-by-model chronology, this report asks a structural question: which bottleneck does each architectural change remove, and where does the bottleneck move next? 
+
+The scope of the discussion is limited to sparse MoE in decoder-only LLM pre-training, focusing on covering FFN MoE. Expert Parallel (EP), All-to-All, token capacity and expert placement, which will adversely affect structure selection, are also discussed. Multimodal MoE, MoE-LoRA, external model ensemble and pure post-training expert fusion are outside the scope of this article. Model capability numbers are only used to illustrate architecture scalability and cannot be used as causal comparisons across papers: training data, number of tokens, optimizers, context length, post-training and evaluation pollution control are often not consistent. 
+
+# 2 Unified formalization: What does MoE simultaneously optimize? 
+
+## 2.1 Token-choice MoE 
+
+Given the hidden representation 𝑥 𝑡 ∈ R𝑑 of the 𝑡 th token, Router calculates expert affinity: 
+
+𝑠 𝑖,𝑡 = 𝜙(𝑥 𝑡 , 𝑒 𝑖 ), 𝒦 𝑡 = TopK 𝑖∈{1,…,𝑁} (𝑠 𝑖,𝑡 ), (1) Among them, 𝑁 is the number of routed experts, and 𝑒 𝑖 is the expert routing embedding or Router weight. The output is 
+
+𝑦 𝑡 = 𝑥 𝑡 + ∑ 
+
+> 𝑖∈𝒦 𝑡
+
+𝑔 𝑖,𝑡 𝐸 𝑖 (𝑥 𝑡 ), 𝑔 𝑖,𝑡 = exp (𝑠 𝑖,𝑡 )∑𝑗∈𝒦 𝑡 exp (𝑠 𝑗,𝑡 ) . (2) If there are always-on shared experts, add ∑𝑗 𝐸 shared  
+
+> 𝑗
+
+(𝑥 𝑡 ) to the formula (2). From a formula perspective, MoE is just a sparse function combination; from a system perspective, 𝒦 𝑡 determines which devices the token spans, how many tokens each card gets, and the shape of each local GEMM. 
+
+## 2.2 Three goals of capacity, quality and system efficiency 
+
+MoE is not a single-objective optimization. Roughly speaking, the model hopes to maximize the total capacity 𝑃 total while controlling the single token activation amount 𝑃 active :
+
+𝑃 active ≈ 𝑃 dense + 𝑘 𝑁 𝑃 routed + 𝑃 shared , (3) However, the formula (3) is only an approximation of the parameter caliber: attention, embedding, shared experts, different expert widths and frame statistics methods will all cause deviations. On the other hand, let the number of tokens received by expert 𝑖 in a statistical window be 𝑛 𝑖 , then the load variation coefficient is CV expert = √ 1𝑁 ∑𝑖 (𝑛 𝑖 −̄ 𝑛) 2̄𝑛 . (4) Low CV benefits Expert Parallel throughput but does not necessarily indicate useful knowledge specialization. The archi-tectural tension is that semantic specialization may be uneven, while physical execution must avoid severe stragglers .
+
+## 2.3 Four control planes: object, decision, control and execution 
+
+The design questions in Table 1 operate at different levels. To separate historical architectural evolution from the internal operation of one MoE system, we organize the system cross-section by state variables, decision granularity, and update timescale into four control planes. Topology is a slowly changing model structure; Routing makes discrete token-level decisions; Balance aggregates statistics and applies feedback over groups of tokens; and Expert Parallelism (EP) realizes logical decisions as communication and kernels on physical devices. Chapter 3 follows bottleneck migration over time, whereas Chapters 4–7 analyze these four control planes. The control planes are not four additional stages of evolution. 
+
+> 3
+
+LLM MoE Architecture Evolution 3 EIGHT EVOLUTIONARY MILESTONES: CRITERIA, MAINLINE, AND BRANCHES 
+
+Table 1 Six questions that determine MoE architectural differences Design Issues Typical Choices Who chooses whom token-choice, expert-choice, balanced assignment, soft merging How many experts are activated fixed Top-1/2/8, threshold, adaptive-𝑘 , zero-compute slot Expert size coarse homogeneous, fine-grained, tiny, heterogeneous size Is there a public path pure routed, shared expert, dense residual, cross-layer shortcut In which range to balance sequence, micro-batch, global batch, device, node, communication Who handles runtime dynamics auxiliary loss, router bias, capacity/drop, placement, structural guarantees 
+
+Formally, the four-level relationship can be written as 
+
+ℰ = 𝑇(𝜃 topo ), Topology: construct the expert set, groups, and sharing relations ;𝒦 𝑡 = 𝑅(𝑥 𝑡 , ℰ; 𝜃 route , 𝑏), Routing: select an expert subset for token 𝑡; 𝑛 𝑖 = ∑ 
+
+> 𝑡
+
+1[𝑖 ∈ 𝒦 𝑡 ], (𝑏, 𝛼, 𝑐) ← 𝐶({𝑛 𝑖 }, 𝜋), Balance: update bias, loss, or capacity from aggregate load ;𝑦 𝑡 = EP (𝑥 𝑡 , 𝒦 𝑡 , 𝜋, 𝜎) , EP: execute dispatch and combine under placement 𝜋 and schedule 𝜎. 
+
+(5) Among them, ℰ is the logical expert set, 𝒦 𝑡 is the routing result of the token, 𝑛 𝑖 is the load of expert 𝑖 in the statistics window, 𝑏 , 𝛼 , and 𝑐 represent Router bias, auxiliary loss intensity and capacity respectively. Control volume, 𝜋 is the mapping from expert to device, and 𝜎 is communication and computing scheduling. Formula (5) explains: The four layers are not independent modules, but a closed loop. 
+
+Topology object layer definition ℰ with candidate constraints Routing decision-making level output 𝒦 𝑡 
+
+Expert Parallel Execution layer according to 𝜋, 𝜎 output 𝑦 𝑡 
+
+Balance control layer statistics 𝑛 𝑖 and device/node/communication load     
+
+> feedback:loss / bias / capacity →Routing;placement / replication →EP
+
+Figure 1 The closed-loop relationship between Topology, Routing, Balance and Expert Parallel. The first three solid lines form the forward execution chain, and the dashed lines represent the feedback of statistics and system costs on routing and placement. 
+
+There are two types of reverse dependencies between the four layers that cannot be ignored. First, the physical topology will constrain semantic routing: in order to reduce fan-out, device-limited routing actively reduces the candidate set visible to a certain token in ℰ. Second, Balance does not just tune the Router: runtime replication or expert placement can improve the physical load without changing 𝒦 𝑡 . Therefore, ”load balancing” cannot only be understood as an auxiliary loss, and ”Expert Parallel” is not a passive implementation that is intervened after the model structure is determined. 
+
+# 3 Eight Evolutionary Milestones: Criteria, Mainline, and Branches 
+
+The eight milestones are neither a fixed taxonomy copied from one survey nor a mechanical division by year. They are an analytical summary based on migration of the dominant bottleneck . A change qualifies as a milestone only if it satisfies three criteria. First, it introduces an independently adjustable design variable, such as Top-𝑘 , expert granularity, a shared path, or a dynamic active budget. Second, it moves the system’s principal bottleneck, for example from compute growing linearly with the number of experts, to discrete routing and load imbalance, and then to All-to-All communication, small GEMMs, or weight I/O. Third, later architectures inherit the change, so it is more than a one-off implementation detail. According to this standard, node 1–6 forms a clearer historical backbone: statistical division of labor → sparse activa-tion → Transformer scale → decoder-only productization → fine-grained knowledge organization → ultra-sparse capacity 
+
+4LLM MoE Architecture Evolution 3 EIGHT EVOLUTIONARY MILESTONES: CRITERIA, MAINLINE, AND BRANCHES 
+
+Table 2 Criteria for the division of the four control planes Control plane Core issue Main status and time scale Typical failure mode Topology object layer What experts are there, how big are they and how are they grouped or shared Weight structure; slow variables in architecture design/training period Knowledge redundancy, too coarse granularity, too heavy sharing paths Routing decision-making layer Which experts should be selected for the current token, how many to activate affinity, Top-𝑘 , candidate constraints; token-by-token fast variables misrouting, discrete optimization is difficult, semantics are topologically constrained Balance control layer Whether the usage distribution of a set of tokens meets training and system goals expert/device/node load; sequence to runtime multi-scale feedback collapse, over-uniformity, straggler, communication hotspot Expert Parallel execution layer Where, with what communication pattern and kernels, the selected expert is executed placement, dispatch/combine, scheduling; step/runtime variables exposed All-to-All time, small GEMMs, P99 latency, GPU-memory hotspots 
+
+expansion. Node 7 and node 8 are not simply new ”generations” that follow node 6: Node 7 relaxes the assumption that ”each token has a fixed amount of calculation”; node 8 relaxes the assumption that ”semantic routing, intra-layer expert topology and physical communication must be bound”. Both can be combined with the expert structure of node 5 or 6. Figure 2 shows this inheritance relationship. 
+
+1 Statistical division of labor Dense/Soft MoE 2 sparse activation Top-𝑘 conditional compute 3 Cluster scaling Transformer + EP 4 Productization open decoder MoE 5 Knowledge segmentation Fine-grained + shared 6 Capacity continues to expand Ultra-sparse scaling 7 Calculating Budget Dynamics adaptive-𝑘 / zero-compute experts 8 Semantic and physical decoupling ScMoE / Heterogeneous / Cross-layer / structured communication 
+
+Figure 2 The relationship between eight evolution nodes. Solid lines represent primary inheritance on the historical trunk, and dashed lines represent stackable orthogonal branches; node numbers do not represent strict generational replacement. 
+
+## 3.1 Dense/Soft MoE: Statistical division of labor rather than computational sparsity 
+
+Jacobs et al. proposed the basic form [4] of gating network and local experts in 1991. What this node establishes is statistical division of labor : gate generates mixed weights according to the input, different sub-networks fit different areas of the input space, and the training goals can promote specialization. Since all experts usually participate in weighting, routing is continuously differentiable, requiring neither token capacity nor sparse dispatch in the All-to-All sense. 
+
+Why is this a separate milestone? It established three roles retained by later MoE systems: a router or gate, a set of experts, and a weighted combination operator. Why is it not yet a modern sparse MoE? Increasing the number of experts still increases compute approximately linearly, so model capacity and FLOPs per token remain coupled. The next milestone preserves statistical specialization while executing only a small subset of experts, enabling conditional scaling but introducing optimization and systems problems associated with discrete selection. 
+
+## 3.2 Sparse conditional computation: Top-k establishes capacity leverage 
+
+Shazeer et al. applied noisy Top-𝑘 routing to very large sparse networks[5], so that only a few experts execute for each input. If the total number of experts is 𝑁 and each input activates only 𝑘 ≪ 𝑁 experts, total capacity can grow with 𝑁 while the dominant expert FLOPs scale approximately with 𝑘 . This establishes the central capacity lever of modern MoE: parameter 
+
+5LLM MoE Architecture Evolution 3 EIGHT EVOLUTIONARY MILESTONES: CRITERIA, MAINLINE, AND BRANCHES                        
+
+> Table 3 Division basis of eight nodes and bottleneck migration Node New design variable Dominant problem solved New bottleneck transferred out 1gating and expert spe-cialization It is difficult for a single model to model the input space partition All experts calculate, and the capacity is bound to FLOPs 2sparse Top-𝑘 and capac-ity total parameters decoupled from active FLOPs discrete routing, collapse, token drop 3EP, All-to-All, stabiliza-tion loss Cluster-level training of Trans-former MoE Communication, straggler, numerical and load stability 4decoder-only training and deployment closed loop proves that classic MoE can enter the open model ecosystem big expert knowledge redundancy, coarse combination granularity 5fine-grained, shared, de-vice limit Public knowledge duplication and insufficient expert combination fan-out, small GEMM, shared path fixed cost 6Larger 𝑁 , tiny experts, retrieval routing Continue to expand total capacity under fixed active budget Weighted I/O, retrieval, low token/expert 7adaptive compute / zero slots token has different difficulty but uses fixed Top-𝑘
+> active budget control, tail delay, training stability 8shortcut, heterogeneous/cross-layer topology, struc-tured communication Semantic routing is bound by de-vice topology and communication Scheduling complexity, cache consistency, large-scale verification
+
+capacity is decoupled from per-token compute .This decoupling is not free. Top-𝑘 causes unselected experts to have no gradient from this token; popular experts will overflow capacity, and unpopular experts may not be trained for a long time; dispatch/combine must also be added for cross-device execution. Therefore, noisy routing, importance/load auxiliary loss, capacity factor and token drop are not peripheral techniques, but supporting mechanisms induced by sparse execution itself. Node 3 does not change this basic algorithm, but answers: how to make MoE stable and executable when it is repeatedly embedded in Transformer layers and scaled to thousands of devices. 
+
+## 3.3 Transformer MoE and Expert Parallel 
+
+GShard systematically embeds Top-2 MoE FFN into Transformer and relies on automatic sharding to train on 2048 TPU multi-language model [6] with more than 600B . The classic execution chain is thus fixed as 
+
+Attention → Router → Dispatch All-to-All → Expert FFN → Combine All-to-All .The new variable of this node is not ”more experts”, but expert parallelism and cluster execution semantics : how tokens are rearranged across devices, how each expert is batch-processed, how overflows are handled, and how communication and calculation are synchronized. Switch Transformer further adopts Top-1, trading lower communication and simpler execution for expert combination capabilities and routing fault tolerance reduction [7]. ST-MoE elevates stability to a first-class design goal and introduces Router z-loss constraint logits numerical scale [8]. It needs to be distinguished: z-loss controls numerical stability, and balance loss controls usage distribution. The two are not the same mechanism. During the same period, BASE Layers wrote the training route as a strictly balanced linear allocation problem [9], while Expert Choice allowed experts to choose fixed capacity tokens [10]. They can directly guarantee equilibrium, but batch-level joint allocation and expert-side capacity are not as natural as token-choice for online autoregressive decoding, so they did not replace the Top-𝑘 backbone of decoder-only LLM. The legacy of node 3 is the complete system contract of ”Router + EP + capacity/balance + All-to-All”; nodes 4 and 5 both follow it, but shift the focus from ”can large-scale training” to model quality, deployment availability and expert internal organization. 
+
+## 3.4 Open-Weight Coarse-Grained MoE 
+
+Mixtral uses 8×7B parameters with Top-2 routing per token [11]. It did not introduce a new router family and therefore is not a milestone purely in terms of algorithmic novelty. Its importance is different: it demonstrated that a conventional   
+
+> 6LLM MoE Architecture Evolution 3EIGHT EVOLUTIONARY MILESTONES: CRITERIA, MAINLINE, AND BRANCHES
+
+coarse-grained MoE can support pretraining, instruction tuning, inference deployment, and community reproduc-tion in an open-weight decoder-only LLM. Why is this a separate milestone ? Node 3 demonstrates scalable training on very large clusters; node 4 establishes an end-to-end path from pretraining and instruction tuning to practical deployment for a general-purpose decoder model. It inherits Top-𝑘 , isomorphic experts, and EP without changing the basic execution chain. Once the system can run reliably, the main bottleneck shifts to knowledge organization: a small number of large experts tend to relearn common capabilities, while the Router can compose only coarse knowledge blocks. Node 5 addresses this bottleneck directly. 
+
+## 3.5 Shared + fine-grained experts 
+
+DeepSeekMoE makes two key changes to coarse-grained experts[12]. First, it splits a large FFN into multiple smaller experts, allowing the Router to compose more knowledge units under the same active budget. Second, shared-expert isolation moves knowledge needed by all tokens onto an always-on path, reducing redundancy among routed experts. The former increases 
+
+composition resolution , while the latter explicitly separates common and conditional capabilities. DeepSeek-V2 scales this structure to 236B total parameters and 21B active parameters , and adds device-limited routing: each token’s candidate experts are restricted to a small number of devices, thereby controlling cross-device fan-out[13]. Shared or dense paths can also provide computational windows that hide communications. DeepSeek-V2 combines shared expert computation with EP communication overlap; Snowflake Arctic’s dense residual path also reflects the similar algorithm – system collaboration [14]. But shared expert is not a necessary condition for fine-grained MoE . Qwen3-235B-A22B uses 128 fine-grained experts and Top-8 , but removes the shared expert and relies on global-batch balance to allow commonly used capabilities to naturally form [15] among routed experts. Therefore, node 5 actually contains two divisible axes: expert granularity and shared path. They are often combined, but there is no logical binding. Node 5 inherits the EP system of node 3, but increases the number of experts, Top-𝑘 , and device fan-out at the same time, making small GEMM, routing fragmentation, and communication topology new bottlenecks. Node 6 continues to expand along the lines of ”more and smaller experts”; Node 8 attempts to change the physical implementation of fan-out and communication. 
+
+## 3.6 Ultra-sparse scaling 
+
+The question at this stage is: with active parameters fixed, does increasing the total number of experts continue to reduce loss? 
+
+PEER uses product-key retrieval to select a small subset from more than one million tiny experts [16]. Kimi K2 scales an engineering-oriented ultra-sparse design to 1.04T total parameters, 32.6B active parameters, 384 routed experts, and Top-8 routing , and reports scaling gains from higher sparsity at a fixed active budget[17]. GPT-OSS-120B uses 128 experts with Top-4 routing and a relatively small active footprint, illustrating an ultra-sparse design intended for local deployment[18]. 
+
+Why separate ultra-sparse scaling from fine-grained experts? Fine-grained experts primarily reduce knowledge redundancy and increase composition resolution. Ultra-sparse scaling instead asks whether a larger candidate expert set continues to improve loss when active parameters and training FLOPs are fixed. Both increase expert count, but they optimize different objectives. 
+
+Sparsity cannot increase without bound. As 𝑁 grows, router scoring, expert-weight I/O, All-to-All metadata, and small-GEMM fragmentation all increase. When each expert receives too few tokens per step, theoretical FLOP savings no longer translate into wall-clock gains . Ultra-sparse scaling therefore depends more heavily on fine-grained organization and routing control rather than replacing them. The next two milestones relax different constraints of the fixed Top-𝑘 
+
+mainline. 
+
+## 3.7 Dynamic compute: from fixed Top-k to token-dependent budget 
+
+Fixed Top-𝑘 implies that every token receives the same number of expert FLOPs even when tokens differ in semantic difficulty and required capacity. LongCat-Flash introduces zero-computation experts: the router still selects a fixed number of slots, but some slots are identities, so actual FFN compute varies by token[19]. Adaptive-𝑘 , threshold routing, and zero-compute slots share the objective of decoupling which experts are selected from how much computation is allocated .
+
+Relationship to ultra-sparse scaling. Ultra-sparse scaling expands the candidate capacity 𝑁 while usually keeping 𝑘 
+
+fixed; dynamic computation changes the actual 𝑘 𝑡 , or the effective FFN compute, for each token. The two approaches can be combined: the candidate pool remains large, while easy tokens receive less compute and difficult tokens receive more. The control objective consequently expands from expert load alone to the mean active budget, budget variance, per-expert load,   
+
+> 7LLM MoE Architecture Evolution 4EXPERT TOPOLOGY: OBJECT LAYER
+
+and P99 latency. Constraining average training FLOPs does not guarantee tail latency because difficult tokens may cluster within a micro-batch or request window. The remaining issue of dynamic computing is closed-loop control: if the Router determines both the semantic expert and the computing budget, the balance bias affects both specialization and throughput; if only the long-term average is constrained, short-term bursts may occur. Therefore, adaptive bias/PID feedback, budget loss and runtime admission control are supporting issues and cannot be solved by simply modifying Top-𝑘 .
+
+## 3.8 Semantic routing decoupled from physical execution 
+
+Node 1–7 mainly changes Router’s optional expert or active budget; node 8 changes the lower-level assumption: seman-tically selecting an expert does not mean that it must be executed immediately along the fixed intra-layer All-to-All path . This node is not a single model family, but four frontier branches with a common goal. 
+
+Execution-dependency rearrangement. ScMoE does not change which experts a token selects; it changes the de-pendency graph. Its cross-layer shortcut lets routed experts consume an intermediate representation from the preceding layer while the current dense/shared path overlaps the dispatch/combine communication window[20]. It reduces exposed communication but does not directly solve routing skew. Figure 3 gives an abstract comparison.      
+
+> Attention / shortcut Dispatch Routed experts Combine Merge Dense/shared branch communication path with dense Computational parallelism
+> Figure 3 At its core, ScMoE is about rearranging execution dependencies to expand the communication hidden window; it is not a new routing algorithm.
+
+LongCat-Flash combines ScMoE with token-dimension chunking and Single Batch Overlap; the official LongCat-2.0 report further adopts fully parallel dense/MoE execution on each core of a dedicated accelerator[21]. These developments reduce exposed communication, but they do not automatically eliminate severe routing skew, heterogeneous expert runtimes, or GPU-memory pressure .
+
+Heterogeneous experts. MoHGE uses two-level routing: it first selects an expert group and then experts of different sizes within that group, together with group-wise and intra-group balancing constraints[22]. Equal expert width becomes a design variable rather than a default constraint, allowing different tokens to receive different forms of compute. The cost is greater complexity in heterogeneous GEMMs, capacity planning, and load metrics. 
+
+Cross-layer sharing. GMoE designates some experts as cross-layer Global Experts while retaining layer-local experts, reducing redundant capabilities across layers[23]. This differs from a conventional shared expert in scope: the former is reused across layers, whereas the latter is typically an always-on path within one layer. Cross-layer sharing introduces additional caching, scheduling, and inter-layer interference concerns. 
+
+Structured communication. Multi-Head LatentMoE and Head Parallel seek a topology whose communication vol-ume is 𝑂(1) with respect to the number of activated experts 𝑘 , yielding more predictable traffic[24]. Whereas ScMoE hides dynamic communication, this route attempts to reduce or structure the communication itself. In the absence of public validation at trillion-parameter and ten-thousand-accelerator scale, it should be treated as a research frontier, not as a mainstream replacement for Top-𝑘 expert parallelism .The four branches respectively optimize temporal overlap, computation structure, parameter reuse, and data movement. They are complementary and can be combined. 
+
+# 4 Expert topology: object layer 
+
+In the four-layer framework introduced in Chapter 2, Topology is the object layer. It defines the expert set ℰ, the granularity of each knowledge unit, the sharing scope, and computational heterogeneity before Routing makes token-level selections. The central question is therefore not simply how many experts exist, but what kinds of computational units the router can compose .It is not sufficient to understand the evolution of MoE only as the growth of expert count. Table 4 shows that what 
+
+> 8
+
+LLM MoE Architecture Evolution 5 ROUTING: DECISION-MAKING LAYER 
+
+really changes is the granularity, sharing scope and computing heterogeneity of knowledge units. 
+
+Table 4 The main evolution route of Expert topology Topology Representative work Main benefit New bottleneck A small number of isomor-phic experts GShard, Switch, Mixtral Realize conditional scaling Knowledge duplication, limited combinability Shared/dense + routed DeepSeekMoE, Arctic Public knowledge isolation, can create overlap window Fixed FLOPs increase, public path may be overweight Fine-grained experts DeepSeek-V2/V3, Qwen3 Fine-grained experts combination, higher total/active ratio Routing, communication and GEMM updated Ultra-sparse experts PEER, Kimi K2, gpt-oss Continue to expand capacity under fixed FLOPs Retrieval, weighted I/O, low token/expert Heterogeneous/dynamic LongCat, MoHGE Token-level dynamic computing budget budget control coupled with physical equalization Cross-layer global/local GMoE Reduce cross-layer expert redundancy Scheduling, caching and inter-layer interference need to be verified Latent/head structured Multi-Head LatentMoE Communication deterministic, decoupled from 𝑘 
+
+Insufficient evidence of large-scale quality 
+
+Another dimension that is often overlooked is the initialization method. Sparse Upcycling copies the existing dense FFN into multiple experts, and then adds a new Router to continue training [25]. It reuses dense checkpoints, but brings expert symmetry. It requires routing noise, data differences and subsequent training to differentiate the experts. Further Expert Upcycling is extended from the existing 𝐸 -expert MoE to 𝑚𝐸 experts, while keeping Top-𝑘 and active cost unchanged [26]. Upcycling is not a new Router family, but it will change the formation path and training cost of specialization. 
+
+# 5 Routing: decision-making layer 
+
+In the closed loop of Figure 1, Routing receives the expert set defined by Topology and the candidate constraints imposed by the system, and generates 𝒦 𝑡 for each token. It optimizes local semantic matching ; it does not directly guarantee a reasonable aggregate load over a sequence, batch, or device. The latter belongs to the Balance control plane discussed in Section 6. 
+
+Table 5 Main Router families and their applicable boundaries Router family Decision-making unit Balance characteristics decoder-only LLM Applicability Noisy Top-𝑘 token-choice token selection experts requires loss, bias or runtime balance current trunk, online naturally Top-1 Switch token choose 1 expert Simple communication, more sensitive capacity Expandable, but limited combination ability Balanced assignment batch joint assignment Strictly equal during training Global solution is complex and unnatural online Expert-choice expert select tokens expert capacity is naturally fixed encoder is more natural, decoder capacity is difficult to process Soft/parameter merging Continuous mixing Differentiable, non-dispersion Top-𝑘 
+
+Large-scale EP efficiency not yet proven Bias-controlled Top-𝑘 affinity + non-gradient bias does not write the balanced gradient into the LM parameter DeepSeek-V3 and other models use Zero experts/adaptive-𝑘 token The amount of cal-culation is variable The average budget and tail need to be constrained The important direction of dynamic calculation 9LLM MoE Architecture Evolution 6 BALANCE: CONTROL LAYER 
+
+The fact that Token-choice has become mainstream does not mean that it is optimal in terms of optimization, but that it is the most consistent with the autoregressive online constraints: the routing of the current token only relies on the current state, and there is no need to wait for future tokens or solve the global distribution of the entire batch. Continuous routing schemes such as Soft MoE and Lory avoid discrete Top-𝑘 , but the system advantages have not yet been proven on ultra-large-scale decoder and low-latency EP[27, 28]. Routing freedom is also constrained by network topology. Device-limited or node-limited routing limits candidate experts to a small number of devices/nodes to reduce single-token communication fan-out. The trade-off is that the seman-tically optimal expert may be excluded by topological constraints, so this type of design is inherently an explicit trade-off between quality and communication. 
+
+# 6 Balance: control layer 
+
+Balance does not redefine experts, nor does it independently generate semantic routes for tokens. It observes the {𝑛 𝑖 } and equipment, nodes and communication loads accumulated from many routing decisions, and then feeds back to the decision-making and execution layers through loss, bias, capacity or runtime placement. The core problem is: while allows uneven semantic specialization, how to avoid training collapse and physical straggler .
+
+## 6.1 Sequence/batch-wise expert balance 
+
+The classic auxiliary loss can be written as 
+
+ℒbal = 𝛼𝑁 
+
+> 𝑁
+
+∑
+
+> 𝑖=1
+
+𝑓 𝑖 𝑃 𝑖 , (6) Among them, 𝑓 𝑖 is the token fraction actually assigned to expert 𝑖 in the statistical window, 𝑃 𝑖 is the average routing prob-ability, and 𝛼 controls the equalization intensity. When all experts use approximately uniform values, the formula (6) is smaller. This loss is responsible for both preventing expert collapse and avoiding EP straggler, but they are not equivalent: the model may require uneven specialization, but the hardware hopes to have an even load. When 𝛼 is too large, the hardware target directly interferes with the language modeling gradient. 
+
+## 6.2 Device/node/communication-aware balance 
+
+DeepSeek-V2 splits the balance into expert-level, device-level and communication balance, and controls fan-out[13] through device-limited routing. The key to this change is not to add a few more losses, but to acknowledge that logical expert balance is not equal to physical device or network balance : If there are multiple experts on a device, as long as the total tokens between devices are close, it is not necessarily necessary that all experts are completely equal. 
+
+## 6.3 Auxiliary-Loss-Free Load Balancing 
+
+The Auxiliary-Loss-Free (ALF) strategy adds non-gradient routing bias 𝑏 𝑖 to each expert: 
+
+𝒦 𝑡 = TopK 𝑖 (𝑠 𝑖,𝑡 + 𝑏 𝑖 ), 𝑏 𝑖 ← 𝑏 𝑖 + 𝜂 sign (̄𝑛 − 𝑛 𝑖 ), (7) Where 𝜂 is the bias update speed. The bias affects the Top-𝑘 selection, but does not participate in the LM gradient as an affinity weight, thereby reducing the direct interference of the equilibrium target on the model parameter update direction [29]. DeepSeek-V3 uses batch-wise ALF as the main balancing mechanism, while retaining a very weak sequence-wise auxiliary loss to prevent extreme single-sequence imbalance [30]. Therefore, ”DeepSeek-V3 has no balance loss at all” is not accurate .Global-batch statistics are more stable than single micro-batch, and also allow some experts to carry more specific domain tokens on local batches; the cost is that load needs to be aggregated across DP/EP ranges, and expanding the statistical range may introduce additional communication. 
+
+## 6.4 Runtime expert placement 
+
+Balance on the training distribution cannot guarantee true inference traffic. Domain shift, SFT/RL and off balance updates all change expert popularity. DeepSeek-V3 uses redundant expert deployment, replicates hotspot experts and adjusts place-ment[30] at runtime. This trend re-partitions the goals: Routers can preserve semantically non-uniform specialization, and runtimes avoid device stragglers by copying, migrating, or relocating them.    
+
+> 10 LLM MoE Architecture Evolution 8THE MODERN MAINLINE AND FRONTIER BRANCHES Sequence/Batch expert balance Device/Node/ Communication Global-batch ALF bias Runtime replication and placement
+> Figure 4 The evolution of Balance is not to simply weaken the constraints, but to gradually separate the physical execution goals from the LM gradient.
+
+# 7 Expert Parallel: Execution Layer 
+
+EP consumes the token–expert assignment generated by Routing, and combines it with placement 𝜋 to convert the logical expert into dispatch, local GEMM and combine on the device. It usually does not change ”who is semantically selected”, but determines the wall-clock cost of this selection; when the system cost is too high, the first three layers will be reversely modified through device-limited routing, placement or architectural reconstruction. The algorithmic benefits of MoE only hold true if the sparse execution is efficient. The capacity-based system reserves fixed token slots for each expert, and overflow tokens are discarded or used as residual, which can easily cause inconsistency between training and inference. MegaBlocks uses block-sparse kernels to implement dropless MoE, so that dynamic token shapes no longer require token dropping[31]. Systems such as Tutel dynamically select parallel and pipeline strategies to adapt to different cluster sizes.[32]. As experts become thinner and Top-𝑘 becomes larger, communication gradually becomes a first-class architectural constraint, driving three processing methods: 1. Limited communication topology : device/node-limited routing reduces fan-out; 2. Hidden communication : shared computation overlap, DualPipe, ScMoE and token chunking expand the overlap window; 3. Reconstruct communication : Head Parallel and other solutions turn dynamic traffic into a more deterministic com-munication mode. Here must distinguish between ”total All-to-All time” and ”exposed communication time” . If the communication is completely covered by the dense path, the marginal benefit of continuing to optimize the link bandwidth on the end-to-end step time will decrease; conversely, even if the total communication volume remains unchanged, as long as the critical path is shortened, the throughput may be significantly improved. Therefore, the training report should at least give the traffic volume, overlap ratio, exposed dispatch/combine, MFU and step-time P99 .
+
+# 8 The Modern Mainline and Frontier Branches 
+
+As of 2026, the most common combinations of large-scale decoder MoE can be summarized as: Token-choice Top-𝑘 + fine-grained experts + optional shared path + global/batch-wise balance or ALF + topology-limited routing + dropless kernels/communication overlap + runtime expert placement DeepSeek-V3, Qwen3 and Kimi K2 differ in shared expert, balance mechanism and EP size, but they are all located on this backbone. At the same time, the following branches have not yet reached a unified conclusion: • MoE Attention : JetMoE sparses Attention and FFN at the same time, further reducing active FLOPs, but KV/cache and routing are more complex [33]; • Hybrid mixer + MoE : Jamba alternates between Transformer and Mamba layers, indicating that MoE is a parameter expansion method and does not bind the full Attention backbone[34]; • Million experts : High theoretical composability, but weighted I/O, small GEMM and retrieval overhead still limit industrial deployment; • Heterogeneous experts : Choose different capacities according to token difficulty, with natural expression, but physical placement and tail delay are more difficult; • Cross-layer global experts : The goal is to eliminate inter-layer duplication capabilities, but there is still a lack of evidence for very large-scale training; • Structured communication : Head Parallel may reduce the pain point of dynamic EP, but it is still in the early verifi-cation stage. Table 6 compares representative models based on architecture selection rather than benchmark ranking. 
+
+> 11
+
+LLM MoE Architecture Evolution 10 OPEN QUESTIONS 
+
+Table 6 Architectural location of representative LLM MoE; active parameter size varies by report                                            
+
+> Model Year Total/Active Experts/Top-𝑘 Architectural significance GShard 2020 >600B/Not uniformly disclosed Top-2 Transformer MoE with automatic sharding Switch 2021 up to 1T+ Top-1 Exchange throughput and scalability with simple routing Mixtral 8 ×7B 2024 46.7B/12.9B 8/2 Open coarse-grained MoE Benchmark DeepSeek-V2 2024 236B/21B 160/6 fine-grained, shared, device-limited DeepSeek-V3 2024 671B/37B 256/8 ALF, weak seq loss, node-limited Qwen3-235B-A22B 2025 235B/22B 128/8 fine-grained, no shared, global balance Kimi K2 2025 1.04T/32.6B 384/8 ultra-sparse scaling gpt-oss-120b 2025 116.8B/5.1B 128/4 Small active footprint and deployment orientation LongCat-Flash 2025 560B/18.6–31.3B real + zero Dynamic Compute Budget with ScMoE LongCat-2.0 2026 1.6T/33–56B dynamic dense/MoE per-core parallel
+
+# 9 Experimental Design for Foundation-Model Pretraining 
+
+cross-model benchmark cannot identify architectural contributions. To determine whether fine-grained, shared, ALF or ScMoE is effective, you should at least fix the training token, data ratio, active parameters and optimizer at the same time, and report training-FLOPs-matched and wall-clock-matched result. 
+
+Table 7 Proposed equal-budget MoE ablation matrix Experiment dimension Recommendation setting Core indicator Expert granularity Fixed total/active params and tokens, scan expert count, width, Top-𝑘 
+
+val loss, downstream, token/expert, GEMM efficiency Shared vs emergent shared; no shared+global loss; no shared+ALF expert similarity, domain-routing MI, active FLOPs Balance scope sequence aux, global aux, ALF, ALF+weak seq max/mean load, CV/Gini, entropy, specialization Execution topology serial EP, shared overlap, ScMoE, runtime EPLB exposed communication, MFU, step time, TPOT, P99 Dynamic compute fixed Top-𝑘 , threshold, zero experts active-param mean/variance, bucketing loss, throughput and tail delay Upcycling scratch, dense-copy, cluster/utility-aware copy Symmetry breaking speed, loss/token, GPU hours 
+
+For code pre-training scenarios, it is recommended to additionally bucket statistics by language, repo/file/function granularity, code and natural language token routing. Key observations include: expert co-activation in different languages, whether cross-file reference tokens are concentrated in a small number of experts, whether code and code-related documents share experts, and whether long repo-level sequences cause sequence-wise load peaks. Only in this way can we distinguish between ”experts forming beneficial specialization” and ”data matching causing accidental traffic skew”. The system side should at least record at the same time: • max/mean, CV and Gini at the three levels of expert, device and node; Load under the three statistical windows of • sequence, micro-batch, and global batch; • dispatch/combine exposed time, not just the total All-to-All time; • token drop, capacity overflow, redundant expert hit rate; • training FLOPs, active parameters, wall-clock and cluster network topology. 
+
+# 10 Open Questions 
+
+## 10.1 What is the correct unit of analysis for Specialization? 
+
+”Mathematical expert” or ”code expert” are intuitive narratives, but actual routing is often represented by a combination of token morphology, syntax, location, language, and hierarchy. A single expert may not be a stable semantic unit, and a cross-layer expert group or co-activation pattern may be more interpretable. In the future, routing mutual information, 
+
+12 LLM MoE Architecture Evolution A ARCHITECTURE EVOLUTION CHEAT SHEET 
+
+expert representation similarity and intervention-based causal test should be combined instead of just showing token word cloud. 
+
+## 10.2 Where Is the Systems Optimum at Higher Sparsity? 
+
+Increasing total experts under fixed active FLOPs may reduce model loss, but system benefits are limited by network band-width, expert weight I/O, batch size and kernel arithmetic intensity. The optimal sparsity is not a pure model constant, but the model – hardware joint scaling law. The EP size, network topology, and number of tokens per expert must be given when reporting this conclusion. 
+
+## 10.3 Can Load Balancing Move Primarily to Runtime? 
+
+ALF reduces the gradient interference of the auxiliary loss, but still changes the Top-𝑘 selection. Runtime replication and placement can allow more freedom in semantic routing, but will bring parameter copy memory, migration costs and cache consistency issues. The optimal boundary between weak constraints in training and strong equilibrium at runtime remains undetermined. 
+
+## 10.4 How Dynamic Compute Meets Tail Latency SLAs 
+
+Zero experts or adaptive-𝑘 can reduce average FLOPs, but difficult tokens will create new stragglers if they are in the same micro-batch or request window. The model needs to control average budget, budget variance, and P99 simultaneously, rather than just reporting average active parameters. 
+
+## 10.5 How Can Post-Training Preserve Router Stability? 
+
+SFT/RL data will change the domain distribution and sequence shape, thereby changing the expert load. Whether to retain balance updates, routing replay, and freeze Routers during the training phase cannot be directly extrapolated from the pre-training settings. Routing drift and specialization retention should be measured separately in the pretrain, SFT and RL stages. 
+
+# 11 Summary and Outlook 
+
+The architectural history of LLM MoE is not a single-line expansion of ”more and more experts”, but the co-evolution of five routes: expert has changed from a small number of large modules to fine-grained, ultra-sparse and heterogeneous computing units; the topology has developed from layer-local routed experts to shared, cross-layer global/local and latent-head structures; Router has evolved from simple Top-𝑘 gradually adds global statistics, bias control and dynamic computing budget; balance moves from sequence-wise auxiliary loss to device/communication-aware, ALF and runtime placement; execution develops from serial All-to-All to dropless kernels, topology-limited routing, ScMoE overlap and structured com-munication. Therefore, there is no unique ”next-generation structure” after ScMoE. A more credible direction is a combination of four: freer semantic routing, explicit average computing budget control, topology awareness or deterministic communication, and runtime expert placement. Architecture evaluation must also be expanded from a single validation loss to a joint analysis of quality, specialization, active budget, exposed communication, and tail latency. For the next round of large-scale pretraining, the most informative experiment is not a direct comparison of final benchmark scores from two different recipes. Instead, construct a controlled matrix with the same data, token budget, and active FLOPs , then vary expert granularity, the shared path, balancing scope, and execution topology separately. This separation is necessary to distinguish gains from parameter capacity, routing specialization, and systems throughput ,and to derive MoE design conclusions that transfer to new hardware. 
+
+# A Architecture Evolution Cheat Sheet    
+
+> 13 LLM MoE Architecture Evolution AARCHITECTURE EVOLUTION CHEAT SHEET
+> Table 8 Bottleneck migration of MoE architecture evolution
+
+Period Representative work Main problems solved New bottlenecks transferred out 1991–2016 Adaptive Mixtures Learning soft division of labor Computation increases linearly with the number of experts 2017–2019 Sparse MoE Parameter capacity and single to-ken FLOPs decoupling collapse, capacity, All-to-All 2020–2022 GShard, Switch, ST-MoE Transformer Large-scale sparse training Stability, token drop, routing quality 2023–2024 Mixtral Open decoder MoE availability Coarse-grained and knowledge re-dundant 2024–2025 DeepSeekMoE/V2, Qwen3 Fine-grained combination and public knowledge processing Communication fan-out, small GEMM, balance scope 2024–2025 PEER, Kimi K2, gpt-oss ultra-sparse capacity expansion retrieval, I/O, low token/expert 2024–2026 ALF, LongCat, ScMoE Reduce gradient interference and hidden communication Runtime dynamic load and tail delay 2025–2026 MoHGE, GMoE, Head Parallel Heterogeneous computing, cross-layer sharing, structured communi-cation Ultra-large-scale quality and system verification 
+
+> 14
+
+LLM MoE Architecture Evolution REFERENCES 
+
+# References 
+
+[1] Cai W, et al. A Survey on Mixture of Experts in Large Language Models. IEEE Transactions on Knowledge and Data Engineering, 2025. https://arxiv.org/abs/2407.06204 .[2] Liu J, et al. A Survey on Inference Optimization Techniques for Mixture of Experts Models. arXiv:2412.14219, 2024. 
+
+> https://arxiv.org/abs/2412.14219
+
+.[3] Zhu X, et al. Speed Always Wins: A Survey on Efficient Architectures for Large Language Models. arXiv:2508.09834, 2025. 
+
+> https://arxiv.org/abs/2508.09834
+
+.[4] Jacobs R A, Jordan M I, Nowlan S J, Hinton G E. Adaptive Mixtures of Local Experts. Neural Computation, 3(1):79–87, 1991. doi:10.1162/neco.1991.3.1.79. [5] Shazeer N, et al. Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer. ICLR, 2017. 
+
+> https://arxiv.org/abs/1701.06538
+
+.[6] Lepikhin D, et al. GShard: Scaling Giant Models with Conditional Computation and Automatic Sharding. ICLR, 2021. 
+
+> https://arxiv.org/abs/2006.16668
+
+.[7] Fedus W, Zoph B, Shazeer N. Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity. Journal of Machine Learning Research, 23(120):1–39, 2022. https://arxiv.org/abs/2101.03961 .[8] Zoph B, et al. ST-MoE: Designing Stable and Transferable Sparse Expert Models. arXiv:2202.08906, 2022. 
+
+> https://arxiv.org/abs/2202.08906
+
+.[9] Lewis M, et al. BASE Layers: Simplifying Training of Large, Sparse Models. ICML, 2021. 
+
+> https://arxiv.org/abs/2103.16716
+
+.[10] Zhou Y, et al. Mixture-of-Experts with Expert Choice Routing. NeurIPS, 2022. https://arxiv.org/abs/2202.09368 .[11] Jiang A Q, et al. Mixtral of Experts. arXiv:2401.04088, 2024. https://arxiv.org/abs/2401.04088 .[12] Dai D, et al. DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models. ACL, 2024. 
+
+> https://arxiv.org/abs/2401.06066
+
+.[13] DeepSeek-AI. DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model. arXiv:2405.04434, 2024. 
+
+> https://arxiv.org/abs/2405.04434
+
+.[14] Snowflake. Arctic: Snowflake’s Open-Source LLM. Official Technical Blog, 2024. Accessed 2026-08-07. 
+
+> https://www.snowflake.com/en/blog/arctic-open-efficient-foundation-language-models-snowflake/
+
+.[15] Qwen Team. Qwen3 Technical Report. arXiv:2505.09388, 2025. https://arxiv.org/abs/2505.09388 .[16] He X. Mixture of A Million Experts. arXiv:2407.04153, 2024. https://arxiv.org/abs/2407.04153 .[17] Moonshot AI. Kimi K2: Open Agentic Intelligence. arXiv:2507.20534, 2025. https://arxiv.org/abs/2507.20534 .[18] OpenAI. gpt-oss Model Card: Architecture. 2025. Accessed 2026-08-07. 
+
+> https://deploymentsafety.openai.com/gpt-oss/architecture
+
+.[19] LongCat Team. LongCat-Flash Technical Report. arXiv:2509.01322, 2025. https://arxiv.org/abs/2509.01322 .[20] Cai W, et al. Shortcut-connected Expert Parallelism for Accelerating Mixture-of-Experts. arXiv:2404.05019, 2024. 
+
+> https://arxiv.org/abs/2404.05019
+
+.[21] LongCat Team. LongCat 2.0 Technical Blog. 2026. Accessed 2026-08-07. https://longcat.ai/blog/longcat-2.0/ .[22] MoHGE Authors. MoHGE: Mixture of Heterogeneous Grouped Experts. ACL Industry Track, 2026. 
+
+> https://aclanthology.org/2026.acl-industry.20/
+
+.[23] GMoE Authors. GMoE: Global Mixture-of-Experts. ACL, 2026. https://aclanthology.org/2026.acl-long.2065/ .[24] Cui Y, et al. Multi-Head LatentMoE and Head Parallel. arXiv:2602.04870, 2026. https://arxiv.org/abs/2602.04870 .[25] Komatsuzaki A, et al. Sparse Upcycling: Training Mixture-of-Experts from Dense Checkpoints. arXiv:2212.05055, 2022. 
+
+> https://arxiv.org/abs/2212.05055
+
+.[26] Expert Upcycling Authors. Expert Upcycling: Training Larger MoE Models from Smaller MoE Checkpoints. arXiv:2604.19835, 2026. https://arxiv.org/abs/2604.19835 .[27] Puigcerver J, et al. From Sparse to Soft Mixtures of Experts. ICLR, 2024. https://arxiv.org/abs/2308.00951 .[28] Zhong Z, et al. Lory: Fully Differentiable Mixture-of-Experts for Autoregressive Language Model Pre-training. COLM, 2024. 
+
+> https://arxiv.org/abs/2405.03133
+
+.15 LLM MoE Architecture Evolution REFERENCES [29] Wang Q, et al. Auxiliary-Loss-Free Load Balancing Strategy for Mixture-of-Experts. arXiv:2408.15664, 2024. 
+
+> https://arxiv.org/abs/2408.15664
+
+.[30] DeepSeek-AI. DeepSeek-V3 Technical Report. arXiv:2412.19437, 2024. https://arxiv.org/abs/2412.19437 .[31] Gale T, et al. MegaBlocks: Efficient Sparse Training with Mixture-of-Experts. MLSys, 2023. 
+
+> https://arxiv.org/abs/2211.15841
+
+.[32] Hwang C, et al. Tutel: Adaptive Mixture-of-Experts at Scale. MLSys, 2023. https://arxiv.org/abs/2206.03382 .[33] Shen Y, et al. JetMoE: Reaching Llama2 Performance with 0.1M Dollars. arXiv:2404.07413, 2024. 
+
+> https://arxiv.org/abs/2404.07413
+
+.[34] Lieber O, et al. Jamba: A Hybrid Transformer–Mamba Language Model. arXiv:2403.19887, 2024. 
+
+> https://arxiv.org/abs/2403.19887
+
+.16 LLM MoE 架构演进 
+
+# LLM MoE 架构演进：从稀疏路由到动态计 算与通信结构重构 
+
+# Expert Topology 、Routing 、Load Balance 与 Expert Parallel 的协同演化 
+
+Jiguo Li 1
+
+jiguolee@gmail.com 2026 年 8 月
+
+摘要 
+
+Mixture-of-Experts （MoE ）已经成为大语言模型在固定单 token 计算预算下扩展参数容量的核心架构之一。然 而，若只按模型发布时间罗列 GShard 、Switch 、Mixtral 、DeepSeekMoE 、DeepSeek-V3 与新近动态 MoE ，会掩盖 真正推动结构变化的瓶颈迁移。本文综合算法、推理系统和高效架构三类 Survey ，并回到代表性原始论文与官方 技术报告，提出一个由五条耦合路线构成的统一框架： expert 粒度、 expert 拓扑、路由自由度、负载均衡作用域 和执行结构。基于该框架，本文把 MoE 演进归纳为八个演进节点；它们不是八代模型的线性年表，而是由六个 主干节点与两个正交分支构成的依赖图。在历史时间轴之外，本文进一步用 Expert topology 、Routing 、Balance 和
+
+Expert Parallel 四个控制面剖解任一代 MoE 的内部工作机制，分别回答“有哪些专家、每个 token 选谁、群体负载 如何受控、选中的计算如何映射到设备” 。最后给出适用于基座预训练的等预算实验设计、系统指标和仍待解决 的研究问题。 核心结论是：现代 MoE 的竞争焦点已从“稀疏激活更多参数”转向“让语义路由、计算预算和物 理执行解耦” 。
+
+关键词： 大语言模型； Mixture-of-Experts ；稀疏路由；负载均衡； Expert Parallel ；动态计算； ScMoE 
+
+阅读提要： 第三章的八个节点描述历史上的瓶颈迁移； 第四至七章则从 topology 、routing 、balance 和 Expert Parallel 四个控制面剖解单个 MoE 系统。前者是时间轴，后者是系统剖面，不能视为两套并列的“发展阶 段” 。
+
+> 1
+
+本文在 Codex 协助下完成 
+
+17 LLM MoE 架构演进 目录 
+
+# 目录 
+
+A 问题定义与分析范围 19 B 统一形式化： MoE 同时优化什么 19 
+
+B.1 Token-choice MoE . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 19 B.2 容量、质量与系统效率的三目标 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 19 B.3 四个控制面：对象、决策、控制与执行 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 19 
+
+C 八个演进节点：划分标准、主干与分支 20 
+
+C.1 Dense/Soft MoE ：统计分工而非计算稀疏 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 21 C.2 Sparse conditional computation ：Top-k 建立容量杠杆 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 21 C.3 Transformer MoE 与 Expert Parallel . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 22 C.4 开放权重 coarse-grained MoE . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 22 C.5 Shared + fine-grained experts . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 22 C.6 Ultra-sparse scaling . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 22 C.7 动态计算：从固定 Top-k 到 token-dependent budget . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 23 C.8 语义路由与物理执行解耦 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 23 
+
+D Expert topology ：对象层 23 E Routing ：决策层 24 F Balance ：控制层 24 
+
+F.1 Sequence/batch-wise expert balance . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25 F.2 Device/node/communication-aware balance . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25 F.3 Auxiliary-Loss-Free Load Balancing . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25 F.4 Runtime expert placement . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25 
+
+G Expert Parallel ：执行层 25 H 现代主干与前沿分支 26 I 面向基座预训练的实验设计 26 J 开放问题 26 
+
+J.1 Specialization 的正确分析单位是什么 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 27 J.2 更高 sparsity 的系统最优点在哪里 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 27 J.3 Balance 能否主要下沉到 runtime . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 27 J.4 动态计算如何满足尾延迟 SLA . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 27 J.5 Post-training 如何保持 Router 稳定 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 27 
+
+K 总结与展望 27 A 架构演进速查表 28 
+
+参考文献 29 
+
+18 LLM MoE 架构演进 B 统一形式化： MOE 同时优化什么 
+
+# A 问题定义与分析范围 
+
+经典 MoE 研究关注如何让 gating network 将样本分配给不同局部专家； LLM 时代的稀疏 MoE 则额外要求： 总参数 容量增长时，每个 token 的激活参数和计算量不能同比增长。现有三类综述分别提供互补视角： Cai 等人的 Survey 
+
+按算法、系统和应用建立全栈 taxonomy[1] ；Liu 等人重点拆解推理阶段的模型、系统与硬件优化 [2]; Zhu 等人则 把 MoE 放回 sparse attention 、SSM 和 hybrid architecture 的大图景中 [3] 。本文不重复逐篇枚举，而是追问： 每一 次结构变化消除了什么瓶颈，又把瓶颈转移到哪里？ 
+
+讨论范围限定为 decoder-only LLM 预训练中的稀疏 MoE ，重点覆盖 FFN MoE ，同时讨论会反向影响结构选 择的 Expert Parallel （EP ）、All-to-All 、token capacity 与 expert placement 。多模态 MoE 、MoE-LoRA 、外部模型 
+
+ensemble 和纯后训练专家融合不在本文范围内。模型能力数字只用于说明架构可扩展性，不能作为跨论文的因果 比较：训练数据、 token 数、优化器、上下文长度、 post-training 和评测污染控制往往并不一致。 
+
+# B 统一形式化： MoE 同时优化什么 
+
+## B.1 Token-choice MoE 
+
+给定第 𝑡 个 token 的隐藏表示 𝑥 𝑡 ∈ R𝑑 ，Router 计算 expert affinity ：
+
+𝑠 𝑖,𝑡 = 𝜙(𝑥 𝑡 , 𝑒 𝑖 ), 𝒦 𝑡 = TopK 𝑖∈{1,…,𝑁} (𝑠 𝑖,𝑡 ), (1) 
+
+其中 𝑁 是 routed experts 数， 𝑒 𝑖 是 expert routing embedding 或 Router 权重。输出为 
+
+𝑦 𝑡 = 𝑥 𝑡 + ∑ 
+
+> 𝑖∈𝒦 𝑡
+
+𝑔 𝑖,𝑡 𝐸 𝑖 (𝑥 𝑡 ), 𝑔 𝑖,𝑡 = exp (𝑠 𝑖,𝑡 )∑𝑗∈𝒦 𝑡 exp (𝑠 𝑗,𝑡 ) . (2) 
+
+若存在 always-on shared experts ，则在式 (2) 中增加 ∑𝑗 𝐸 shared  
+
+> 𝑗
+
+(𝑥 𝑡 )。从公式看， MoE 只是稀疏函数组合；从系统看， 
+
+𝒦 𝑡 决定 token 要跨越哪些设备、每张卡获得多少 token ，以及每个局部 GEMM 的形状。 
+
+## B.2 容量、质量与系统效率的三目标 
+
+MoE 并不是单目标优化。粗略地，模型希望最大化总容量 𝑃 total ，同时控制单 token 激活量 𝑃 active ：
+
+𝑃 active ≈ 𝑃 dense + 𝑘 𝑁 𝑃 routed + 𝑃 shared , (3) 
+
+但式 (3) 只是参数口径近似： attention 、embedding 、shared experts 、不同 expert 宽度及框架统计方式都会造成偏差。 另一方面，令一个统计窗口内 expert 𝑖 接收的 token 数为 𝑛 𝑖 ，则负载变异系数为 
+
+CV expert = √ 1𝑁 ∑𝑖 (𝑛 𝑖 −̄ 𝑛) 2̄𝑛 . (4) 
+
+低 CV 有利于 EP 吞吐，却不必然有利于知识 specialization 。架构设计的根本张力是： 语义上允许不均匀，物理执 行上又不能出现严重 straggler 。
+
+表 1 决定 MoE 架构差异的六个问题 设计问题 典型选择 谁选择谁 token-choice 、expert-choice 、balanced assignment 、soft merging 
+
+激活多少专家 fixed Top-1/2/8 、threshold 、adaptive-𝑘 、zero-compute slot Expert 多大 coarse homogeneous 、fine-grained 、tiny 、heterogeneous size 
+
+是否有公共路径 pure routed 、shared expert 、dense residual 、cross-layer shortcut 
+
+在哪个范围均衡 sequence 、micro-batch 、global batch 、device 、node 、communication 
+
+谁处理运行时动态性 auxiliary loss 、router bias 、capacity/drop 、placement 、结构保证 
+
+## B.3 四个控制面：对象、决策、控制与执行 
+
+表1中的设计问题并不处于同一层次。为了区分“历史上架构如何演进”和“一个具体 MoE 系统内部如何工作” ，本文进一步按 状态变量、决策粒度和更新时间尺度 把系统横截面分为四个控制面： Topology 是较慢变化的模型结 
+
+19 LLM MoE 架构演进 C 八个演进节点：划分标准、主干与分支 
+
+构； Routing 是逐 token 的离散决策； Balance 在一组 tokens 上统计并施加反馈； Expert Parallel （EP ）把逻辑决策 落实为设备上的通信与 kernel 。第三章将沿历史时间轴讨论瓶颈迁移，第四至七章则分别展开这四个控制面； 后者不是四个新的发展阶段。 
+
+形式上，可以把四层关系写成 
+
+ℰ = 𝑇(𝜃 topo ), Topology ：构造 expert 集合、分组和共享关系 ;𝒦 𝑡 = 𝑅(𝑥 𝑡 , ℰ; 𝜃 route , 𝑏), Routing ：为 token 𝑡 选择 expert 子集 ;𝑛 𝑖 = ∑ 
+
+> 𝑡
+
+1[𝑖 ∈ 𝒦 𝑡 ], (𝑏, 𝛼, 𝑐) ← 𝐶({𝑛 𝑖 }, 𝜋), Balance ：依据聚合负载更新 bias 、loss 或 capacity ;𝑦 𝑡 = EP (𝑥 𝑡 , 𝒦 𝑡 , 𝜋, 𝜎) , EP ：按 placement 𝜋 和 schedule 𝜎 执行 dispatch/combine . (5) 
+
+其中 ℰ 是逻辑 expert 集合， 𝒦 𝑡 是 token 的路由结果， 𝑛 𝑖 是统计窗口内 expert 𝑖 的负载， 𝑏 、𝛼 、𝑐 分别代表 Router bias 、辅助损失强度和 capacity 控制量， 𝜋 是 expert 到设备的映射， 𝜎 是通信与计算调度。式 (5) 说明：四层并非独 立模块，而是一个闭环。 
+
+Topology 对象层 定义 ℰ 与候选约束 
+
+Routing 决策层 输出 𝒦 𝑡 
+
+Expert Parallel 执行层 按 𝜋, 𝜎 输出 𝑦 𝑡 
+
+Balance 控制层 统计 𝑛 𝑖 与 device/node/communication load     
+
+> 反馈： loss / bias / capacity →Routing ；placement / replication →EP
+
+图 1 Topology 、Routing 、Balance 与 Expert Parallel 的闭环关系。前三条实线形成前向执行链，虚线表示统计与系统代价对路 由和放置的反馈。 
+
+表 2 四个控制面的划分标准 控制面 核心问题 主要状态与时间尺度 典型失败模式 
+
+Topology 对象层 有哪些 experts ，它们多大、 如何分组或共享 权重结构；架构设计 /训练期慢 变量 知识冗余、粒度过粗、共享路径 过重 
+
+Routing 决策层 当前 token 应选择哪些 
+
+experts 、激活多少 
+
+affinity 、Top-𝑘 、候选约束；逐 
+
+token 快变量 
+
+misrouting 、离散优化困难、语义 受拓扑约束 
+
+Balance 控制层 一组 tokens 的使用分布是 否满足训练和系统目标 
+
+expert/device/node load ；
+
+sequence 到 runtime 多尺度反馈 
+
+collapse 、过度均匀、 straggler 、通信热点 
+
+Expert Parallel 执行层 选中的 expert 在何处、以何 种通信和 kernel 执行 
+
+placement 、dispatch/combine 、
+
+schedule ；step/runtime 变量 
+
+All-to-All 暴露、小 GEMM 、P99 
+
+延迟、显存热点 
+
+四层之间存在两类不能忽略的反向依赖。 第一， 物理拓扑会约束语义路由： device-limited routing 为降低 fan-out ，主动缩小 ℰ 中对某个 token 可见的候选集合。第二， Balance 不只调 Router ：runtime replication 或 expert placement 
+
+可以在不改变 𝒦 𝑡 的情况下改善物理负载。因此“负载均衡”不能只理解为一个 auxiliary loss ，“Expert Parallel ”也 不是模型结构确定后才介入的被动实现。 
+
+# C 八个演进节点：划分标准、主干与分支 
+
+这里的“八个”不是从某篇 Survey 直接摘录的固定 taxonomy ，也不是按年份机械切段，而是本文依据 主导瓶颈迁 移做出的分析性归纳。一个变化只有同时满足以下三点，才被单列为演进节点：第一，它引入了可独立调节的新 设计变量，例如 Top-𝑘 、expert 粒度、 shared path 或动态 active budget ；第二，它使系统的主要矛盾发生迁移，例 如从计算随 expert 数线性增长，转为离散路由与负载不均，再转为 All-to-All 、小 GEMM 或权重 I/O ；第三，它被 后续架构继承，因而不是某个模型的一次性实现细节。 按这一标准，节点 1–6 构成较清晰的历史主干：统计分工 → 稀疏激活 → Transformer 规模化 → decoder-only 
+
+产品化 → 细粒度知识组织 → ultra-sparse 容量扩展。节点 7 和节点 8 则不是简单接在节点 6 之后的新“代际” ：节 
+
+20 LLM MoE 架构演进 C 八个演进节点：划分标准、主干与分支 
+
+点 7 放松“每个 token 固定计算量”的假设；节点 8 放松“语义路由、层内 expert 拓扑和物理通信必须绑定”的 假设。二者都可与节点 5 或 6 的 expert 结构组合。图 2给出这种继承关系。 
+
+1 统计分工 
+
+Dense/Soft MoE 2 稀疏激活 
+
+Top-𝑘 conditional compute 3 集群规模化 
+
+Transformer + EP 4 产品化 开放 decoder MoE 5 知识细分 
+
+Fine-grained + shared 6 容量继续扩展 
+
+Ultra-sparse scaling 7 计算预算动态化 
+
+adaptive-𝑘 / zero-compute experts 8 语义与物理解耦 
+
+ScMoE / 异构 / 跨层 / 结构化通信 
+
+图 2 八个演进节点的关系。实线表示历史主干上的主要继承，虚线表示可叠加的正交分支；节点编号不代表严格代际替换。 
+
+表 3 八个节点的划分依据与瓶颈迁移 节点 新增设计变量 解决的主导问题 转移出的新瓶颈 
+
+1 gating 与 expert special-ization 
+
+单模型难以对输入空间分区建 模所有 experts 都计算，容量与 FLOPs 绑定 
+
+2 稀疏 Top-𝑘 与 capacity total parameters 与 active FLOPs 
+
+解耦 离散路由、 collapse 、token drop 3 EP 、All-to-All 、稳定化 
+
+loss Transformer MoE 的集群级训练 通信、 straggler 、数值与负载稳定性 
+
+4 decoder-only 训练与部 署闭环 证明经典 MoE 可进入开放模型 生态 大 expert 知识冗余、组合粒度粗 
+
+5 fine-grained 、shared 、
+
+device limit 
+
+公共知识重复与专家组合不足 fan-out 、小 GEMM 、共享路径固定成本 
+
+6 更大 𝑁 、tiny experts 、检索式路由 固定 active budget 下继续扩 total capacity 
+
+权重 I/O 、检索、低 token/expert 7 adaptive compute / zero slots token 难度不同却使用固定 Top-
+
+𝑘 
+
+active budget 控制、尾延迟、训练稳定性 
+
+8 shortcut 、异构 /跨层拓 扑、结构化通信 语义路由被设备拓扑和通信绑 定调度复杂度、缓存一致性、大规模验证 
+
+## C.1 Dense/Soft MoE ：统计分工而非计算稀疏 
+
+Jacobs 等人在 1991 年提出 gating network 与 local experts 的基本形式 [4] 。这一节点建立的是 统计分工 ：gate 根据 输入产生混合权重，不同子网络拟合输入空间的不同区域，训练目标可以推动 specialization 。由于所有 experts 通常都参与加权，路由是连续可导的，既不需要 token capacity ，也不存在 All-to-All 意义上的稀疏 dispatch 。
+
+为什么单列。 它定义了后来 MoE 一直保留的三个角色： Router/gate 、experts 和 weighted combine 。为何还不 是现代稀疏 MoE 。增加 expert 数会近似线性增加计算，因此“模型容量”和“每 token FLOPs ”尚未解耦。节点 
+
+2 继承其统计分工目标，但将 dense mixture 改为只执行少数 experts ；这一步才产生 conditional scaling ，也同时产 生离散选择带来的训练与系统问题。 
+
+## C.2 Sparse conditional computation ：Top-k 建立容量杠杆 
+
+Shazeer 等人将 noisy Top-𝑘 routing 用于超大稀疏网络 [5] ，使每个输入只执行少数 experts 。若总 expert 数为 𝑁 、每 个输入只激活 𝑘 ≪ 𝑁 个 experts ，那么 total capacity 可以随 𝑁 增长，而主要 expert FLOPs 近似只随 𝑘 增长。这里 第一次形成现代 MoE 的容量杠杆： 参数容量与单 token 计算量解耦 。这一解耦并非免费。 Top-𝑘 使未选 expert 没有来自该 token 的梯度；热门 experts 会溢出 capacity ，冷门 experts 
+
+可能长期得不到训练； 跨设备执行还必须加入 dispatch/combine 。因而 noisy routing 、importance/load auxiliary loss 、
+
+capacity factor 和 token drop 不是外围技巧，而是稀疏执行本身诱发的配套机制。节点 3 并不改变这一基本算法， 
+
+21 LLM MoE 架构演进 C 八个演进节点：划分标准、主干与分支 
+
+而是回答：当 MoE 被反复嵌入 Transformer 层、扩展到数千设备时，如何让它稳定且可执行。 
+
+## C.3 Transformer MoE 与 Expert Parallel 
+
+GShard 将 Top-2 MoE FFN 系统化嵌入 Transformer ，并依靠自动 sharding 在 2048 个 TPU 上训练 超过 600B 的多语 言模型 [6] 。经典执行链由此固定为 
+
+Attention → Router → Dispatch All-to-All → Expert FFN → Combine All-to-All .
+
+这一节点的新增变量不是“更多 experts ”，而是 expert parallelism 与集群执行语义 ：token 如何跨设备重排、每个 
+
+expert 如何批处理、溢出如何处理、通信与计算如何同步。 Switch Transformer 进一步采用 Top-1 ，以更低通信和更 简单的执行换取专家组合能力与路由容错下降 [7] 。ST-MoE 则把稳定性提升为一等设计目标，引入 Router z-loss 
+
+约束 logits 数值尺度 [8] 。需要区分： z-loss 控制数值稳定， balance loss 控制使用分布，两者不是同一机制。 同期， BASE Layers 把训练路由写成严格均衡的线性分配问题 [9] ，Expert Choice 则让 experts 选择固定容量 
+
+tokens[10] 。它们能够直接保证均衡，但 batch-level 联合分配和 expert-side capacity 对在线自回归 decoding 不如 
+
+token-choice 自然， 因此没有取代 decoder-only LLM 的 Top-𝑘 主干。节点 3 的遗产是 “Router + EP + capacity/balance + All-to-All ”这一完整系统契约；节点 4 和 5 都沿用它，只是把重点从“能否大规模训练”转向模型质量、部署 可用性和 expert 内部组织。 
+
+## C.4 开放权重 coarse-grained MoE 
+
+Mixtral 采用 8×7B 、每 token Top-2 [11] 。它没有发明新的 Router family ，因此若只按算法新颖性看，似乎不应成 为独立节点。但它补齐了另一条关键证据链： 经典 coarse-grained MoE 可以在开放权重 decoder-only LLM 中贯 通预训练、指令微调、推理部署与社区复现 。
+
+为什么单列。 节点 3 证明的是超大集群上的训练可扩展性；节点 4 证明的是通用 decoder 模型的可用性和部 署闭环。它继承 Top-𝑘 、同构 experts 和 EP ，不改变基本执行链。也正因为系统已能稳定运行，主要矛盾才显露为 知识组织问题：少量大 experts 容易重复学习公共能力， Router 只能在很粗的知识块之间组合。节点 5 正面处理这 一瓶颈。 
+
+## C.5 Shared + fine-grained experts 
+
+DeepSeekMoE 对粗粒度专家做了两项关键改造 [12] ：其一，把一个大 FFN 切成多个较小 experts ，使 Router 在相同 active budget 下组合更多知识单元；其二，加入 shared expert isolation ，把所有 token 都需要的公共知识交给 
+
+always-on 路径，减少 routed experts 的知识冗余。前者提高 组合分辨率 ，后者把“公共能力”和“条件能力”显式 拆开。 DeepSeek-V2 将这一结构扩大到 236B/21B active ，并加入 device-limited routing ：每个 token 的候选 experts 
+
+被限制在少量设备内，从而控制跨设备 fan-out[13] 。共享或稠密路径还能提供隐藏通信的计算窗口。 DeepSeek-V2 将 shared expert computation 与 EP communication overlap ；Snowflake Arctic 的 dense residual path 也体现了同类算法 –系统协同 [14] 。但 shared expert 不是 fine-grained MoE 的必要条件 。Qwen3-235B-A22B 采用 128 个细粒度 experts 、Top-8 ，却移除 shared expert ，并依靠 global-batch balance 允许常用能力在 routed experts 中自然形成 [15] 。因此，节点 5 实际包含两个可拆分的轴： expert granularity 与 shared path 。它们经常组合，但不存在逻辑绑定。 节点 5 继承节点 3 的 EP 系统，却把 expert 数、 Top-𝑘 和设备 fan-out 同时推高，使小 GEMM 、路由碎片化和通信 拓扑成为新瓶颈。节点 6 沿着“更多、更小 experts ”继续扩展；节点 8 则试图改变 fan-out 与通信的物理实现。 
+
+## C.6 Ultra-sparse scaling 
+
+这一阶段的问题变为： 固定 active parameters 时，继续增加 total experts 是否仍能降低 loss ？PEER 用 product-key retrieval 从超过百万个 tiny experts 中选择少数 experts[16] ；Kimi K2 将工程可落地的 ultra-sparse 结构扩展 到 1.04T/32.6B active 、384 routed experts 、Top-8 ，并报告固定 active budget 下更高 sparsity 的 scaling 收益 [17] ；
+
+gpt-oss-120b 则采用 128 experts 、Top-4 和较小 active footprint ，体现面向本地部署的高稀疏路线 [18] 。
+
+为什么从 fine-grained 单列。 fine-grained 的首要目标是减少知识冗余、提高组合分辨率； ultra-sparse 的首要问 题则是 scaling ：固定 active parameters 和训练 FLOPs 时，扩大候选 expert 集是否持续改善 loss 。二者都增加 expert count ，但优化目标不同。 
+
+稀疏度不能无限增加。 随着 𝑁 增大， Router scoring 、expert weight I/O 、All-to-All metadata 和小 GEMM 碎片 化都会上升；当每个 expert 每步获得的 tokens 太少时， 理论 FLOPs 优势不能转化为 wall-clock 收益 。这意味着节 点 6 没有终结节点 5，反而更依赖其 fine-grained 组织和路由控制。节点 7 与 8 则从两个正交方向绕开固定 Top-𝑘    
+
+> 22 LLM MoE 架构演进 DEXPERT TOPOLOGY ：对象层
+
+主干的限制。 
+
+## C.7 动态计算：从固定 Top-k 到 token-dependent budget 
+
+固定 Top-𝑘 隐含所有 token 使用相同数量的 expert FLOPs ，即便 token 的语义难度和所需容量不同。 LongCat-Flash 
+
+加入 zero-computation experts ：Router 仍选择固定 slots ，但部分 slots 是 identity ，因此真实执行的 FFN 数量随 token 
+
+变化 [19] 。adaptive-𝑘 、threshold routing 与 zero-compute slots 的共同目标，是 把“选哪个 expert ”和“到底计算多 少”从一个固定超参数中拆开 。
+
+与节点 6 的关系。 ultra-sparse 扩大的是候选容量 𝑁 ，但通常仍保持固定 𝑘 ；动态计算改变的是每个 token 的实际 𝑘 𝑡 或有效 FFN 数。两者可以组合：候选池很大，同时简单 token 少算、困难 token 多算。控制目标也由单一 
+
+expert load 扩展为“平均 active budget + budget variance + real-expert load + P99 latency ”。训练时的平均 FLOPs 约束并不能自动保证在线尾延迟，因为困难 tokens 可能在同一 micro-batch 或请求窗口内聚集。 动态计算的遗留问题是闭环控制： 若 Router 同时决定语义 expert 和计算预算， balance bias 既影响 specialization ，又影响吞吐；若只约束长期均值，又可能出现短时 burst 。因而 adaptive bias/PID 式反馈、 budget loss 与 runtime admission control 是配套问题，而非单纯修改 Top-𝑘 即可解决。 
+
+## C.8 语义路由与物理执行解耦 
+
+节点 1–7 主要改变 Router 可选的专家或 active budget ；节点 8 改变的是更底层的假设： 语义上选中了某个 expert ，并不意味着必须沿固定的层内 All-to-All 路径立即执行它 。这一节点不是单一模型家族，而是四条具有共同目标 的前沿分支。 
+
+执行依赖重排。 ScMoE 不改变 token 选哪些 experts ，而是改变依赖图。其跨层 shortcut 让 routed experts 消费 前层中间表示，同时用当前 dense/shared path 覆盖 dispatch/combine 的通信窗口 [20] 。它解决的是 exposed commu-nication ，不直接解决 routing skew 。图 3给出抽象比较。          
+
+> Attention / shortcut Dispatch Routed experts Combine Merge Dense/shared branch
+> 通信路径与 dense 计算并行
+> 图3ScMoE 的核心是重排执行依赖以扩大通信隐藏窗口；它不是新的路由算法。
+
+LongCat-Flash 将 ScMoE 与 token-dimension chunking 、Single Batch Overlap 结合； LongCat-2.0 的官方报告进 一步在专用 accelerator 上采用 dense/MoE per-core full parallel execution[21] 。这些进展降低 exposed communication ，
+
+但不会自动解决严重 routing skew 、expert 内部计算差异和显存压力 。
+
+异构 expert 。MoHGE 采用两级路由：先选 expert group ，再在组内选择不同大小 experts ，并结合 group-wise 
+
+与 intra-group balance 约束部署 [22] 。它把“ expert 等宽”从默认约束变成设计变量，使不同 token 可获得不同形 态的计算能力；代价是异构 GEMM 、容量规划和负载指标都更复杂。 
+
+跨层共享。 GMoE 把一部分 experts 设为跨层共享的 Global Experts ，同时保留 layer-local experts ，以减少跨 层能力冗余 [23] 。这与 shared expert 的区别在于共享作用域：前者跨 layer ，后者通常是在单层内对所有 tokens always-on 。跨层共享会引入缓存、调度和层间干扰问题。 
+
+结构化通信。 Multi-Head LatentMoE 与 Head Parallel 尝试改变通信拓扑，使通信量相对 activated expert 数 𝑘 为
+
+𝑂(1) ，并获得更确定的流量 [24] 。与 ScMoE “隐藏动态通信”不同，这条路线试图“减少或结构化通信本身” 。由 于尚缺少 trillion-parameter 、万卡级公开验证， 它应被视为研究前沿，而非已经替代 Top-𝑘 EP 的主流 。四条分支分别优化时间重叠、计算形态、参数复用和数据移动，可组合而非替代。 
+
+# D Expert topology ：对象层 
+
+在第二章的四层框架中， Topology 是对象层：它先定义 expert 集合 ℰ、知识单元的粒度、共享范围和计算异质性， 
+
+Routing 才能在其上做逐 token 选择。因而， Topology 的核心不只是 expert count ，而是 Router 可以组合什么样的 计算单元 。把 MoE 演进只理解为 expert count 增长是不充分的。表 4显示，真正变化的是知识单元的粒度、共享范围和 
+
+> 23
+
+LLM MoE 架构演进 F BALANCE ：控制层 
+
+计算异质性。 
+
+表 4 Expert topology 的主要演进路线 拓扑 代表工作 主要收益 新瓶颈 少量同构大专家 GShard 、Switch 、Mixtral 实现 conditional scaling 知识重复、组合性有限 
+
+Shared/dense + routed DeepSeekMoE 、Arctic 公共知识隔离，可制造 
+
+overlap window 
+
+固定 FLOPs 增加，公共路径 可能过重 
+
+Fine-grained experts DeepSeek-V2/V3 、Qwen3 更细知识组合，更高 
+
+total/active ratio 
+
+路由、通信与 GEMM 更碎 
+
+Ultra-sparse experts PEER 、Kimi K2 、gpt-oss 固定 FLOPs 下继续扩容量 检索、权重 I/O 、低 
+
+token/expert Heterogeneous/dynamic LongCat 、MoHGE token 级动态计算预算 budget control 与物理均衡耦 合
+
+Cross-layer global/local GMoE 减少跨层 expert 冗余 调度、缓存与层间干扰待验 证
+
+Latent/head structured Multi-Head LatentMoE 通信确定化、与 𝑘 解耦 大规模质量证据不足 
+
+另一个经常被忽略的维度是初始化方式。 Sparse Upcycling 将已有 dense FFN 复制成多个 experts ，再新增 Router 
+
+继续训练 [25] 。它复用 dense checkpoint ，却带来 expert symmetry ，需要路由噪声、数据差异和后续训练使 experts 
+
+分化。更进一步的 Expert Upcycling 从已有 𝐸 -expert MoE 扩展到 𝑚𝐸 experts ，同时保持 Top-𝑘 与 active cost 不变 
+
+[26] 。upcycling 不是新的 Router family ，但会改变 specialization 的形成路径和训练成本。 
+
+# E Routing ：决策层 
+
+在图 1的闭环中， Routing 接收 Topology 定义的 expert 集合与系统施加的候选约束，对每个 token 产生 𝒦 𝑡 。它优化 的是 局部语义匹配 ，并不直接保证一个 sequence 、batch 或 device 上的总体负载合理；后者属于第六章的控制层。 
+
+表 5 主要 Router family 及其适用边界 
+
+Router family 决策单位 Balance 特性 decoder-only LLM 适用性 
+
+Noisy Top-𝑘 token-choice token 选 experts 需 loss 、bias 或 runtime 均衡 当前主干，在线自然 
+
+Top-1 Switch token 选 1 expert 通信简单， capacity 更敏感 可扩展，但组合能力受限 
+
+Balanced assignment batch 联合分配 训练时严格等量 全局求解复杂，在线不自然 
+
+Expert-choice expert 选 tokens expert 容量天然固定 encoder 更自然， decoder capacity 难处理 
+
+Soft/parameter merging 连续混合 可微、无离散 Top-𝑘 大规模 EP 效率尚未证明 
+
+Bias-controlled Top-𝑘 affinity + 非梯度 bias 不把均衡梯度写入 LM 参数 DeepSeek-V3 等模型采用 
+
+Zero experts/adaptive-𝑘 token 计算量可变 需约束平均预算与尾部 动态计算的重要方向 
+
+Token-choice 成为主流并不表示它在优化上最优，而是它最符合自回归在线约束：当前 token 的路由只依赖当 前状态，不需要等待未来 tokens 或求解整个 batch 的全局分配。 Soft MoE 和 Lory 等连续路由方案避免离散 Top-𝑘 ，但尚未在超大规模 decoder 与低延迟 EP 上证明系统优势 [27, 28] 。路由自由度还受到网络拓扑约束。 device-limited 或 node-limited routing 将候选 expert 限制在少量设备 /节点集 合，降低单 token 的通信 fan-out 。代价是语义最优 expert 可能被拓扑约束排除，因此这类设计本质上是质量与通 信之间的显式折中。 
+
+# F Balance ：控制层 
+
+Balance 不重新定义 experts ，也不独立生成 token 的语义路由。它观察许多次 Routing 决策累积出的 {𝑛 𝑖 } 及设备、 节点和通信负载，再通过 loss 、bias 、capacity 或 runtime placement 反馈给决策层和执行层。其核心问题是： 允许 语义 specialization 不均匀的同时，如何避免训练 collapse 和物理 straggler 。
+
+24 LLM MoE 架构演进 G EXPERT PARALLEL ：执行层 
+
+## F.1 Sequence/batch-wise expert balance 
+
+经典辅助损失可写为 
+
+ℒbal = 𝛼𝑁 
+
+> 𝑁
+
+∑
+
+> 𝑖=1
+
+𝑓 𝑖 𝑃 𝑖 , (6) 
+
+其中 𝑓 𝑖 是统计窗口内实际分配到 expert 𝑖 的 token fraction ，𝑃 𝑖 是平均 routing probability ，𝛼 控制均衡强度。当所有 
+
+experts 使用近似均匀时，式 (6) 较小。该损失同时承担防止 expert collapse 和避免 EP straggler 两项职责，但二者 并不等价：模型可能需要不均匀 specialization ，硬件却希望均匀负载。 𝛼 过大时，硬件目标会直接干扰语言建模 梯度。 
+
+## F.2 Device/node/communication-aware balance 
+
+DeepSeek-V2 把 balance 拆为 expert-level 、device-level 与 communication balance ，并通过 device-limited routing 控制 fan-out[13] 。这一变化的关键不是多加几个 loss ，而是承认 逻辑 expert 均衡不等于物理设备或网络均衡 ：若一 个 device 上有多个 experts ，只要 device 间总 token 接近，未必需要所有 experts 完全等量。 
+
+## F.3 Auxiliary-Loss-Free Load Balancing 
+
+Auxiliary-Loss-Free （ALF ）策略给每个 expert 增加非梯度 routing bias 𝑏 𝑖 ：
+
+𝒦 𝑡 = TopK 𝑖 (𝑠 𝑖,𝑡 + 𝑏 𝑖 ), 𝑏 𝑖 ← 𝑏 𝑖 + 𝜂 sign (̄𝑛 − 𝑛 𝑖 ), (7) 
+
+其中 𝜂 是 bias 更新速度。 bias 影响 Top-𝑘 选择，但不作为 affinity 权重参与 LM 梯度，从而减少均衡目标对模型参 数更新方向的直接干扰 [29] 。DeepSeek-V3 使用 batch-wise ALF 作为主均衡机制，同时保留很弱的 sequence-wise auxiliary loss ，防止单序列极端失衡 [30] 。因此， “DeepSeek-V3 完全没有任何 balance loss ”并不准确 。
+
+global-batch 统计比单 micro-batch 更稳定，也允许某些 experts 在局部 batch 上承载更多特定 domain token ；代 价是需要跨 DP/EP 范围聚合负载，扩大统计范围可能引入额外通信。 
+
+## F.4 Runtime expert placement 
+
+训练分布上的均衡不能保证真实推理流量。 domain shift 、SFT/RL 和关闭 balance 更新都会改变 expert popularity 。
+
+DeepSeek-V3 使用冗余 expert deployment ，在运行时复制热点 experts 并调整 placement[30] 。这一趋势把目标重新 分工： Router 可以保留语义上的非均匀 specialization ，runtime 通过复制、迁移或重新放置避免设备 straggler 。     
+
+> Sequence/Batch expert balance Device/Node/ Communication Global-batch ALF bias Runtime replication and placement
+> 图4Balance 的演进不是简单减弱约束，而是逐步把物理执行目标从 LM 梯度中剥离。
+
+# G Expert Parallel ：执行层 
+
+EP 消费 Routing 产生的 token–expert assignment ，并结合 placement 𝜋 把逻辑 expert 转化为设备上的 dispatch 、局部 
+
+GEMM 与 combine 。它通常不改变“语义上选中了谁” ，却决定这次选择的 wall-clock 成本；当系统代价过高时， 又会通过 device-limited routing 、placement 或架构重构反向修改前三层。 
+
+MoE 的算法收益只有在稀疏执行高效时才成立。 capacity-based 系统为每个 expert 预留固定 token slots ，溢出 
+
+token 被丢弃或走 residual ，容易造成训练与推理不一致。 MegaBlocks 使用 block-sparse kernels 实现 dropless MoE ，使动态 token shape 不再要求 token dropping[31] 。Tutel 等系统则动态选择并行和 pipeline 策略，以适配不同集群规 模 [32] 。随着专家更细、 Top-𝑘 更大，通信逐渐成为一等架构约束，推动出三种处理方式： 
+
+1. 限制通信拓扑 ：device/node-limited routing 降低 fan-out ；
+
+2. 隐藏通信 ：shared computation overlap 、DualPipe 、ScMoE 和 token chunking 扩大 overlap window ；
+
+3. 重构通信 ：Head Parallel 等方案把动态流量变为更确定的通信模式。 这里 必须区分“总 All-to-All 时间”和“ exposed communication time ”。若通信完全被 dense path 覆盖，继 续优化链路带宽对端到端 step time 的边际收益会下降；反之，即使总通信量不变，只要关键路径缩短，吞吐也可 
+
+> 25
+
+LLM MoE 架构演进 J 开放问题 
+
+能显著改善。因此训练报告至少应同时给出 通信量、 overlap 比例、 exposed dispatch/combine 、MFU 和 step-time P99 。
+
+# H 现代主干与前沿分支 
+
+截至 2026 年，大规模 decoder MoE 最常见的组合可概括为： 
+
+Token-choice Top-𝑘 + fine-grained experts + 可选 shared path + global/batch-wise balance 或 ALF + topology-limited routing + dropless kernels/communication overlap + runtime expert placement DeepSeek-V3 、Qwen3 和 Kimi K2 在 shared expert 、balance 机制和 EP size 上不同，但都位于这条主干。与此 同时，以下分支仍未形成统一结论： 
+
+• MoE Attention ：JetMoE 同时稀疏化 Attention 与 FFN ，进一步降低 active FLOPs ，但 KV/cache 和路由更复杂 
+
+[33] ；
+
+• Hybrid mixer + MoE ：Jamba 在 Transformer 与 Mamba layers 间交替，说明 MoE 是参数扩容方式，不绑定全 
+
+Attention backbone[34] ；
+
+• Million experts ：理论组合性高，但权重 I/O 、小 GEMM 和检索开销仍限制工业部署； 
+
+• Heterogeneous experts ：按 token 难度选择不同容量，表达自然，但物理放置和尾延迟更难； 
+
+• Cross-layer global experts ：目标是消除层间重复能力，仍缺少超大规模训练证据； 
+
+• Structured communication ：Head Parallel 可能降低动态 EP 痛点，但尚处早期验证阶段。 表6以架构选择而非 benchmark 排名对代表性模型进行对照。 
+
+表 6 代表性 LLM MoE 的架构位置； active 参数口径因报告而异                                                      
+
+> 模型 年份 Total/Active Experts/Top-𝑘 架构意义
+> GShard 2020 >600B/ 未统一披露 Top-2 Transformer MoE 与自动 sharding Switch 2021 up to 1T+ Top-1 用简单路由换吞吐与可扩展性
+> Mixtral 8 ×7B 2024 46.7B/12.9B 8/2 开放 coarse-grained MoE 标杆
+> DeepSeek-V2 2024 236B/21B 160/6 fine-grained 、shared 、device-limited DeepSeek-V3 2024 671B/37B 256/8 ALF 、weak seq loss 、node-limited Qwen3-235B-A22B 2025 235B/22B 128/8 fine-grained 、无 shared 、global balance Kimi K2 2025 1.04T/32.6B 384/8 ultra-sparse scaling gpt-oss-120b 2025 116.8B/5.1B 128/4 小active footprint 与部署导向
+> LongCat-Flash 2025 560B/18.6–31.3B real + zero 动态计算预算与 ScMoE LongCat-2.0 2026 1.6T/33–56B dynamic dense/MoE per-core 并行
+
+# I 面向基座预训练的实验设计 
+
+跨模型 benchmark 无法识别架构贡献。 若要判断 fine-grained 、shared 、ALF 或 ScMoE 是否有效， 应至少同时固定 
+
+训练 token 、数据配比、 active parameters 和优化器 ，并分别报告 training-FLOPs-matched 与 wall-clock-matched 
+
+结果。 对代码预训练场景， 建议额外按语言、 repo/file/function 粒度、代码与自然语言 token 分桶统计 routing 。关键观 测包括：不同语言的 expert co-activation 、跨文件引用 token 是否集中到少数专家、代码与 code-related 文档是否共 享 experts ，以及 repo-level 长序列是否造成 sequence-wise load 峰值。这样才能区分 “专家形成了有益 specialization ”和“数据配比造成偶然流量偏斜” 。系统侧至少应同时记录： 
+
+• expert 、device 、node 三个层级的 max/mean 、CV 与 Gini ；
+
+• sequence 、micro-batch 、global batch 三个统计窗口下的负载； 
+
+• dispatch/combine exposed time ，而不只看总 All-to-All time ；
+
+• token drop 、capacity overflow 、redundant expert hit rate ；
+
+• training FLOPs 、active parameters 、wall-clock 和集群网络拓扑。 
+
+# J 开放问题 
+
+26 LLM MoE 架构演进 K 总结与展望                           
+
+> 表7建议的等预算 MoE 消融矩阵 实验维度 建议 setting 核心指标
+> Expert granularity 固定 total/active params 与tokens ，扫描 expert count 、width 、Top-𝑘
+> val loss 、下游、 token/expert 、GEMM efficiency Shared vs emergent shared ；无 shared+global loss ；无 shared+ALF expert similarity 、domain-routing MI 、
+> active FLOPs Balance scope sequence aux 、global aux 、ALF 、ALF+weak seq max/mean load 、CV/Gini 、entropy 、
+> specialization Execution topology serial EP 、shared overlap 、ScMoE 、runtime EPLB exposed communication 、MFU 、step time 、
+> TPOT 、P99 Dynamic compute fixed Top-𝑘 、threshold 、zero experts active-param 均值 /方差、分桶 loss 、吞吐 与尾延迟
+> Upcycling scratch 、dense-copy 、cluster/utility-aware copy 对称性破缺速度、 loss/token 、GPU hours
+
+## J.1 Specialization 的正确分析单位是什么 
+
+“数学专家”或“代码专家”是直观叙事，但实际路由常表现为 token 形态、语法、位置、语言和层级组合。单 
+
+expert 未必是稳定的语义单位，跨层 expert group 或 co-activation pattern 可能更可解释。未来应把 routing mutual information 、expert representation similarity 和 intervention-based causal test 结合起来，而不只展示 token word cloud 。
+
+## J.2 更高 sparsity 的系统最优点在哪里 
+
+在固定 active FLOPs 下增加 total experts 可能降低模型 loss ，但系统收益受网络带宽、 expert weight I/O 、batch size 
+
+与 kernel arithmetic intensity 限制。最优 sparsity 不是纯模型常数，而是模型 –硬件联合 scaling law 。报告该结论时 必须给出 EP size 、网络拓扑和每 expert token 数。 
+
+## J.3 Balance 能否主要下沉到 runtime 
+
+ALF 减少了辅助 loss 的梯度干扰，却仍会改变 Top-𝑘 选择。 runtime replication 和 placement 可以允许语义路由更 自由，但会带来参数副本显存、迁移成本和缓存一致性问题。训练弱约束与运行时强均衡之间的最优边界仍未确 定。 
+
+## J.4 动态计算如何满足尾延迟 SLA 
+
+zero experts 或 adaptive-𝑘 可以降低平均 FLOPs ，但困难 tokens 若在同一 micro-batch 或请求窗口集中，会制造新的 
+
+straggler 。模型需要同时控制平均预算、预算方差和 P99 ，而不能只报告平均 active parameters 。
+
+## J.5 Post-training 如何保持 Router 稳定 
+
+SFT/RL 数据会改变领域分布和序列形态，从而改变 expert load 。训练阶段是否保留 balance 更新、是否 routing replay 、是否冻结 Router ，不能从预训练设置直接外推。应分别测量 pretrain 、SFT 和 RL 阶段的 routing drift 与
+
+specialization retention 。
+
+# K 总结与展望 
+
+LLM MoE 的架构史不是“ expert 越来越多”的单线扩张，而是五条路线的共同演化： expert 从少量大模块变成 细粒度、超稀疏和异构计算单元；拓扑从 layer-local routed experts 发展到 shared 、cross-layer global/local 和 latent-head 结构； Router 从简单 Top-𝑘 逐步加入全局统计、 bias 控制和动态计算预算； balance 从 sequence-wise 辅助损 失走向 device/communication-aware 、ALF 与 runtime placement ；执行则从串行 All-to-All 发展到 dropless kernels 、
+
+topology-limited routing 、ScMoE overlap 和结构化通信。 因此， ScMoE 之后并不存在唯一的“下一代结构” 。更可信的方向是四者组合：更自由的语义路由、显式的 平均计算预算控制、拓扑感知或确定性通信，以及运行时 expert placement 。架构评估也必须从单一 validation loss 
+
+扩展为质量、 specialization 、active budget 、exposed communication 和尾延迟的联合分析。 对下一轮大规模预训练， 最具信息量的实验不是直接比较两个不同训练配方的终局 benchmark ，而是构造 同   
+
+> 27 LLM MoE 架构演进 A架构演进速查表
+
+数据、同 token 、同 active FLOPs 的受控矩阵，分别扫描 expert granularity 、shared path 、balance scope 和 execution topology 。只有这样，才能区分参数容量收益、路由专业化收益与系统吞吐收益 ，并建立可迁移到下一代硬件的 
+
+MoE 设计结论。 
+
+# A 架构演进速查表    
+
+> 表8MoE 架构演进的瓶颈迁移
+
+时期 代表工作 解决的主要问题 转移出的新瓶颈 
+
+1991–2016 Adaptive Mixtures 学习软分工 计算随 expert 数线性增长 
+
+2017–2019 Sparse MoE 参数容量与单 token FLOPs 解耦 collapse 、capacity 、All-to-All 2020–2022 GShard 、Switch 、
+
+ST-MoE Transformer 大规模稀疏训练 稳定性、 token drop 、路由质量 
+
+2023–2024 Mixtral 开放 decoder MoE 可用性 粗粒度与知识冗余 
+
+2024–2025 DeepSeekMoE/V2 、
+
+Qwen3 
+
+细粒度组合与公共知识处理 通信 fan-out 、小 GEMM 、balance scope 2024–2025 PEER 、Kimi K2 、gpt-oss ultra-sparse 容量扩展 检索、 I/O 、低 token/expert 2024–2026 ALF 、LongCat 、
+
+ScMoE 
+
+减少梯度干扰与隐藏通信 运行时动态负载与尾延迟 
+
+2025–2026 MoHGE 、GMoE 、
+
+Head Parallel 
+
+异构计算、跨层共享、结构化通 信超大规模质量和系统验证 
+
+> 28
+
+LLM MoE 架构演进 参考文献 
+
+# 参考文献 
+
+[1] Cai W, et al. A Survey on Mixture of Experts in Large Language Models. IEEE Transactions on Knowledge and Data Engineering, 2025. https://arxiv.org/abs/2407.06204 .[2] Liu J, et al. A Survey on Inference Optimization Techniques for Mixture of Experts Models. arXiv:2412.14219, 2024. 
+
+> https://arxiv.org/abs/2412.14219
+
+.[3] Zhu X, et al. Speed Always Wins: A Survey on Efficient Architectures for Large Language Models. arXiv:2508.09834, 2025. 
+
+> https://arxiv.org/abs/2508.09834
+
+.[4] Jacobs R A, Jordan M I, Nowlan S J, Hinton G E. Adaptive Mixtures of Local Experts. Neural Computation, 3(1):79–87, 1991. doi:10.1162/neco.1991.3.1.79. [5] Shazeer N, et al. Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer. ICLR, 2017. 
+
+> https://arxiv.org/abs/1701.06538
+
+.[6] Lepikhin D, et al. GShard: Scaling Giant Models with Conditional Computation and Automatic Sharding. ICLR, 2021. 
+
+> https://arxiv.org/abs/2006.16668
+
+.[7] Fedus W, Zoph B, Shazeer N. Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity. Journal of Machine Learning Research, 23(120):1–39, 2022. https://arxiv.org/abs/2101.03961 .[8] Zoph B, et al. ST-MoE: Designing Stable and Transferable Sparse Expert Models. arXiv:2202.08906, 2022. 
+
+> https://arxiv.org/abs/2202.08906
+
+.[9] Lewis M, et al. BASE Layers: Simplifying Training of Large, Sparse Models. ICML, 2021. 
+
+> https://arxiv.org/abs/2103.16716
+
+.[10] Zhou Y, et al. Mixture-of-Experts with Expert Choice Routing. NeurIPS, 2022. https://arxiv.org/abs/2202.09368 .[11] Jiang A Q, et al. Mixtral of Experts. arXiv:2401.04088, 2024. https://arxiv.org/abs/2401.04088 .[12] Dai D, et al. DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models. ACL, 2024. 
+
+> https://arxiv.org/abs/2401.06066
+
+.[13] DeepSeek-AI. DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model. arXiv:2405.04434, 2024. 
+
+> https://arxiv.org/abs/2405.04434
+
+.[14] Snowflake. Arctic: Snowflake’s Open-Source LLM. Official Technical Blog, 2024. Accessed 2026-08-07. 
+
+> https://www.snowflake.com/en/blog/arctic-open-efficient-foundation-language-models-snowflake/
+
+.[15] Qwen Team. Qwen3 Technical Report. arXiv:2505.09388, 2025. https://arxiv.org/abs/2505.09388 .[16] He X. Mixture of A Million Experts. arXiv:2407.04153, 2024. https://arxiv.org/abs/2407.04153 .[17] Moonshot AI. Kimi K2: Open Agentic Intelligence. arXiv:2507.20534, 2025. https://arxiv.org/abs/2507.20534 .[18] OpenAI. gpt-oss Model Card: Architecture. 2025. Accessed 2026-08-07. 
+
+> https://deploymentsafety.openai.com/gpt-oss/architecture
+
+.[19] LongCat Team. LongCat-Flash Technical Report. arXiv:2509.01322, 2025. https://arxiv.org/abs/2509.01322 .[20] Cai W, et al. Shortcut-connected Expert Parallelism for Accelerating Mixture-of-Experts. arXiv:2404.05019, 2024. 
+
+> https://arxiv.org/abs/2404.05019
+
+.[21] LongCat Team. LongCat 2.0 Technical Blog. 2026. Accessed 2026-08-07. https://longcat.ai/blog/longcat-2.0/ .[22] MoHGE Authors. MoHGE: Mixture of Heterogeneous Grouped Experts. ACL Industry Track, 2026. 
+
+> https://aclanthology.org/2026.acl-industry.20/
+
+.[23] GMoE Authors. GMoE: Global Mixture-of-Experts. ACL, 2026. https://aclanthology.org/2026.acl-long.2065/ .[24] Cui Y, et al. Multi-Head LatentMoE and Head Parallel. arXiv:2602.04870, 2026. https://arxiv.org/abs/2602.04870 .[25] Komatsuzaki A, et al. Sparse Upcycling: Training Mixture-of-Experts from Dense Checkpoints. arXiv:2212.05055, 2022. 
+
+> https://arxiv.org/abs/2212.05055
+
+.[26] Expert Upcycling Authors. Expert Upcycling: Training Larger MoE Models from Smaller MoE Checkpoints. arXiv:2604.19835, 2026. https://arxiv.org/abs/2604.19835 .[27] Puigcerver J, et al. From Sparse to Soft Mixtures of Experts. ICLR, 2024. https://arxiv.org/abs/2308.00951 .[28] Zhong Z, et al. Lory: Fully Differentiable Mixture-of-Experts for Autoregressive Language Model Pre-training. COLM, 2024. 
+
+> https://arxiv.org/abs/2405.03133
+
+.29 LLM MoE 架构演进 参考文献 
+
+[29] Wang Q, et al. Auxiliary-Loss-Free Load Balancing Strategy for Mixture-of-Experts. arXiv:2408.15664, 2024. 
+
+> https://arxiv.org/abs/2408.15664
+
+.[30] DeepSeek-AI. DeepSeek-V3 Technical Report. arXiv:2412.19437, 2024. https://arxiv.org/abs/2412.19437 .[31] Gale T, et al. MegaBlocks: Efficient Sparse Training with Mixture-of-Experts. MLSys, 2023. 
+
+> https://arxiv.org/abs/2211.15841
+
+.[32] Hwang C, et al. Tutel: Adaptive Mixture-of-Experts at Scale. MLSys, 2023. https://arxiv.org/abs/2206.03382 .[33] Shen Y, et al. JetMoE: Reaching Llama2 Performance with 0.1M Dollars. arXiv:2404.07413, 2024. 
+
+> https://arxiv.org/abs/2404.07413
+
+.[34] Lieber O, et al. Jamba: A Hybrid Transformer–Mamba Language Model. arXiv:2403.19887, 2024. 
+
+> https://arxiv.org/abs/2403.19887
+
+.30
