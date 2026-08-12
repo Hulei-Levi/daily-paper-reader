@@ -1,0 +1,1572 @@
+Title: Compute-Optimal Is Not Cluster-Optimal: Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+URL Source: https://arxiv.org/pdf/2608.10605v1
+
+Published Time: Wed, 12 Aug 2026 00:55:56 GMT
+
+Number of Pages: 55
+
+Markdown Content:
+# Compute-Optimal Is Not Cluster-Optimal: Systems-Aware Scaling for Sparse Mixture-of-Experts 
+
+Soumajyoti Sarkar soumajs@amazon.com 
+
+Amazon AGI Foundations 
+
+Yuxin Tang tanyuxin@amazon.com 
+
+Amazon AGI Foundations 
+
+Sheng Zha zhasheng@amazon.com 
+
+Amazon AGI Foundations 
+
+Abstract 
+
+In large-scale pretraining, the algorithm, architecture, and systems decisions are convention-ally made in disconnected stages. A scaling law stage selects an architecture and training recipe, optimizing loss under compute constraints, and a separate systems stage then op-timizes the implementation for hardware efficiency. In this work, we develop MOSAIC, which formulates model architecture and systems co-design as an optimization problem. MOSAIC couples a predictive scaling law with a calibrated performance model that esti-mates Model FLOPs Utilization (MFU), communication cost, memory footprint, and the best parallel layout. We instantiate the framework for sparse Mixture-of-Experts (MoE) language models, where expert count, routing sparsity, and other MoE layer dimensions affect both the loss and systems efficiency. We fit a scaling law on sparse MoE models trained on text data, whose scaling dimensions include the sparsity factor, which is the fraction of model parameters inactive per token in a forward pass. The scaling law sweeps in our work span active parameters from 104 million to 2 .7 billion and total model sizes reaching 79 billion parameters. We show that, within the calibrated sparsity range, an efficiency-agnostic model-FLOPs budget admits no interior optimal sparsity. The fitted loss decreases monotonically with sparser models and the compute optimum lies at the upper boundary of the data support. An optimal sparsity in MoE models instead emerges under the cluster’s systems constraints, as captured by MOSAIC. Our results argue for a shift towards unified architecture and systems co-design for frontier language model training. 
+
+Keywords: LLM pretraining, scaling laws, hardware-aware model co-design 
+
+1 Introduction 
+
+Compute-optimal scaling laws (Kaplan et al., 2020; Hoffmann et al., 2022) are the dominant tool for translating a fixed compute budget into a model size and a data count in pretraining. They are the standard recipe in practice because, once a training compute budget is set, the architecture (model size N ) and data (token count D) decisions both follow from a single optimization against the predicted-loss curve, and because the curve extrapolates far past the regime in which it was fit, making it a predictable tool even at frontier scale (Bahri et al., 2024; Hestness et al., 2017). For dense models, Hoffmann et al. (2022) devise a joint scaling law for loss in the model size N and the number of training tokens D, which arXiv:2608.10605v1 [cs.LG] 11 Aug 2026 Systems-Aware Scaling for Sparse Mixture-of-Experts 
+
+admits a closed-form model FLOPs 1 optimal allocation. More recent prescriptive scaling laws recommend the optimal scaling dimensions under additional data constraints (Lovelace et al., 2026), yet none of these constraints price in the systems efficiency of the prescribed architecture. This matters because two architectures of the same predicted quality can realize training throughput that differs several-fold, once their attainable Model FLOPs Utilization (MFU) 2 and best parallel layout are accounted for (Rajbhandari et al., 2022). What follows is that the systems-side recommendations for architectures have largely evaded the scaling laws, taking the model size as given and optimizing the architecture at that size for hardware efficiency. As an example, Anthony et al. (2024) show that a transformer at a given scale can be made more efficient on a specific accelerator by aligning its intrinsic dimensions, such as the hidden size, attention-head count, and vocabulary size, to the structure of the GPU compute kernels, improving throughput at matched accuracy. A complementary line of work as FlashAttention (Dao et al., 2022) rearranges the operation arithmetically equivalently and computes the same attention through an IO-aware, memory-efficient schedule. Thus, the training recipe is conventionally built in two disconnected stages, a scaling law stage for the model and data, and a hardware aware tuning stage, as in the Kimi-K2 report (Team et al., 2025) that treats sparse MoE scaling laws and systems tuning separately. This separation is consequential at scale, where the model is split across a fleet of GPUs through data, tensor, pipeline, and expert parallelism, as in MegaScale (Jiang et al., 2024). The architecture chosen by a scaling law should account for these systems efficiencies rather than model-FLOPs alone (Bian et al., 2025). Our goal in this paper is to fold the systems stage into the scaling law stage, so that a single optimization selects the architecture, the token budget, and the cluster parallelism execution layout together, and we instantiate that framework for sparse MoE language models. We focus on sparse MoE architectures adopted previously for language model training (Fedus et al., 2022; Sarkar et al., 2024; Abnar et al., 2025), where sparsity is obtained by replacing the dense feed-forward layer of a transformer block with a set of E
+
+experts and routing each token to a subset of them. This decouples the active parameters 
+
+Nact that set per-token model-FLOPs from the total stored parameters Ntot , with the expert count E as one of the knobs controlling total parameter count. The existing scaling laws for sparse MoE models (Clark et al., 2022; Tian et al., 2026; Krajewski et al., 2024) optimally scale these architecture knobs while ignoring systems efficiency, including Abnar et al. (2025), who show that the sparsity factor S, roughly the proportion of Ntot that is inactive per token, introduces an additional optimum that classical ( N, D )-only laws cannot see. We show in Section 6.1 and Figure 1 that a model-FLOPs budget alone is insufficient to determine a meaningful MoE sparsity. A few recent studies begin to surface these systems-side pressures within the MoE scaling law itself. Ludziejewski et al. (2025) fit a sparse MoE scaling law and find that scaling the number of experts improves loss at fixed model-FLOPs per token but inflates stored parameters and device-memory pressure in a way that a model FLOPs budget never charges for, so the practically optimal E is where the loss surface meets a memory-aware budget  
+
+> 1. We use the term model FLOPs to denote “compute” as is defined in the view of scaling laws and explicitly use the term deliverable model FLOPs to denote the hardware-delivered FLOPs in training. 2. MFU is the fraction of a device’s peak throughput that a training run actually sustains. https://cloud. google.com/blog/products/compute/using-cloud-tpu-multislice-to-scale-ai-workloads
+> 2Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+rather than the E that minimizes loss at fixed Nact . Wan et al. (2026) push this further, treating total parameters and model-FLOPs per token as independent degrees of freedom and arguing that model-FLOPs per token alone is an inadequate fairness metric for choosing a sparse MoE architecture. Building on these studies, we fit a new scaling law whose variables are chosen to expose systems efficiency. Conventionally, the optimal sparse MoE geometry under a model-FLOPs budget is derived in two stages, a geometry-free convex program for the target parameters, sparsity, and data budget, followed by a match to the nearest discrete architecture geometry. Our scaling analysis shows that sparser MoE models reach lower loss at any model-FLOPs budget with the optimal sparsity sitting at the boundary, which forces the binding constraint to move from model FLOPs to hardware-deliverable model FLOPs, the useful compute a cluster can actually deliver over the training window. We solve a single-step discrete-geometry mixed-integer nonlinear program, which we term MOSAIC. It minimizes the predicted loss directly over the discrete architecture grid, resolving the boundary sparsity problem and realizing a cluster-specific sparse MoE geometry as motivated in Figure 1. We focus this work on the training side of sparse MoE architecture-system co-design, leaving test time scaling laws under hardware costs (Sadhukhan et al., 2025) as future work. The closest to our study is the work done in Sun et al. (2026) which couple a roofline analysis to architecture selection. However, roofline alone misses the overheads that flip MoE recommendations, namely expert dispatch and combine, kernel-launch overhead under fine-grained experts, all-to-all bandwidth as a function of EP topology, and data-parallel and pipeline-parallel coupled exposed collective communications (Gale et al., 2023; Jiang et al., 2024). 
+
+Contributions. To run the workflow of MOSAIC and obtain the optimal sparse MoE scaling dimensions under the constraint of deliverable model FLOPs, we discuss the following contributions and observations: 
+
+• We fit a new four-dimensional joint MoE pretraining scaling law that expose the systems-side knobs. Through our scaling analysis, we show that across model-FLOPs budgets and within the calibrated sparsity range, the fitted loss optimal sparsity lies at the upper boundary of the data support. This boundary-seeking behavior motivates the move from a model-FLOPs budget to a deliverable model-FLOPs budget. 
+
+• We develop an operator-level analytical performance model that measures the per-block forward and backward cost of an MoE transformer. We validate the performance model against training run grids up to 18 billion active parameters, where the mean absolute percentage error of predicted MFU stays under 15% per sweep. 
+
+• We couple these two components inside MOSAIC and search the architecture grid on a cluster of NVIDIA B200 GPUs under a fixed GPU hour budget. We show that the lowest-loss model configuration is not the one that emits the most model FLOPs. We validate the ranked selections from MOSAIC optimization, on staged pretraining runs of up to 250B total parameters on our infrastructure. We show that the loss ordering flips from the model-FLOPs axis to the peak-equivalent hardware-compute axis, as MOSAIC predicts. 
+
+> 3
+
+Systems-Aware Scaling for Sparse Mixture-of-Experts Problem: Compute Optimal Scaling assumes a fixed budget Cmodel    
+
+> Optimal MoE sparsity S*sits at the boundary Model FLOPs
+
+Cmodel     
+
+> Minimize law L(Ntot ,S,D)
+> under fixed Cmodel
+
+Why Cmodel optimal S * breaks on fixed cluster and time-to-train Ttrain          
+
+> Performance Model
+> MFU( Ntot ,S,Pℓ)
+> Optimal MFU *(Ntot ,S)max
+> Pℓ
+> MFU( Ntot ,S,Pℓ)
+> Deliverable FLOPs
+> Cdeliverable =Cpeak (Ttrain ) ⋅ goodput(cluster) ⋅ MFU *(Ntot ,S)
+
+(a) Model FLOPs selects a boundary MoE sparsity. Under a fixed Cmodel = 3 .3 × 10 21 , the fitted loss decreases over the calibrated sparsity range, so S⋆ = Smax (left). We do not cap any model dimension, and at each sparsity till Smax (0.985 here), the expert count and activated parameters are optimized under the budget. Under a hardware budget Cpeak with 4 AWS p6-B200 nodes for 5 days, this prescription is infeasible because configurations beyond the feasible boundary of S=0.96 deliver fewer Cdeliverable FLOPs (red region) than what the fixed prescription S⋆ requires (right). Solution: Cluster Optimal Scaling (MOSAIC) 
+
+Uses an architecture and hardware dependent budget       
+
+> Minimize law L(Ntot ,S,D)subject to Cmodel ≤Cdeliverable
+> Cluster Optimal
+
+S*cluster 
+
+(b) MOSAIC yields an interior feasible sparsity under the hardware budget. The hardware-aware loss L⋆
+
+hw (S) induced by Cdeliverable is minimized at the interior sparsity S⋆
+
+cluster and is 0.031 nats lower than at S⋆ = Smax . Each sparsity configuration is evaluated at the token count supported by its own attainable peak MFU under the same 4-node, 5-day hardware envelope. 
+
+Figure 1: The systems-aware scaling motivation for MOSAIC. 
+
+4Systems-Aware Scaling for Sparse Mixture-of-Experts MOSAIC (Model Optimization via Systems-Aware    
+
+> Training Co-design) Device Config (Peak
+> TFLOPs, Bandwidth,
+> Device Memory)
+> Number of Devices, Time
+> to Train (wall clock)
+> Geometry
+> Scaling Ladder
+> Performance
+> Model Scaling Law L(Z, D)
+> Z, D Predicted
+> Loss
+> Predicted
+> peak MFU
+> Model
+> geometry
+> Model Config
+> Outputs
+> Optimal parallel layout
+> (TP/PP /EP/CP/DP)
+> Model
+> geometry
+> Inputs
+
+Figure 2: The MOSAIC workflow. It takes the device configuration and the cluster size and training window as inputs, queries the geometry scaling ladder for candidate geometries, the performance model for predicted peak MFU, and the scaling law for predicted loss, and returns the model configuration together with its parallel layout. We start with describing the abstract formulation of MOSAIC in Section 2. To apply MOSAIC with sparse MoE model optimization, we first provide a technical overview of the training recipe used in our runs in Section 3. We then describe the components that instantiate MOSAIC with the sparse MoE architecture: (1) sparse MoE scaling laws in Section 4 and, (2) the performance model in Section 5. We make the application of MOSAIC for sparse MoEs concrete in Section 6, where the scaling law and the performance model come together to show why MoE sparsity has no interior optimum under a model FLOPs budget and why the right budget for a sparse MoE is the hardware-deliverable FLOPs. Finally, we discuss the experiments and the results in Section 7. We provide a snapshot of the most shared symbols used in the rest of the paper in Table 1. 
+
+2 MOSAIC: Model Optimization via Systems-Aware TraIning Co-design 
+
+MOSAIC selects a model architecture, training-token budget, and distributed execution layout jointly for a fixed cluster and training window. Its central departure from conventional model FLOPs optimal scaling is that the available model-FLOPs budget is not treated as an architecture-independent constant. In Section 2.1, we define the resulting architecture-dependent deliverable budget, we formulate the joint optimization in Section 2.2, and we instantiate it for sparse MoEs in Section 2.3. Figure 2 shows the workflow end to end, from the cluster inputs through the geometry ladder that fixes how the model dimensions co-scale, the performance model, and the scaling law, to the model configuration and parallel layout it returns. 
+
+2.1 From Hardware Budget to Deliverable Model FLOPs 
+
+A model FLOPs budget treats every allocation with the same Cmodel (Z, D ) = 6 N (Z) D as equally expensive, where N (Z) counts the parameters the architecture activates per token (equals the full parameter count for a dense model). On real clusters, model FLOPs omit a multiplicative systems-efficiency factor that itself depends on the architecture and its execution plan. A cluster of Ndev devices, each with peak per-device throughput Fpeak ,
+
+5Systems-Aware Scaling for Sparse Mixture-of-Experts 
+
+Symbol Meaning Architecture 
+
+Llayers Number of transformer blocks. 
+
+d Residual-stream width ( dmodel ). 
+
+dff Hidden width of the dense FFN that a sparse MoE block replaces. 
+
+dexpert Hidden width of a single expert. 
+
+E Total number of experts per sparse MoE block. 
+
+K Top-K active experts per token. 
+
+G expert split factor, G = dff /d expert . Figure 14 in Appendix B visualizes the construction. 
+
+Nact Active parameters per token (FLOPs-relevant). 
+
+Ntot Total stored parameters of the model (model-capacity). 
+
+S Sparsity, S = 1 − Nact /N tot (fraction of parameters not activated per token). 
+
+Routing and load balancing 
+
+H ∈ RT ×d Pre-MoE hidden states for a batch of T tokens (Algorithm 1). 
+
+ϕ ∈ RE Per-expert routing bias (LFLB controller). 
+
+μb Bias-update rate of the LFLB controller. 
+
+ρ Proposal-to-selection ratio for Gumbel routing, giving proposal size M =min( ρK, E ). 
+
+s′
+
+> i
+
+(x), si(x) Clean sigmoid router score and the selection score si(x) = s′
+
+> i
+
+(x) + ϕi that adds the balancing bias (Section 3.3). 
+
+TK (x) Set of top-K experts selected for token x.
+
+MOSAIC decision variables 
+
+Z Architecture decision variable of MOSAIC, a realizable sparse MoE geometry with induced scaling law dimensions ( Ntot , S, G ) (Section 2). 
+
+Pℓ Execution plan, Pℓ = ( PTP , P EP , P CP , P PP , P DP , B micro , A ckpt ), giving the par-allelism degrees along tensor (TP), expert (EP), context (CP), pipeline (PP), and data parallel (DP) groups together with the micro-batch size and the activation-checkpointing mode. 
+
+B Batch envelope, B = ( Bglobal , T seq ), giving nmb = Bglobal /(PDP Bmicro ) micro-batches per optimizer step. 
+
+D Number of training tokens. 
+
+Cmodel Model FLOPs, Cmodel = 6 N (Z) D, where the activated parameters N (Z) are 
+
+Nact for sparse MoEs. 
+
+Ttrain Wall-clock training window on the cluster. 
+
+Cpeak Raw hardware ceiling, Cpeak = Fpeak Ndev Ttrain , where Ndev is the device count. 
+
+Fpeak Per-device peak throughput. 
+
+Cdeliverable Deliverable model FLOPs, Cdeliverable (Z, P ℓ, B ) = Cpeak · MFU( Z, P ℓ, B ) ·
+
+ηgood (Ndev ), MFU is defined in Equation (1) and ηgood is the goodput fraction. 
+
+Table 1: Symbols used in the paper. 
+
+6Systems-Aware Scaling for Sparse Mixture-of-Experts 
+
+provides the raw hardware ceiling Cpeak = Fpeak Ndev Ttrain over a training window Ttrain .It is the physical maximum available over that window and only a fraction of this ceiling becomes useful model computation. Before discussing how we define useful model computation, we define Model FLOPs Uti-lization (MFU) as is used in our work. It is the fraction of the cluster’s peak throughput that a training run converts into the FLOPs mathematically required by the model (Chowdhery et al., 2023). An execution plan Pℓ specifies how the model is sharded and its computation scheduled across the GPU fleet (Chu et al., 2025). For architecture Z, execution plan Pℓ,and batch envelope B, let titer (Z, P ℓ, B ) denote the wall-clock time of one optimizer step processing Bglobal Tseq tokens, where Tseq is the sequence length. We define MFU as MFU( Z, P ℓ, B ) = 6 N (Z) Bglobal Tseq 
+
+titer (Z, P ℓ, B ) Ndev Fpeak 
+
+(1) It is the model FLOPs per token executed per second, normalized by the peak FLOPs rate Fpeak Ndev the cluster could sustain. The numerator counts only the FLOPs the model mathematically requires, so activation recomputation, though executed on the hardware, earns no credit. This distinguishes MFU from hardware FLOPs utilization (HFU), and MFU is the metric that tracks time-to-loss. MFU captures per-step execution efficiency, including kernel quality, compute and communication overlap, pipeline bubbles, and expert-parallel all-to-all. The goodput factor ηgood (Ndev ) captures the fraction of allocated wall-clock spent training rather than checkpointing, recovering from failures, or waiting on the input pipeline. We define the deliverable model FLOPs as 
+
+Cdeliverable (Z, P ℓ, B ) = Cpeak · MFU( Z, P ℓ, B ) · ηgood (Ndev ). (2) Unlike a conventional compute budget, Cdeliverable depends on the architecture and the layout Pℓ used to execute it. A candidate training configuration ( Z, D ) is feasible to train on the cluster within the window Ttrain only if it satisfies the constraint 
+
+Cmodel (Z, D ) ≤ max  
+
+> Pℓ∈P feas (Z,B )
+
+Cdeliverable (Z, P ℓ, B ) (3) where Pfeas (Z, B ) collects the execution plans that fit the cluster constraint, defined in Section 2.2. 
+
+2.2 Joint Architecture-Systems Optimization 
+
+MOSAIC formalizes hardware-aware model optimization as a mixed-integer nonlinear pro-gram (MINLP) that couples the architecture to the systems layout it will execute under. It optimizes three coupled choices, the architecture Z, drawn from a finite set Zdisc of realizable architectures, each carrying the scaling law dimensions its geometry induces, the training tokens D, and the execution plan Pℓ of Section 2.1. The hardware inputs are (Fpeak , N dev , T train , M dev ), where Mdev is the per-device memory cap, and the batch envelope 
+
+B = ( Bglobal , T seq ) fixes the tokens per optimizer step. The execution plans feasible for an architecture are collected in 
+
+Pfeas (Z, B ) =  Pℓ ∈ P disc (Ndev ) : Mem( Z, P ℓ, B ) ≤ Mdev (4) 
+
+7Systems-Aware Scaling for Sparse Mixture-of-Experts 
+
+where Pdisc (Ndev ) is the finite set of realizable execution plans the target training stack exposes on Ndev devices, comprising the parallelism degrees that tile the cluster, the micro-batch size Bmicro , and the activation-checkpointing mode Ackpt . Over this feasible plan set, we solve the following optimization min  
+
+> Z∈Z disc , D
+
+L Z, D  (5) subject to Cmodel (Z, D ) ≤ max  
+
+> Pℓ∈P feas (Z,B )
+
+Cdeliverable (Z, P ℓ, B ). (C-FLOPs) The objective L is the scaling law, which predicts loss from the architecture specific dimension Z and the data D. The loss functional form evaluates Z through the scaling law dimensions it induces, whereas MFU( .) and Mem( .) evaluate the concrete architecture itself, so all three are well-defined functions of Z even though several architectures can share the same dimensions. The execution plan enters only through the inner maximum, so the outer problem optimizes ( Z, D ) alone. All systems constraints sit inside Pfeas (Z, B ), which means that the maximum never returns an infeasible plan. Equation (C-FLOPs) is the feasibility condition of Equation (3). Equivalently, MOSAIC chooses for each architecture the best feasible plan as 
+
+P ⋆ℓ (Z) = arg max  
+
+> Pℓ∈P feas (Z,B )
+
+Cdeliverable (Z, P ℓ, B ). (6) We note that Equation (5) is a bilevel non-convex mixed-integer nonlinear program, an optimization problem that is bilevel because of the embedded maximization over Pfeas 
+
+in Equation (C-FLOPs). It is mixed-integer nonlinear since the layout degrees are integer and the architecture is drawn from the discrete set Zdisc . The constraint functions MFU( ·), Mem( ·) are nonlinear, and non-convex because of the discrete variables of the realizable plan set Pdisc (Ndev ) together with the non-convexity of MFU and memory in Pℓ. We collect in Appendix D.2 three structural properties of this program, including a closed-form elimination of D, that make its exact solution by enumeration tractable. 
+
+2.3 Instantiating MOSAIC for Sparse MoEs 
+
+We put Equation (5) to be architecture-agnostic. Applying it requires three components, a realizable architecture space induced by Z, a predictive loss function L(Z, D ), and predictors for MFU( Z, P ℓ, B ) and Mem( Z, P ℓ, B ). We define the sparse MoE realization of Z in Section 3, under which Zdisc becomes the finite set of realizable sparse MoE geometries and the activated parameter count becomes N (Z) = Nact . The execution plan additionally includes expert parallelism, and in our Megatron-Core realization, expert parallelism repartitions the data-parallel domain rather than introducing an independent world-size factor. We give the exact mesh factorization and divisibility constraints used to construct Pdisc (Ndev ) for our MoE models in Appendix D.1. We discuss each of these three components applied to sparse MoEs in the following sections. Figure 1 instantiates the constraint of Equation 3 with real numbers where a Cmodel = 3 .3 × 10 21 prescription on 4 p6-B200 nodes for 5 days becomes infeasible beyond Smax feas = 0 .96. Re-optimizing under the same hardware envelope yields an interior cluster-optimal sparsity whose predicted loss is 0.031 nats lower than the model 
+
+> 8Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+FLOPs optimal boundary configuration. These constraints let us treat the model dimensions as decision variables of the optimization rather than quantities capped in advance, which we argue is the more natural formulation for MoE-like models. 
+
+3 Sparse MoE Pretraining: Scaling Recipe 
+
+In this section, we discuss the dimensions Z for sparse MoEs in the context of scaling laws and describe the training recipe used to collect the scaling law data. We lay out the details of the architecture that is shared by all the runs in our study. Our architecture and training recipe follows the broader work from existing sparse MoE scaling studies of Krajewski et al. (2024) and Abnar et al. (2025) with some adjustments, and we describe those differences in the following sections. 
+
+3.1 Training Setup 
+
+We experiment with decoder-only transformer language models in which every feed-forward layer is replaced by an MoE layer. The first transformer block is kept dense and all remaining blocks are sparse MoE layers. Following the architecture design in DeepSeek-V3 (DeepSeek-AI, 2024; Dai et al., 2024), every MoE layer in the transformer block carries one shared expert that is always active in addition to the K routed experts. Each training run is optimized for text-to-text with the next-token-prediction language modeling objective and all runs use bf16 weights and activations. We focus on the MoE layer in this section since that forms the basis of the scaling laws in the rest of the paper. We use the standard parametrization recipe for weight initializations and we adopt AdamW optimizer (Loshchilov and Hutter, 2017) for all the runs. Similar to the Chinchilla training runs (Hoffmann et al., 2022), we consider a single pass over the tokens and we use the smoothed training loss of the final checkpoint of each run for the scaling law fits. The rest of the technical details of the data, training recipe and the hyper-parameter choices including the optimizer choices and learning rate scheduler are described in Appendix A.1. 
+
+3.2 MoE Layer 
+
+We use Llayers to denote the number of transformer blocks, d ≡ dembd as the residual stream width, and dff as the hidden width of the corresponding dense feed-forward layer that a sparse MoE layer replicates into E copies 3. Each MoE layer consists of E experts {fi}Ei=1 , where every expert is itself a two-layer feed-forward network of the form fi(x) = W (2)  
+
+> i
+
+σ
+
+
+
+W (1)  
+
+> i
+
+x
+
+
+
+with W (1)  
+
+> i
+
+∈ Rdexpert ×d, W (2)  
+
+> i
+
+∈ Rd×dexpert , and σ(·) a gated activation, in our runs being SwiGLU. We keep dff and dexpert as separate symbols because a sparse MoE layer can split the reference FFN of width dff into narrower experts of width dexpert , so the two coincide only when each expert is a full-width dense FFN, something we will explore in Section 4. We follow the Switch-style token-choice routing formulation (Fedus et al., 2022; Liu et al., 2023). A learnable router Wr ∈ RE×d produces a per-token score vector s(x) ∈ RE , and the top-K experts under s(x) are selected for each token in a forward pass. The sparse MoE      
+
+> 3. dff is conventionally a fixed multiple of the residual width d. For example, GPT-2 (Radford et al., 2019) uses dff = 4 d.
+> 9
+
+Systems-Aware Scaling for Sparse Mixture-of-Experts 
+
+Algorithm 1 Sparse MoE token-choice routing for a single MoE layer, batch of T tokens routed to E experts 
+
+Input: Pre-MoE hidden states H ∈ RT ×d (attention output of the cur-rent block added to the previous-layer residual stream); router weights 
+
+Wr ∈ RE×d; per-expert bias ϕ ∈ RE ; hyperparameters K (top-
+
+K), Gumbel proposal size M = min( ρK, E ), Gumbel temperature τ .
+
+Output: Top-K expert indices TK ∈ { 1, . . . , E }T ×K , where row TK (xt) = Top K(s(xt)) over the proposal set Ct is the selected set for token t in Eq. 7; normalized gate probabilities ˜π ∈ RT ×K 
+
+> ≥0
+
+with P  
+
+> i∈T K(xt)
+
+˜πt,i = 1; per-expert token counts n ∈
+
+NE . Throughout, i ∈ { 1, . . . , E } identifies an expert and t ∈ { 1, . . . , T } a token.  
+
+> 1:
+
+˜Wr ← RowNorm (Wr, c r) {ℓ2-normalize each router row to target norm cr} 
+
+> 2:
+
+Θ ← H ˜W⊤ 
+
+> r
+
+{router logits } 
+
+> 3:
+
+s′ ← σ(Θ) {clean scores, no bias } 
+
+> 4:
+
+s ← s′ + ϕ {LFLB bias-added selection scores, Eq. 18 in Appendix A.3 } 
+
+> 5:
+
+for each token t ∈ T (parallel) do  
+
+> 6:
+
+gt,i ∼ Gumbel(0 , 1) for i = 1 , . . . , E {i.i.d. standard Gumbel per expert } 
+
+> 7:
+
+gt ← gt − 1
+
+> T
+
+PTt′=1 gt′ {per-expert noise centering } 
+
+> 8:
+
+Ct ← Top-Mi
+
+ log s′ 
+
+> t,i
+
++ τ g t,i 
+
+ {proposal on clean scores } 
+
+> 9:
+
+TK,t ← Top-Ki∈C t
+
+ st,i 
+
+ {bias-aware correction } 
+
+> 10:
+
+ζt ← P 
+
+> j∈T K,t
+
+s′ 
+
+> t,j
+> 11:
+
+˜πt,i ← s′ 
+
+> t,i
+> ζt
+
+, i ∈ T K,t {gates use clean scores, P = 1 } 
+
+> 12:
+
+end for  
+
+> 13:
+
+ni ← PTt=1 ⊮[i ∈ T K,t ] , i = 1 , . . . , E {entries of the per-expert token-count vector n} 
+
+> 14:
+
+return TK , ˜π, n 
+
+layer output is the gating-weighted sum of their outputs, 
+
+y(x) = X  
+
+> i∈ T K(x)
+
+˜πi(x) fi(x), TK (x) = Top K s(x) (7) where ˜ πi(x) are the probabilities the selected set TK (x). In the following section, we describe the routing operations that result in the Top K(.) outputs and the associated probabilities ˜πi(x) and we treat Equation 7 as the canonical sparse MoE layer definition. 
+
+3.3 Routing and Load Balancing 
+
+Stable large-scale sparse MoE training hinges on the routing recipe that selects the active experts per token, since imbalances in token-to-expert assignment compound into load-balancing issues (Hu et al., 2025; Wang et al., 2025b), loss spikes, and a degraded effective parameter count. We describe the routing choices that kept training stable as we scaled up, a prerequisite for reliable scaling law extrapolation. There have been myriad studies focused on designing such routing algorithms that improve both the training dynamics and the end 
+
+10 Systems-Aware Scaling for Sparse Mixture-of-Experts 
+
+model accuracy (Muqeeth et al., 2023; Zoph et al., 2022; Zhou et al., 2022; Hu et al., 2025). We build on the auxiliary-loss-free load balancing (LFLB) strategy of Wang et al. (2025b), in which a per-expert bias is updated online to counteract observed load imbalance, but augment it with several modifications that we found necessary for stable training across our scaling sweeps. In its original form, LFLB scores each token-expert pair by a sigmoid affinity s′
+
+> i
+
+(x) = 
+
+σ(θi(x)) with i denoting an expert and θi(x) = ˜ w⊤
+
+> r,i
+
+x denoting the router logit. It selects the top-K experts by a bias-adjusted score si(x) = s′
+
+> i
+
+(x) + ϕi, and combines their outputs with the clean scores s′
+
+> i
+
+(x) renormalized over the selected set (Wang et al., 2025b; DeepSeek-AI, 2024). The per-expert bias ϕi is a controller state nudged once per training step toward under-used experts from the observed per-expert token counts ni, so the bias fixed at the end of one step steers selection on the next. We keep this sigmoid-plus-bias score (Eq. 18 in Appendix A.3) but adjust the selection rule and the bias controller, as summarized next. We introduce a few additions to the base LFLB recipe, laid out in Algorithm 1 and detailed in Appendix A.3. The algorithm takes as input a batch of T tokens with their pre-MoE hidden states H, the router weights Wr, and the current per-expert bias ϕ, and returns the top-K expert indices TK selected per token, their normalized gate probabilities ˜π, and the per-expert token counts n that drive the bias update for the next step. The main additions to LFLB are as follows. 
+
+• The expert bias is updated online by an RMS-normalized imbalance controller and re-centered each step, so the correction tracks the shape of the imbalance rather than the batch size. 
+
+• The top-K selection involves a Gumbel proposal-correction sampler. It entails a stochastic top-M proposal on the clean sigmoid scores followed by a bias-aware top-K
+
+correction ( M > K , with M a pre-selected hyperparameter fixed across all runs), with the per-expert noise centered across the batch. The top-M proposal followed by the top-K correction separates exploration from final routing. We use Gumbel scores only to expand the candidate set to M , then choose the final K using clean scores inside that set. Since applying Gumbel noise over all experts can cause large arbitrary flips, we restrict it to a top-M candidate pool among E experts. It lets near-boundary experts get exposure while preventing far-tail experts from winning due to noise. Lines 5–9 of Algorithm 1 follow this procedure. 
+
+• The router rows are ℓ2-normalized every forward pass so routing depends on direction rather than norm drift. Load balancing is thus carried by the bias controller and the noise, with no batch-level load-balancing loss added to the objective. We do retain the sequence-level auxiliary loss of DeepSeek-AI (2024), described in Appendix A.3. Together, these changes provide a stable routing recipe across the sweep without a batch-level load-balancing loss. That stability is what lets us treat the final-checkpoint loss of every run as a comparable fit target for the scaling laws of Section 4. 
+
+3.4 Sparsity S and Expert Split Factor G
+
+In considering the geometry of MoE models, the two architectural dimensions of interest are the total expert count E and the per-token activated experts K. Together with Llayers , d, and 
+
+> 11 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+dff , these determine an active parameter budget Nact (the model FLOPs-relevant parameter count seen by any individual token) and a total parameter budget Ntot (the memory footprint of the model). In this section, we discuss two architectural knobs, the sparsity S and the expert split factor G, that we later use to parametrize the sparse MoE scaling laws. We recall from Table 1 that the two parameter budgets set the sparsity S = 1 − Nact /N tot , the fraction of parameters left inactive per token. To compare architectures whose experts differ in size, we use expert split factor defined as: 
+
+G := dff 
+
+dexpert 
+
+(8) It is the ratio of the dense FFN width dff that an MoE block replaces to a single expert’s hidden width dexpert , measuring how finely that dense FFN has been partitioned into experts. We visually show the construction of this expert split factor G in an MoE layer in Figure 14 in Appendix B. dff is the intermediate (hidden) width of the reference full FFN, a fixed multiple of the residual-stream width dmodel , and is distinct from dmodel itself and dexpert = dff  
+
+> G
+
+is the per-expert slice of it. The G = 1 case recovers the setting studied in Clark et al. (2022) in which each expert is itself a full-width FFN. G > 1 corresponds to fine-grained experts whose width shrinks proportionally as their count grows. Equivalently, at a fixed total parameter count (or fixed total expert width), a higher G means smaller, but more finer-grained experts in the MoE layer. The ratio EG is the effective expansion rate of total to dense FFN parameters used by Krajewski et al. (2024), so increasing G at fixed EG yields more, smaller experts at constant total parameter count. 
+
+4 Sparse MoE Scaling Laws L(.)
+
+Building on the sparse MoE architecture discussed in Section 3, we elaborate on what Z
+
+entails and we lay out the desiderata behind the scaling law formulations we target in our study. We want a loss law where Z meets three requirements. First, a concrete discrete MoE geometry must map to the law’s dimensions, so a downstream optimizer can realize the fitted optimum as a real architecture rather than an abstract parameter count, which is why we parameterize in total parameters and geometry knobs. Second, those dimensional knobs must expose how the model geometry acts on the systems side including communication, and memory and not on loss alone. Third, we prefer that the law stay low-dimensional, because if each of the u free dimensions in a scaling law is evaluated at v discrete values using a full factorial design, the number of configurations scales as O(vu). The laws fitted in the study by Abnar et al. (2025) and by Tian et al. (2026) are on essentially the same axes, differing mainly in the shared-expert ratio. We build on both while adding the geometry dimension the systems side needs. We utilize the sparsity S and expert split factor G described in Section 3, and argue that G is a necessary axis beyond those considered in Abnar et al. (2025). We then review the Abnar et al. (2025) law on our training runs in Section 4.1, following which we discuss the final scaling function form we use for the optimization in Section 4.2.      
+
+> 12 Systems-Aware Scaling for Sparse Mixture-of-Experts
+> (a) G= 4. (b) G= 8.
+
+Figure 3: Predicted-vs-observed training loss for the L(Ntot , S, D ) fit in Equation (9), fit per expert split factor. The panels for every stratum we fit, G ∈ { 1, 2, 4, 8}, are in Figure 15 of Appendix B. 
+
+4.1 Scaling Laws with Sparsity 
+
+Before fitting the functional form following the desiderata above, we follow the functional form studied in Abnar et al. (2025), and parameterize per-token training loss as a separable Chinchilla-style law in total parameters and tokens, with an additional sparsity term, so the induced scaling law dimensions are ( Ntot , S ), 
+
+L(Ntot , S, D ) = aN α
+
+> tot
+
+| {z } 
+
+> capacity
+
++ bDβ
+
+|{z} 
+
+> data
+
++ c
+
+(1 − S)λ
+
+| {z }
+
+> sparsity floor
+
++ j
+
+(1 − S)δ N γ
+
+> tot
+
+| {z }
+
+> interaction
+
++ e (9) with sparsity S, which differs from how sparsity (= 1 − KE ) is defined in that study. The first two terms recover the Chinchilla form (Hoffmann et al., 2022) in the limit S → 0 (dense model). We fit the functional form in Equation (9) separately for each expert split factor G,holding out the largest models by active parameters to test upward extrapolation. The fits are statistically tight. The predicted and observed loss collapse onto the identity line with held-out RMSE between 0 .0002 and 0 .0037 in loss units across the four expert split factors, under half a percent relative error. Figure 3 shows G = 4 and G = 8, and the full 
+
+G ∈ { 1, 2, 4, 8} panel is given in Appendix B.1. What the parity plots also reveal is that the fitted coefficients change substantially across G, so no single set of ( Ntot , S, D ) coefficients describes all the expert split factors at once. This is what leads us to build G into the law in Section 4.2. In Figure 4, we find that three trends are monotone over S ∈ [0 .5, 0.981]. These three trends agree with those Abnar et al. (2025) report, recovered here on our own runs and under our sparsity definition. We return to this figure and its consequence for the model-FLOPs optimum in Section 6.1. 
+
+> 13
+
+Systems-Aware Scaling for Sparse Mixture-of-Experts 0.50 0.63 0.86 0.98                                
+
+> MoE Sparsity S
+> 10 9
+> 10 10
+> Optimal Total Parameters  N*tot  (a) Optimal Ntot vs S
+> Model-FLOPs
+> 3 × 10 19 FLOPs 6 × 10 19 FLOPs 1 × 10 20 FLOPs 3 × 10 20 FLOPs 6 × 10 20 FLOPs
+> 0.50 0.63 0.86 0.98
+> MoE Sparsity S
+> 10 8
+> 10 9
+> Optimal Active Parameters  N*act  (b) Optimal Nact vs S
+> Model-FLOPs
+> 3 × 10 19 FLOPs 6 × 10 19 FLOPs 1 × 10 20 FLOPs 3 × 10 20 FLOPs 6 × 10 20 FLOPs
+> 0.50 0.63 0.86 0.98
+> MoE Sparsity S
+> 1.8 1.9 2.0 2.1 2.2
+> Optimal Pretraining Loss  * (c) Optimal loss vs S
+> Model-FLOPs
+> 3 × 10 19 FLOPs 6 × 10 19 FLOPs 1 × 10 20 FLOPs 3 × 10 20 FLOPs 6 × 10 20 FLOPs
+
+Figure 4: Model FLOPs optimal N ⋆
+
+tot , N ⋆
+
+act , and L⋆ as a function of sparsity S, at five budgets C. The curves are computed from our own G = 4 fit of Equation (9) on our runs. Larger MoE sparsity S increases optimal total parameters, decreases optimal active parameters, and lowers achievable loss at every model-FLOPs budget. 
+
+4.2 G-augmented Joint Scaling Law 
+
+Before adding the expert split factor G to the law, we note that G and the sparsity S are distinct knobs that happen to share the parameter counts. The two move different geometry variables and appear coupled only because both these dimensions modulate Ntot and Nact .Empirically they are close to orthogonal on our grid, where the Pearson correlation between log G and each of log Ntot , S, and log Nact is at most 0 .02 in magnitude, because the sweep varied dexpert independently of ( E, K ) and every G ∈ { 1, 2, 4, 8} is observed across nearly the full Ntot and S ranges. A starting point to understand how to augment the scaling functional form with the expert split factor G is the conventional model FLOPs optimal recipe. Figure 5 shows that the loss curves in Ntot fan out rather than stay parallel as G or S varies, so the effect of the expert split factor and of sparsity is not a rigid shift but depends on Ntot , which is a coupling a separable law in ( Ntot , S, D ) cannot express. Following this observation, we tie 
+
+G, S, and Ntot together in a single interaction term. The joint scaling law we use, on the scaling law dimensions ( Ntot , S, G ) induced by Z, is 
+
+L(Ntot , S, D, G ) = aN α
+
+tot 
+
++ bDβ + c
+
+(1 − S)λ
+
++ j
+
+(1 − S)δ N γ
+
+tot Gη + e. (10) Here G appears only in the denominator of the interaction term, so raising G shrinks the sparsity penalty and lowers the predicted loss at fixed ( Ntot , S, D ). Placing G in the joint coupling rather than folding it into a single effective parameter count is what keeps the fit balanced across G values. 
+
+Fitting Results. We fit the form in Equation (10) on the scaling grid spanning G ∈{1, 2, 4, 6, 8}. We hold out the top-10% of runs by Nact within each G-stratum to validate the observations we do not use in training. We minimize the Huber objective on log L
+
+14 Systems-Aware Scaling for Sparse Mixture-of-Experts 10 9 10 10 10 11 10 12    
+
+> N_tot (total params)
+> 1.9 2.0 2.1 2.2 2.3 2.4 2.5 2.6
+> training loss L
+> S=0.95, D=6B G=1 G=2 G=4 G=8 predicted (scaling law) observed (real runs)
+> 10 910 10 10 11 10 12
+> N_tot (total params)
+> 1.9 2.0 2.1 2.2 2.3 2.4 2.5 2.6
+> training loss L
+> G=4, D=6B S=0.800 S=0.900 S=0.950 S=0.975 predicted (scaling law) observed (real runs)
+
+Figure 5: Loss against total MoE parameters Ntot . In the left, one curve per expert split factor G at fixed S = 0 .95, D = 6 B. In the right, one curve per sparsity band at fixed G = 4, D = 6 B. The curves fan out rather than staying parallel (left), which is why G enters the law as its own axis instead of being absorbed into an effective parameter count, and Table 2 bears this out, where the G-exponent η is identified rather than sitting on the coefficient ridge. 
+
+Coeff. Value 95% BCa CI Identifiability 
+
+a 8.462 [8 .24 , 8.85] ridge 
+
+b 88 .32 [87 .8, 89 .9] ridge 
+
+c 0.1828 [0 .181 , 0.184] ridge 
+
+j 0.7123 [0 .710 , 0.713] ridge 
+
+e 0.3129 [0 .307 , 0.316] ridge 
+
+α 0.1048 [0 .104 , 0.106] ridge 
+
+β 0.2070 [0 .206 , 0.208] identified 
+
+λ 0.1249 [0 .119 , 0.138] ridge 
+
+δ 0.5567 [0 .550 , 0.577] ridge 
+
+γ 0.1702 [0 .167 , 0.174] ridge 
+
+η +0.9513 [+ 0.911 , +0.954 ] identified 
+
+Table 2: Fitted coefficients of the joint scaling law in Equation (10). 95% BCa CIs come from a warm-started wild bootstrap in the deployed basin. We work through which coefficients the data identify and which sit on the flat ridge in Appendix B. (δHuber = 0 .1) by L-BFGS-B in log-coefficient space. Table 2 reports the point estimates together with 95% confidence intervals, and marks each coefficient as identified or ridge. A coefficient is identified when the data pin its value uniquely, and it sits on a ridge when only a combination of several coefficients is fixed. Table 2 shows that η and β are identified here, because G and D each enter the law in a single place that no other coefficient can absorb. The G exponent η ≈ 0.95 is therefore our robust observation, and since it multiplies the 
+
+15 Systems-Aware Scaling for Sparse Mixture-of-Experts 
+
+Figure 6: Training loss against expert split factor G = dff /d expert at matched ( Ntot , S, D )operating points. The predicted loss decreases monotonically with G. The observed runs decrease up to G = 4 and flatten or slightly reverse at G = 8 within run noise. The gap between the coarsest and finest experts widens along the plotted series, tracking their rising sparsity. joint sparsity and capacity term, its reading is that larger G discounts the loss penalty that sparsity imposes at fixed capacity. We do not claim a universal expert split factor law with our functional form fits, since our scaling data traverses the discrete space G ∈ { 1, 2, 4, 6, 8}.We check this against the runs in Figure 6, where the predictions of Equation (10) decrease monotonically with G at matched ( Ntot , S, D ) while the observed losses decrease up to G = 4 and flatten or slightly reverse at G = 8 within run-to-run noise. The law attributes the widening gap between the coarsest and finest experts to the rising sparsity of the larger operating points through the (1 − S)−δ factor rather than to Ntot itself, since at matched S
+
+the N −γ 
+
+> tot
+
+decay of the interaction term shrinks the gap as models grow. From the systems viewpoint of this paper, η quantifies the rate at which finer-grained experts soften the sparsity penalty at a fixed memory footprint, a benefit that the performance model in Section 5 will price against sparse MoE layer communications overhead. We further validate the fit quality in Figure 7, which collapses a subset of all runs across 
+
+G ∈ { 1, 2, 4, 6, 8} onto the identity line, and the joint law attains a held-out RMSE of 0 .00779 in loss units on the largest 10% of runs by Nact within each G stratum. The fitted form also behaves as we expect of a well-formed scaling law. It is monotone-decreasing in Ntot , D,and G, and convex in S with a sharp penalty as S → 1. As G → ∞ the joint term drops out and the loss settles onto a/N α 
+
+> tot
+
++ b/D β + c (1 − S)−λ + e. As Ntot , D → ∞ at fixed MoE sparsity S, the loss approaches e + c (1 − S)−λ, so the sparsity floor persists at infinite scale and the irreducible term is e∞ = e + c ≈ 0.50 in the dense limit S → 0 rather than e alone. 
+
+5 Estimating M F U (.) with a Performance Model 
+
+This section specifies the design of a performance estimator that predicts MFU( Z, P ℓ, B ) and Mem( Z, P ℓ, B ) for MOSAIC in Section 2. This estimator takes only the model specification 
+
+> 16 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+Figure 7: Joint-law parity plot over all runs, R2 = 0 .99877. The crosses are the held-out validation runs, the largest 10% by Nact within each G stratum, with a held-out RMSE of 0 .00779 in loss units. Marker shape and color pick out a sample of the (G, K ) pairs the sweep covers. and the physical device layout as input, and produces a parallelism layout, single-iteration running time, MFU, and memory footprint as output. A closed-form scaling rule cannot stand in for MFU predictions, because systems scaling is nonlinear and MFU is therefore nonlinear in the device count. So, doubling the GPUs neither guarantees doubling the throughput nor preserves the layout that was optimal before, so we cost the forward and backward passes of a single iteration analytically against measured collective timings instead. 
+
+5.1 Design Principle 
+
+The core principle behind our performance model is to minimize MFU prediction error while keeping the model simple and physically-grounded: every term must trace to a hardware specification, a measured kernel or collective timing, or a scheduling equation, never a hand-tuned constant. We pair a lightweight analytical skeleton (FLOPs, collective-algorithm equations, and the 1F1B pipeline schedule) with a set of carefully designed microbenchmarks run on the target hardware, so that the model consumes measured kernel efficiencies and collective bandwidths rather than attempting to reproduce the intrinsic complexity of runtime kernel behavior from first principles. Two effects cannot be captured by an uncontended microbenchmark, namely CPU-dispatch-bound execution on small models and cross-node straggler and overlap in large collectives. We isolate each into a small, explicitly labeled correction rather than spreading fudge factors across every component. In the large, this design yields a practical calculator that guides performance engineering toward the optimal MFU through an efficient parallelism-layout search. In the small, it also offers a fine-grained per-component time breakdown of a single MoE training or inference iteration, which supports bottleneck diagnosis. 
+
+> 17 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+5.2 Functionality 
+
+The performance model is driven by a model-architecture specification that fully describes a training run, as shown in Appendix E. It groups settings into seven blocks. The model 
+
+block defines the dense transformer geometry (depth, widths, attention heads, vocabulary, and architectural switches such as SwiGLU, rotary embeddings, and weight tying), along with the compute precision, which selects among floating-point formats ( bf16 , fp16 , fp8 ,
+
+fp4 , tf32 , fp32 , and others) so that GEMMs and attention are costed against the matching device peak-FLOPs lane. The model.moe block adds the mixture-of-experts layer (expert count, top-k routing, expert width, shared-expert width, and the capacity factor that sizes the routed token budget and the all-to-all traffic). The search block declares the device budget. The performance block sets the activation-checkpointing strategy ( none , selective ,
+
+super-selective , or full ). The optimizer block selects the optimizer family ( adam , adamw ,
+
+muon , scion , and more), which sets the optimizer-state footprint and update FLOPs. The 
+
+data block gives the batch and sequence shape, and the hardware block names the target node type. From this specification, the tool builds an internal model and hardware representation, then enumerates the feasible execution plans Pℓ = ( PTP , PEP , PCP , PPP , PDP , Bmicro ) that tile the device budget and estimates the compute, memory, and communication cost of each. The output is a per-layout prediction of MFU and memory usage, used to rank parallelism configurations against realistic training jobs. We give a worked example of both the specification and the returned output in Appendix E, where we also describe the layout search that produces the ranking. 
+
+5.3 Microbenchmarks 
+
+Closed-form FLOPs divided by device peak FLOPs over-predict throughput: real kernels reach only a fraction of peak that depends on operand shape, and memory-bound operations do not scale with FLOPs at all. We therefore benchmark the dominant computation and communication components on the target hardware and feed the measured timings into the model as interpolated lookup tables. We interpolate within the measured range and refuse to extrapolate silently outside it. The benchmarked components are: 
+
+• Dense GEMMs : achieved utilization as a function of ( M, N, K ) and precision, for the attention, MLP, shared-expert, and LM-head projections. 
+
+• Grouped GEMMs (the MoE expert MLP): the fused GroupedLinear operator, keyed by the number of local experts ( num gemms ), the per-expert token load (the grouped tile M ), and the expert shape. This is essential because the expert MLP runs many small per-expert tiles rather than one large GEMM, where its efficiency is set by the per-group tile Mexpert = ⌈Tseq Bmicro K/E ⌉ (sequence length Tseq , micro-batch 
+
+Bmicro , top-K, E experts), which is invariant to expert and data parallelism, not by the aggregate token count. Costing it as a single dense GEMM over-credits utilization by up to an order of magnitude in the token-dropless regime. 
+
+• Scaled dot-product attention (SDPA) with the Flash-Attention backend (Zadouri et al., 2026), forward and backward, indexed by the TP-sharded head counts that actually execute on one GPU. 
+
+> 18 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+• MoE top-k routing and element-wise operations ( silu , residual add ), forward and backward. 
+
+• Cross-entropy over the vocabulary : the fused vocab-parallel loss on fp32 -upcast logits. This is far more expensive than a naive count of logit passes suggests, and it lands entirely on the last pipeline stage. 
+
+• NCCL collectives : all reduce , reduce scatter , all gather , all to all , and 
+
+send recv , as effective bus-bandwidth curves swept over message size and group size, covering both the intra-node (NVSwitch) and inter-node (EFA) regimes and both contiguous (dense-DP) and strided (expert-DP) rank layouts. These curves differ from the analytic link-peak-times-protocol-efficiency estimate by up to 8 × in both directions and exhibit a strong size ramp that specifications alone do not predict. 
+
+• Per-kernel CPU dispatch gap : the steady-state CPU enqueue stall between kernels in an eager execution stream, which bounds throughput when kernels are small (see below). 
+
+5.4 Iteration-Time Model 
+
+The predicted per-iteration time sums a transformer-block compute term, a pipeline-bubble term, a vocabulary-stage (embedding and LM-head/cross-entropy) term, the exposed data-parallel and pipeline-parallel collective times, and the optimizer step. Three parts of this decomposition depart from a naive roofline and warrant explanation. 
+
+Compute versus dispatch (per-microbatch wall). For small models with a micro-batch size of one, the transformer-block kernels are tiny (e.g. < 0.1 ms per GEMM) and a single microbatch launches tens of thousands of kernels. The CPU cannot enqueue them fast enough and the GPU starves. We therefore model the per-microbatch wall as 
+
+tmb = max  tcmp , t disp 
+
+, tblock = nmb tmb , nmb = Bglobal 
+
+PDP Bmicro 
+
+(11) where nmb is the number of microbatches per optimizer step, tcmp is the summed measured GPU-compute time of the stage’s layers, and tdisp = Lstage κ(Eloc ) tgap + thost is the CPU-dispatch floor over Lstage layers per stage, with a measured per-kernel gap tgap , a fixed per-microbatch host term thost , and a kernel-count law κ(Eloc ) = κ0 +κ1 Eloc that grows with the number of local experts Eloc (the surrounding framework kernels, namely permutation, copies, and bias-adds, dominate the launch count, not the fused expert GEMM). The max makes this term self-limiting , where large-model kernels are large enough to hide dispatch, so the term vanishes and those configurations remain compute-bound. 
+
+Pipeline bubble. With 1F1B scheduling, the pipeline fill and drain phases leave each stage idle for an effective fraction of the iteration. For nmb microbatches per pipeline, PPP 
+
+pipeline stages, and PVPP -way interleaving 4, the bubble fraction is 
+
+fbubble = PPP − 1
+
+PVPP nmb 
+
+(12) 
+
+> 4. https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/parallelisms.html#interleaved-pipeline-parallel-schedule
+> 19 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+so the pipeline bubble time is tbubble = fbubble tblock . Each rank computes nmb microbatches of work and idles ( PPP −1) /P VPP microbatch-slots during warmup and cooldown. That ramp is the entire bubble. This form replaces an earlier weighted-average expression that added a separate fill/drain term, charging each of the 2( PPP − 1) warmup/cooldown microbatches a (PPP − 1) /P PP stage bubble on top of the ( PPP − 1) /n mb steady-state term, and clamped the result at ( PPP − 1) /P PP . That expression double-counted the fill/drain phase, and its clamp under-counted the small-batch regime it was meant to bound. 
+
+Vocabulary-stage imbalance. The token embedding is placed on the first pipeline stage and the LM head plus cross-entropy is placed on the last, in addition to those stages’ transformer layers. Because 1F1B is paced by the slowest stage, the surplus tlast on the last stage (the measured LM-head GEMM forward and backward plus the measured cross-entropy) is exposed once per microbatch, and it further lengthens the fill/drain ramp. The stage-imbalance contribution is 
+
+tvocab = ( nmb − 1) max( tfirst , t last ) + tfirst + tlast (13) with an added tlast nmb fbubble term for the ramp. Here tfirst is the (bandwidth-bound) embedding gather/scatter. This term is essential for deep-pipeline MoE configurations, where the vocabulary-parallel LM head is a large fraction of the critical path and was previously unpriced. The exposed data-parallel and pipeline-parallel collective times are taken directly from the measured bandwidth curves of Section 5.3, with the DP grad reduce-scatter and param all-gather overlapped against compute where windows allow. 
+
+5.5 Calibration 
+
+Because the compute and wire-time terms above are read from measured lookup tables, most of the model requires no correction factor at all. What remains, and cannot be recovered from an uncontended microbenchmark, is a single runtime effect, namely cross-node straggler and overlap. When an expert-parallel or pipeline-parallel group spans multiple nodes, many collective rings run concurrently and are paced by the slowest rank (traces show per-call inter-node latencies with a tight median but tails two to three orders of magnitude larger), so the realized cost exceeds the uncontended microbenchmark. When a deep pipeline fits within a single node, conversely, the heavy last stage overlaps other stages over NVLink better than a straggler-free 1F1B accounting assumes, so the realized step is faster than predicted. We isolate this into one explicitly labeled correction, the model’s only fitted term, which multiplies the analytical iteration time, 
+
+tcal iter = χsys tanalytic iter (14) where the systems calibration multiplier is 
+
+χsys = 1 + cA2A 
+
+tA2A 
+
+titer 
+
+⊮N EP node > 1 + cPP 
+
+ N PP node − 1
+
++ covl ⊮PPP ≥ Ngpu/node , N PP node = 1  .
+
+(15) 
+
+> 20 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+Here N EP node = ⌈PEP PTP /N gpu/node ⌉ and N PP node = ⌈PPP /N gpu/node ⌉ count how many nodes of Ngpu/node GPUs each the expert-parallel and pipeline-parallel groups span, and tA2A is the modeled per-step expert all-to-all wire time. Each driver is tied to a physical quantity, where (i) the inter-node A2A straggler scales the penalty by how large a fraction of the step the expert A2A already is, and applies only when the EP group crosses a node boundary. (ii) The deep-pipeline term scales with the number of inter-node hops the pipeline crosses. (iii) The intra-node overlap credit (covl < 0) applies only to a deep pipeline confined to one node. Single-node, shallow-pipeline configurations incur no correction ( χsys = 1). Together, the microbenchmarks, the iteration-time model, and this single calibration term constitute the estimator we release as ScalePlan, whose layout search supplies the MFU and Mem predictors that MOSAIC consumes. We validate these predictions against measured MFU on real training sweeps in Section 7.2. 
+
+6 Optimal MoE Sparsity Scaling 
+
+In Section 2, we defined deliverable model FLOPs Cdeliverable as the systems-aware constraint used by MOSAIC. We now develop the motivation sketched in Figure 1 in more detail for sparse MoEs. We bring together the two pieces, the sparse MoE scaling laws and the hardware-deliverable model FLOPs, to explain why the deliverable model FLOPs Cdeliverable 
+
+of Equation (2) is the budget that makes sense for sparse MoEs before we turn to results. A practical use of scaling laws such as ours is to pick the scaling dimensions that minimize predicted loss under a model FLOPs budget, Cmodel = 6 Nact D. Simply said, we want the (Ntot , S, D, G ) that minimizes our law under the budget. Conventionally, solutions of this kind proceed in two stages. In the first stage, we solve an optimization for the model FLOPs optimal ( N ⋆
+
+> tot
+
+, S ⋆, D ⋆, G ⋆), treating these as continuous variables. In the second stage, we map that optimum to a discrete, deployable model configuration, since S and G are not free knobs one can set directly. S is a derived ratio, and G moves only by changing the discrete geometry ( E, K, L layers , d ) of Section 3. To that end, Sections 6.1 and 6.2 discuss two limitations of model-FLOPs based optimality for sparse MoE scaling that make such a two-stage optimization the wrong choice. The next section shows that the sparse MoE dimensions in our scaling law admit no interior optimum under a model-FLOPs budget, which forces the budget to be recast as an architecture-dependent deliverable model-FLOPs budget. 
+
+6.1 Model-FLOPs Optimal Sparsity Is Boundary-Seeking 
+
+Conditioning on the scaling law, the conventional scaling studies seek the optimal sparsity S
+
+that minimizes loss at a fixed budget Cmodel . Concretely, with Nact = (1 − S) Ntot and the budget Cmodel = 6 Nact D (at fixed G), the model FLOPs only optimization problem reads min  
+
+> Ntot ,S,D
+
+L(Ntot , S, D, G ) s.t. 6 (1 − S) Ntot D = Cmodel , Ntot , D > 0, S ∈ [0 , 1) .
+
+(16) Solving Equation (16) with the joint law of Equation (10) at Cmodel ∈ { 3 × 10 19 , 6 ×
+
+10 19 , 10 20 , 3 × 10 20 , 6 × 10 20 } FLOPs recovers the three trends that the G = 4 fit of Equation (9) produces in Figure 4. The important observation in the plots is that N ⋆
+
+> tot
+
+(S)
+
+> 21
+
+Systems-Aware Scaling for Sparse Mixture-of-Experts 0.649 0.812 0.904 0.951                          
+
+> MoE sparsity S
+> 1.55 1.60
+> optimal  (Cmodel )
+> Cmodel optimal
+> 16 B 24 B 39 B 62 B
+> lower is better
+> G= 4 0.649 0.812 0.904 0.951
+> MoE sparsity S
+> 012
+> time per FLOP (×)  +70% wall-clock
+> ×1.00 ×1.11 ×1.33 ×1.70
+> lower is better
+> G= 4 1248
+> expert split factor G
+> 1.525 1.550 1.575 1.600
+> optimal  (Cmodel )
+> Cmodel optimal
+> 98 B 79 B 70 B 66 B
+> lower is better
+> S= 0.958 1248
+> expert split factor G
+> 0123
+> time per FLOP (×)  2.7× wall-clock
+> ×1.00 ×1.30 ×1.83 ×2.66
+> lower is better
+> S= 0.958
+> Cmodel = 10 22 FLOPs world size = 512
+
+Figure 8: Opposing views of model scaling and systems cost. The top row varies MoE sparsity S holding G = 4. The bottom row varies the expert split factor G holding 
+
+S = 0 .958. The left column gives the optimal loss under a fixed model-FLOPs budget. Each marker there is labeled with the optimal total parameters Ntot under that budget. The right column shows the wall-clock time each configuration needs per delivered model FLOP on 512 devices (64 p6 nodes), relative to the training time of the lowest sparsity configuration. The Cmodel optimal loss configuration pays 1 .70 × per FLOP in the top row and 2 .66 × in the bottom. The starred winners sit at opposite ends, so the Cmodel optimal loss configuration is the systems-slowest. increases monotonically with S, N ⋆
+
+> act
+
+(S) decreases, and L⋆(S) decreases monotonically at every Cmodel . Because L⋆(S) decreases monotonically over the calibrated sparsity range, the interior condition ∂L⋆/∂S = 0 is not satisfied within this region. The optimal sparsity under the Cmodel budget, therefore lies at S = Smax , the upper boundary of our data support. Thus, within this range where the scaling law is calibrated, model-FLOPs only optimization reduces to “make S as large as the supported architecture space allows.” The left column of Figure 8 shows the same monotone descent on both knobs, in S at fixed G and in G at fixed 
+
+S. We do not claim that this monotonic trend continues arbitrarily close to S = 1, where the asymptotic sparsity-penalty terms in the fitted law eventually dominate. 
+
+6.2 The Boundary Optimum Is Not Necessarily the Cluster Optimum 
+
+In the preceding section, the model-FLOPs optimum proved boundary-seeking in sparsity, returning the largest S the architecture space supports rather than an interior choice. Additionally and more importantly, practitioners do not buy model FLOPs, they buy GPU-hours on a fixed cluster over a fixed wall-clock window, and what they care about at the end 
+
+22 Systems-Aware Scaling for Sparse Mixture-of-Experts 
+
+of training is the training loss reached. The Cdeliverable the cluster can execute thus becomes the metric that matters once we account for the systems cost of hosting a model across a fleet of GPUs (Shoeybi et al., 2019), which is what we show in Figure 1. In particular, sharding a model through various parallel layouts incurs costs from expert-parallel all-to-all, pipeline bubbles, optimizer sharding, and host-side stalls (Singh et al., 2023; Fernandez et al., 2024). What follows is that a model FLOPs budget leaves out the systems-side constraints that together with device peak FLOPs provide Cdeliverable .To make the motivation concrete, we take as the systems metric the wall-clock time a configuration needs per delivered model FLOP, where a lower value means more of the purchased hardware is doing useful work and the same loss is reached in fewer GPU-hours. The top row of Figure 8 shows how loss, sparsity, and execution cost trade off on the way to the deployable optimum. Its left panel plots the optimal loss L⋆ reached at each sparsity level at fixed Cmodel = 10 22 model FLOPs, after minimizing over active parameters. It drops monotonically as sparsity grows, so under a model FLOPs budget the highest-sparsity configuration ranks first and the lowest-sparsity one ranks last. The right panel prices the same grid at world-size 512 (number of GPU devices) with the performance model of Section 5, optimized over the parallelism layout, and the wall-clock per model FLOP rises monotonically with sparsity to 1 .70 × the densest configuration. This opposing ordering is precisely why the architecture-dependent deliverable model-FLOPs constraint introduced in Section 2 is required for sparse MoEs. An important point to note here is that, unlike the sparsity scaling laws behind the model design report of Kimi K2 (Team et al., 2025), which fix the active parameters, or the recommendation of Abnar et al. (2025) that at a fixed total parameter count a larger training budget lowers the optimal sparsity, we hold neither Nact nor Ntot fixed in Figure 8. We instead propose a shift toward hardware constraints of Section 2 to resolve these optimality questions. 
+
+7 Experiments and Results 
+
+In this section, we demonstrate how we utilize MOSAIC towards the goal of searching for optimal model configuration and the parallel execution layout jointly under a hardware budget. We utilize the aforementioned components of the scaling laws and the performance model towards this goal. We detail how this search solves the program of Section 2.2 in Appendix D exactly through structure-exploiting enumeration. We note that generic MINLP solvers are poorly matched to it, since the MFU and memory constraints are measured lookup surfaces rather than symbolic functions. To surface how a hardware-aware optimum differs from a purely model FLOPs optimal one, we first discuss the need for a geometry scaling ladder in Section 7.1. Sparsity S and the expert split factor G are derived from the discrete geometry rather than set directly, so the search needs a closed set of realizable architectures, which the ladder supplies and the performance model then profiles for systems cost. Our scaling law sweep runs also share the same ladder as every experiment reported here, so one family of geometries both fits the law and is searched by the framework for validation. Every experiment also uses the joint law L(Ntot , S, D, G ) of Equation (10), not the per-G fits of Equation (9). 
+
+> 23 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+After presenting the ladder, we validate the performance model against measured MFU in Section 7.2, since the whole framework rests on its predictions. The co-design results follow in three parts, where the first two search the full feasible grid with the framework alone and the third launches its ranked predictions as real training runs. These comprise (1) the loss-optimal configuration and the loss-versus-model-FLOPs spread over feasible configurations under a fixed Cpeak envelope in Section 7.3, (2) the optimal MoE-layer geometry in sparsity and expert split factor G as we vary the cluster size (nodes) and training window (days) in Section 7.4, and (3) staged real training runs that test the predicted rank ordering against measured throughput in Section 7.5. A fitted loss surface can be validated against the values it predicts or against the configuration ordering it induces. This ordering is what a practitioner acts on when choosing model configurations, which is why we end the results section with real runs selected under a common hardware envelope rather than with extrapolations of the loss surface alone. All our validation and training runs use AWS p6-b200.48xlarge nodes 5, each with 8 NVIDIA B200 GPUs. We provide the details of the Megatron and Torch-based framework we stage our runs on in Appendix F.3, covering which Megatron-Core MoE features we enable, the loop-level effects that make realized MFU trail the analytical prediction, the host-side data-pipeline costs, and the hardware and interconnect assumptions that tie the recovered optimum to a specific platform. 
+
+7.1 Geometry Scaling Ladder 
+
+Since we want to show how the hardware-aware optimum shifts as the deliverable model FLOPs change with scale, we first need a way to climb the model-scale axis. Growing a model means growing depth, width, and FFN width together, so that axis is well defined only once we fix how those dimensions co-scale. A geometry scaling ladder is that choice, and it reduces the backbone to a single seed. This matters for MOSAIC, which selects a discrete geometry in a single step rather than through the traditional two-stage model-FLOPs allocation, so the geometry must be pinned down directly. We parametrize the ladder in the following way: the layer count and head count both follow Llayers = m q and nhead = m q with the multiplier m fixed to 4, so the residual width is d = nhead dhead at dhead = 128, and the reference dense FFN width is dff = 2 .5 d. A single seed q thus fixes depth ( Llayers ), width (d), and FFN width together at a constant depth-to-width ratio, so the ladder grows the backbone along one coherent axis while the MoE axes ( E, K, G ), and through them the sparsity S, are searched on top of it. We fix the co-scaling functions of our ladder this way and vary the geometry seed q, and we leave other variants of co-scaling geometry as future work. With the ladder in place, the framework searches over the seed q, the expert count E,the top-K, the split factor G, and the data budget D, returning the optimum, and the sparsity S and the parameter counts Ntot and Nact are derived from the selected geometry rather than searched directly. We show how this is realized in the following sections. We list the model scales we sweep in Table 9 of Appendix F. 
+
+> 5. https://aws.amazon.com/ec2/instance-types/p6/
+> 24 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+Figure 9: Predicted versus Real MFU per parallelism configuration, each panel normalized to its own maximum and sorted by real MFU. 
+
+7.2 Performance Model Validation 
+
+Our validation spans three sweeps on these p6 nodes, over the q = 4, q = 8, and q = 12 rungs of Table 9. The q = 4 model (0 .7B Nact , 16B Ntot ) runs on 4 nodes (32 GPUs), the q = 8 model (5 .4B Nact , 127B Ntot ) on 32 nodes (256 GPUs) and 64 nodes (512 GPUs), and the q = 12 model (18B Nact , 434B Ntot ) on 64 nodes (512 GPUs). Each data point pairs one parallelism configuration, namely expert (ep), pipeline (pp), data (dp), tensor (tp), context (cp) parallel degree and micro batch size (mbs) with its measured MFU and its predicted value. The MFU prediction results are shown in Figure 9. We vary the global batch size and restrict 
+
+tp = 1 and cp = 1 for efficiency. We release the estimator as ScalePlan 6, which packages the analytical cost model, the calibration data it is fit against, and the parallelism search that realizes the inner maximization over Pfeas of Equation (C-FLOPs), so the predictions validated here and every estimator number reported later can be regenerated from a single model and cluster specification. 
+
+7.2.1 MFU Prediction 
+
+We find that the predicted MFU values are accurate in absolute terms, not just in ordering, across all three sweeps. The mean absolute percentage error is under 15% for every model  
+
+> 6. https://github.com/dmlc/ScalePlan
+> 25 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+(9 .6%/9 .0%/13 .2% for 700M/5.4B/18B). The estimator also captures the top region of the configuration space reliably. Ranking configurations by predicted MFU and comparing against the measured ranking, Top-5 overlap is 100% for every 5.4B and 18B sweep and 80% for the 700M sweep. Top-10 overlap is 100% for all 5.4B and 18B sweeps and 90% for 700M. The single 700M miss is a swap among near-tied low-MFU configurations, so the model reliably surfaces the high-throughput region even where it mis-orders adjacent points. 
+
+7.2.2 Implications for Sparse-MoE Parallelism Design 
+
+The MFU sweeps expose a consistent structure in how a sparse MoE responds to its parallelism axes, which we develop into design rules in Appendix F.2. The dominant lever is not any single degree but the pipeline fill ratio rfill = nmb /P PP , which explains almost all of the up to 3 .1× layout spread in measured MFU, with throughput collapsing as rfill 
+
+falls toward 1 and saturating for rfill ≥ 4. The expert all-to-all belongs inside the scale-up domain, since expert parallelism helps up to the node boundary and hurts past it, and the FFN-parallelism budget is better spent on expert than expert tensor parallelism. In practice we fix PTP =1, set PEP to the scale-up domain, and choose the ( PPP , B micro ) pair that keeps rfill ≥ 4, stated as the MFU-optimal layout for 700M–18B models on NVL8 under no memory pressure rather than as a hardware-independent law. 
+
+7.3 Optimal Allocation Under Cpeak 
+
+In this section, we first show the configuration MOSAIC finds optimal under a single fixed GPU-hour budget, and then extend it to the loss-versus-deliverable-model-FLOPs spread over all feasible configurations. The inputs to MOSAIC are the training window (wall-clock days), the device type and its per-device peak FLOPs and memory, and the device count, which together set the GPU-hour budget, alongside the global and sequence batch. We target a deployment simulation with 32 p6 nodes ( Ndev = 256 devices) and Ttrain =20 days. These inputs are listed in Table 3. The model FLOPs the returned optimum realizes under this ceiling lie about 150 × beyond our largest fit run, an extrapolation the deployed law supports for the configuration ordering. Combining the scaling ladder of Table 9 with the sparse MoE axes, we restrict the free discrete search dimensions to 
+
+q ∈ { 8, 10 , 12 , 14 , 16 , 18 }, K ∈ { 1, 2, 4, 6, 8},E ∈ { 4, 6, 8, 16 , 24 , 32 , 48 , 96 , 128 , 192 , 256 , 384 , 512 }, G ∈ { 1, 2, 4, 8}.
+
+We add a practical geometry guard to prune the grid by setting S ≥ 0.7, since the scaling law data we collect to fit the loss law lies predominantly in the S ≥ 0.7 region, so this keeps the search inside the sparsity range the law is calibrated on rather than extrapolating below. The experimental envelope for this section can be found in Table 3. We fix the token budget 
+
+D per configuration by sweeping the tokens-per-parameter ratio TPP = D/N act over the grid TPP ∈ [40 , 150]. Our training data spans TPP up to 70 (Table 6), so the cap sits about twice beyond the calibrated range, and we keep only ( Z, TPP) pairs whose Cmodel fits the deliverable model FLOPs Cdeliverable at that layout’s MFU together with the memory and parallelism constraints. 
+
+> 26
+
+Systems-Aware Scaling for Sparse Mixture-of-Experts 
+
+Inputs 
+
+Hardware 32 p6 nodes ( Ndev = 256 devices) Per-device peak Fpeak 2.25 PFLOPs (bf16/dense) Wall-clock Ttrain 20 days Per-device memory cap Mdev 179 GB Goodput ηgood 1.0Raw hardware ceiling Cpeak 9.95 × 10 23 FLOPs Global / sequence batch Bglobal = 1024, Tseq = 2048 Loss law joint L(Ntot , S, D, G ) from Eq. (10) 
+
+Search space (output) 
+
+Outer architecture grid q, E, K, G 
+
+Inner layout search over PTP , PCP , PEP , P PP , P DP , Bmicro ∈{1, 2, 4}, and activation-checkpointing ∈{none, selective, super-selective, full }
+
+Table 3: MOSAIC search envelope. The outer grid over ( q, E, K, G ) is the discrete realization of Z, and the inner parallelism search realizes the embedded maximization over 
+
+Pfeas in Equation (C-FLOPs). 
+
+7.3.1 Results 
+
+MOSAIC returns a single loss optimal configuration, reported in Table 4. The constrained optimum is a q = 12 , L layers = 48 , E = 96 , K = 2 , G = 4 model with Nact = 14 .5 B at sparsity 
+
+S = 0 .956, running at 12 .4% predicted MFU and loss L = 1 .3898. Its selected layout is 
+
+PPP =8, PEP =8, PCP =1, PTP =1 with micro-batch Bmicro =4. 
+
+Llayers E K G Nact (B) S TPP D (T) MFU (%) Loss pp ep mb cp tp 48 96 2 4 14.5 0.956 98 1.42 12.38 1.3898 8 8 4 1 1
+
+Table 4: The loss optimal configuration MOSAIC returns under the envelope of Table 3. The MFU column is the predicted peak MFU of the best feasible execution plan, not a measured value. Although Table 4 reports only the loss optimal configuration, we now show all feasible (Z, D ) configurations under the same envelope in Figure 10. While D is selected on a capped TPP grid, the cap is non-binding for most configurations near the low-loss frontier, whose selected token counts consume nearly the full 20-day wall-clock. Near the low-loss frontier, we observe that the geometry lands farther right primarily by sustaining a higher MFU, which converts more of the fixed hardware ceiling into useful model FLOPs. The fixed cluster and training window emit the same raw hardware ceiling of 9 .95 × 10 23 FLOPs for every candidate, so the quantity that varies is how much of that ceiling each geometry converts into model FLOPs through its own MFU. Which is what we show in Figure 10. It plots the loss against the model FLOPs Cmodel each candidate realizes, color-coded by G, with the gold star marking the loss optimal configuration. 
+
+27 Systems-Aware Scaling for Sparse Mixture-of-Experts 
+
+Figure 10: Loss versus model FLOPs Cmodel over all feasible ( Z, D ) configurations under the 32-node, 20-day envelope, color-coded by G. Every candidate draws on the same raw hardware ceiling of 9 .95 × 10 23 hardware FLOPs. The gold star is the optimal configuration with MOSAIC, and the candidate that realizes the most model FLOPs is not the one that reaches the lowest loss. Because the raw hardware ceiling is the same for every candidate, a geometry lands further right in Figure 10 only by sustaining a higher MFU, which turns the fixed 20 days of wall-clock into more useful model FLOPs. The expert split factor G orders that spread. The 
+
+G = 8 geometries sit at the low Cmodel end at a median MFU near 8%, and the coarser G = 2 geometries reach the right end near 13–20%, so a higher G delivers less useful compute out of the same ceiling because its expert dispatch and combine communication leaves fewer FLOPs for the model, a penalty tied to the Megatron-Core stack our performance model mirrors (Appendix F.3). Model FLOPs alone would read this as the finest experts being cheapest, but under the fixed hardware ceiling, they are the ones the cluster feeds the least. The consequence is that the run with the most model FLOPs is not the optimal as shown in Figure 10. The candidate that converts the shared hardware ceiling Cpeak into the most model FLOPs is a denser G = 2 , E = 32 geometry at 1 .94 × 10 23 FLOPs, and it still lands at a higher loss than the optimal configuration. The loss optimal configuration is a G = 4 , E = 96 , K = 2 model at Nact = 14 .5B and S = 0 .956 that reaches L = 1 .3898 on 1.23 × 10 23 model FLOPs, roughly 36% fewer than the rightmost candidate spends. Ranking these candidates by the model FLOPs they realize therefore misorders them, and the split factor and sparsity that win are set only once the shared deliverable model-FLOPs budget is imposed. This is the optimum under deliverable rather than model FLOPs. 
+
+7.4 Optimal S and G
+
+The frontier in the previous section fixed a single cluster envelope. We now ask how the optimal architecture moves as the deliverable model-FLOPs budget grows, specifically whether the MoE configurations get sparser and finer, or denser and coarser under such a constraint. To that end, we run two budget sweeps that share a common reference point.  
+
+> 28 Systems-Aware Scaling for Sparse Mixture-of-Experts
+> (a) 32 p6 nodes. (b) 30 days.
+
+Figure 11: Optimal predicted loss vs. the budget under the two sweeps. Markers are colored by the optimal expert split factor G⋆ and annotated with S⋆ and N ⋆
+
+> tot
+
+. Dashed lines denote best per G configuration. The solid line is the overall optimum. The optimal sparsity S⋆ does not move monotonically with the budget in either sweep, staying on a wide plateau of roughly 0 .915 to 0 .963. The first fixes the cluster at 32 p6 nodes (256 GPUs) and varies the wall-clock window over 
+
+{10 , 20 , 30 , 40 } days. The second fixes the window at 30 days and varies the cluster over 
+
+{16 , 32 , 64 , 128 } p6 nodes, re-running the performance model at each node count. In both sweeps, we run MOSAIC subject to these constraints, and for every budget we record the architecture that minimizes predicted loss. We plot the results from running MOSAIC in Figure 11. We observe that G⋆ is 4 across most budgets, with G = 8 appearing only at the longest window and G = 2 at the largest node budget, and the exact G⋆ marker is often a near-tie. Looking at the span of sparsity, we find that S⋆ sits on a wide plateau (roughly 0 .915–0 .963) and does not sharpen with budget, confirming that there is no monotone sparsity trend here unlike the model FLOPs optimality we find in Figure 4. Finally, N ⋆ 
+
+> act
+
+moves slowly with budget, staying near 14–15 B parameters across the days range and growing to 34 B and 58 B parameters at the two largest node budgets. The direction of this trend is that larger hardware budgets support larger active parameter counts, though the near-ties at neighboring budgets mean the exact crossover points are not resolved at this granularity. These findings suggest that an interior optimum in sparsity appears once the systems constraints are added, where a memory floor bounds total parameters and a GPU-hour cost charges for the MFU degradation and all-to-all penalties of high S and high G. We note that this avoids any explicit cap on model dimensions, since the systems constraints alone bound the feasible region and let an interior sparsity emerge. 
+
+7.5 From Predicted Ranking to Measured Loss 
+
+In this final experiment, we test whether the configuration ordering predicted by MOSAIC transfers to real training runs. We take a small budget envelope of eight p6 nodes (64 GPUs) 
+
+> 29
+
+Systems-Aware Scaling for Sparse Mixture-of-Experts 
+
+for 10 days, enumerate the feasible grid, and select four configurations from the ranked predictions. These four training configurations span the same trade-off MOSAIC describes, and we launch each as a real pretraining run. Table 5 lists the selected configurations with the MFU the framework predicts for each.                                                                         
+
+> rank (loss) Llayers EKGNact (B) Ntot (B) Spred. MFU (%) norm. actual MFU pp ep cp tp mbs ID 1 40 128 248.5 250.0 0.966 14.0 0.84 48114ID 2 40 128 285.6 126.4 0.956 11.6 0.69 48114ID 3 40 32 248.5 66.0 0.872 21.8 0.91 48114ID 4 32 32 227.3 65.8 0.889 23.3 1.0 48114
+
+Table 5: The four configurations on the 8-node, 10-day envelope, ranked by predicted loss. We keep the global batch size fixed to 1024 across all runs and assign each configuration’s peak learning rate using Equation (17) in Appendix A.2. The normalized actual MFU column reports each run’s measured MFU divided by the largest measured MFU among these four runs. The first test is whether the performance model orders these configurations the way the hardware does. Our measured MFU reproduces this ordering exactly, where the rank correlation between predicted and observed MFU across the four runs aligns as shown in Table 5. Although MOSAIC relies on the absolute MFU values, we discuss the MFU ordering here to test the selection step itself, since these four configurations were chosen by a predicted ranking rather than by any single MFU number, and we already established in Section 7.2.1 the absolute accuracy on which the feasibility constraint and the token budget rest. Normalizing the predicted MFU the same way gives 0 .60, 0 .50, 0 .94, and 1 .00 against the measured 0 .84, 0 .69, 0 .91, and 1 .00, and we observe that the predicted spread is wider than the measured one even though the ordering agrees. We next examine the loss trajectory of the runs themselves, but where we plot against both model FLOPs axis and an axis that accounts for the efficiency in MFU. The eight-node, ten-day envelope is only the selection envelope MOSAIC ranks against, and the staged runs train beyond it. The hardware-compute axis of Figure 12 divides by the measured MFU of each run. The largest model FLOPs these curves reach is roughly 15–20 × the largest budget in the scaling law fitting set of Appendix C, which tops out at 8 .1 × 10 20 FLOPs, so the runs probe the predicted ordering well outside the regime the law was fit on. We plot the loss of the four runs against model FLOPs and against the peak-equivalent hardware compute consumed in Figure 12, with the warm-up discarded. ID 3 and ID 4 isolate the expert split factor, since they sit at nearly the same total parameters (66 .0 against 65 .8 B) and close sparsity (0 .872 against 0 .889), yet the G = 4 run stays below the G = 2 run on both axes. On the per-FLOP axis, up to roughly 10 22 model FLOPs the G = 8, low-Nact configuration (ID 2) holds an advantage over ID 1, since its smaller active count (5 .6 B against 7–8 .5 B) shifts its curve toward fewer model FLOPs to reach a given loss. Past that point the two curves converge and the margin narrows to the width of the smoothed trajectories, so we read the advantage as a tendency over the budget range we ran rather than a separation that holds at the end of training. Even so, the direction matches the compute-frontier analysis, where the run slowest in wall-clock terms converts a fixed FLOPs budget into loss most efficiently. 
+
+30 Systems-Aware Scaling for Sparse Mixture-of-Experts 
+
+Figure 12: Smoothed loss trajectories of the staged runs against model FLOPs Cmodel 
+
+(left) and against the peak-equivalent hardware compute consumed Cmodel /MFU (right), with the warm-up discarded. ID 2 leads over much of the lower model-FLOPs range, while the trajectories converge and ID 1 slightly overtakes it near the end (at 10 22 FLOPs) within the width of the smoothed curves. On the hardware-compute axis, the advantage of ID 1 over ID 2 appears much earlier. The observation in Figure 12 changes once the same trajectories are placed on a hardware-compute axis rather than a model-FLOPs one. We use the peak-equivalent hardware compute consumed, Ccost = Cmodel /(MFU ηgood ), the compute proportional to the GPU-hours a run spends to deliver Cmodel , and we hold ηgood = 1 throughout, so Ccost reduces to Cmodel /MFU as plotted. Dividing out MFU charges each run for the hardware time it actually spends, and ID 1 sustains the higher MFU (normalized 0 .84 against ID 2’s 0 .69), so the same hardware buys ID 1 about 1 .2× the model computation. Figure 12 shows this directly, where ID 2 leads on the model-FLOPs panel (left) while ID 1 leads on the Ccost panel (right) toward the longer horizon of the run. Taken together, the staged runs provide two observations. First, the predicted MFU ranking reproduces on hardware, so the selection that MOSAIC relies on transfers from those predictions. Second, the ordering between the two leading configurations changes between the model-FLOPs and hardware-cost views, which is the co-design effect MOSAIC is designed to capture. We report these as an early validation of our framework. The results above optimize one hardware envelope at a time. In Appendix D.3, we ask whether the discrete MOSAIC optima can be summarized by a Chinchilla-style optimal resource-allocation law that maps a purchased hardware budget to the jointly optimal model and data allocation. For a fixed architecture, the reduction is exact. The hardware budget determines its optimal token count and therefore its predicted loss. This also gives a simple phase structure, where the preferred architecture can change as the training budget grows. So we present the analysis as a direction for future work rather than as a main empirical result. 
+
+8 Related Work 
+
+MoE Scaling Laws. Past work on sparse MoE architecture extends Chinchilla-style scaling laws (Hoffmann et al., 2022) to sparse MoEs. Krajewski et al. (2024) introduce 
+
+> 31 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+granularity as an explicit axis and Abnar et al. (2025) characterize the sparsity dimension, while Ludziejewski et al. (2025) fit a joint law over active size, experts, and tokens and argue MoEs can be more memory-efficient than dense models. Wan et al. (2026) push toward holistic recipes that map a budget to a full architecture, and McLeish et al. (2025) show how architecture and hyperparameter choices change the prescriptions a scaling law fit yields. Our scaling law work extends these previous studies but isolates the MoE-layer geometry and is coupled to a systems cost model rather than read under FLOPs alone. There have been few more notable studies in the arena of scaling laws for MoE models that focus on multiple dimensions (Tian et al., 2026), however, as discussed in our desiderata, we focus on low dimensional MoE scaling laws in this work that suit the systems derivation. 
+
+Systems Performance Estimation. Measuring realized throughput of distributed train-ing rather than its FLOPs is central to the thesis of MOSAIC. While this usually falls under systems performance engineering in most works, we focus mainly on modeling and not on engineering the systems like writing better kernels. To that end, Fernandez et al. (2024) measure diminishing returns and parallelism strategy crossovers empirically, while analytical co-design tools such as Calculon (Isaev et al., 2023) and profiling driven simulators such as vTrain (Bang et al., 2024) predict training time and memory from a model and layout description. Bian et al. (2025) target inference-efficient model selection, and on the MoE side Huang et al. (2023) and Zheng et al. (2026) attack expert dispatch, all-to-all, and kernel inefficiencies in deployment and training. These efforts model or optimize execution cost in isolation. We instead fold an operator-level MFU and memory predictor directly into the architecture-selection objective. 
+
+Joint Architecture-Systems Co-Design. Finally, we discuss the relevant studies that optimize model and hardware together. Anthony et al. (2024) align model dimensions to GEMM and wave-quantization boundaries whereas Bian et al. (2026) jointly tune architec-ture for accuracy and inference efficiency. Bae et al. (2025) studies hybrid architectures for compute optimality that are better on recall and Wang et al. (2025a) co-design trans-formers and accelerators under a carbon objective. We also see studies like Zhang et al. (2025) which redefine tensor parallelism via a Ladder Residual architectural change that overlaps communication with computation for accelerated inference, a complementary form of architecture-systems co-design that adapts the model to the parallel-execution substrate rather than the GEMM tile. We also find that classic budget studies such as Le Scao et al. (2022) ablate architecture at fixed GPU-hours, and Wu et al. (2024) add an inference-compute axis. We differ by coupling a predictive MoE scaling law to a parallelism-aware through-put model, recovering deployable MoE geometries under explicit memory and GPU-hour constraints rather than FLOPs. 
+
+9 Conclusion, Limitations and Future Work 
+
+We introduced MOSAIC, a systems-aware scaling framework that jointly selects the model architecture, training-token budget, and distributed parallel layout for a fixed cluster and training window. Using roughly 150 from-scratch sparse MoE pretraining runs, we fit a joint scaling law over total parameters, sparsity, training tokens, and expert split factor, and show that model-FLOPs only optimization admits no interior sparsity optimum within 
+
+> 32 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+the calibrated sparsity region. To enable the joint systems optimization, we developed an operator-level performance model that predicts MFU, memory, and the best parallel layout across models ranging from 700 million to 18 billion active parameters, while reliably recovering the highest-throughput configurations. We observe that coupling the scaling law and performance model changes the architecture prescription. Notably, the optimal sparsity becomes interior and hardware-dependent rather than following the monotone boundary preference implied by model FLOPs, while the expert geometry shifts with the cluster size and training horizon. Our budget sweeps recover interior, hardware-dependent MoE configurations, and our staged pretraining runs reproduce the predicted MFU ordering on real hardware, with the loss ordering of the runs flipping between the model-FLOPs axis and the hardware-compute axis. One limitation of MOSAIC is that the precise architectures returned are conditional on the chosen geometry ladder, hardware platform, and training recipe, and some reported optima require substantial extrapolation beyond the scaling law training regime. Moreover, uncertainty in the non-identified scaling law coefficients is not propagated through the discrete architecture search. Consequently, our evidence more strongly supports the hardware-aware ranking and co-design principle than any single geometry as a universal cluster optimum. In addition, our performance model mirrors a fairly basic Megatron-Core training stack, and the absence of a clear monotone trend in the optimal expert split factor G may itself be an artifact of that stack’s systems penalty. Thus, broader kernel-level changes could turn the optimal G into a predictable function of the budget, which we consider both a limitation and grounds for future expansive validations. Finally, our runs limit the expert split factor to G ≤ 8, and future work could study extrapolations of the law along that dimension. Our studies are also carefully designed to bound the tokens-per-parameter ratio, so we do not study the overtrained regime where models train far beyond these ratios, and we leave that as future work. For future work, we layout the following directions that we believe are worth pursuing. 
+
+• Joint batch-size and parallelism optimization. In this work, we fixed the global batch size across all our runs. Extending the decision space to include it would allow MOSAIC to jointly reason about convergence, strong scaling, and the layout changes induced by the number of microbatches in flight. 
+
+• Broader and accelerator-aligned geometry families. Our current scaling law sweep and MOSAIC search share a single backbone geometry ladder. Extending the fit across multiple depth, width and df f co-scaling families would test whether the ( Ntot , S, G ) representation transfers across backbone geometries and would allow MOSAIC to search beyond the family used to fit the law. Incorporating hardware-friendly tile and wave constraints into these families would further enable accelerator-specific architecture selection. 
+
+• Communication and computation overlap. Our current performance model costs compute and exposed communication largely additively, overlapping only the data-parallel collectives where scheduling windows allow. Extending the performance model to represent persistent and fused kernels that overlap collectives with computation would improve MFU prediction as modern training stacks increasingly depart from additive compute-and-communication execution. 
+
+> 33 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+Acknowledgments and Disclosure of Funding 
+
+We thank Valentyn Boreiko, Moritz Haas, Srikanth Doss, Volkan Cevher, Cole Hawkins, Leonard Lausen, Anna Ruminshky, Hongshan Li and Subendhu Rongali for their help in setting up the infrastructure and the training pipeline used to train the models in this paper. We also thank Justin Chiu for the initial version of the analytical model implementation used in this paper. 
+
+References 
+
+Samira Abnar, Harshay Shah, Dan Busbridge, Alaaeldin Mohamed Elnouby Ali, Josh Susskind, and Vimal Thilak. Parameters vs FLOPs: Scaling laws for optimal sparsity for mixture-of-experts language models. arXiv preprint arXiv:2501.12370 , 2025. Quentin Anthony, Jacob Hatef, Deepak Narayanan, Stella Biderman, Stas Bekman, Junqi Yin, Aamir Shafi, Hari Subramoni, and Dhabaleswar Panda. The case for co-designing model architectures with hardware. In Proceedings of the 53rd International Conference on Parallel Processing (ICPP ’24) . ACM, 2024. doi: 10.1145/3673038.3673136. Sangmin Bae, Bilge Acun, Chien-Yu Lin, Haroun Habeeb, Seungyeon Kim, Liang Luo, Junjie Wang, and Carole-Jean Wu. Hybrid architectures for language models: Systematic analysis and design insights. arXiv preprint arXiv:2510.04800 , 2025. Yasaman Bahri, Ethan Dyer, Jared Kaplan, Jaehoon Lee, and Utkarsh Sharma. Explaining neural scaling laws. Proceedings of the National Academy of Sciences , 121(27):e2311878121, 2024. Jehyeon Bang, Yujeong Choi, Myeongwoo Kim, Yongdeok Kim, and Minsoo Rhu. vtrain: A simulation framework for evaluating cost-effective and compute-optimal large language model training. In 2024 57th IEEE/ACM International Symposium on Microarchitecture (MICRO) , pages 153–167. IEEE, 2024. Song Bian, Minghao Yan, and Shivaram Venkataraman. Scaling inference-efficient language models. arXiv preprint arXiv:2501.18107 , 2025. Song Bian, Tao Yu, Shivaram Venkataraman, and Youngsuk Park. Scaling laws meet model architecture: Toward inference-efficient LLMs. arXiv preprint arXiv:2510.18245 , 2026. Stephen Boyd, Seung-Jean Kim, Lieven Vandenberghe, and Arash Hassibi. A tutorial on geometric programming. Optimization and Engineering , 8(1):67–127, 2007. Aakanksha Chowdhery, Sharan Narang, Jacob Devlin, Maarten Bosma, Gaurav Mishra, Adam Roberts, Paul Barham, Hyung Won Chung, Charles Sutton, Sebastian Gehrmann, et al. Palm: Scaling language modeling with pathways. Journal of machine learning research , 24(240):1–113, 2023. Weiwei Chu, Xinfeng Xie, Jiecao Yu, Jie Wang, Amar Phanishayee, Chunqiang Tang, Yuchen Hao, Jianyu Huang, Mustafa Ozdal, Jun Wang, Vedanuj Goswami, Naman Goyal, 
+
+> 34 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+Abhishek Kadian, Andrew Gu, Chris Cai, Feng Tian, Xiaodong Wang, Min Si, Pavan Balaji, Ching-Hsiang Chu, and Jongsoo Park. Scaling llama 3 training with efficient parallelism strategies. In Proceedings of the 52nd Annual International Symposium on Computer Architecture , 2025. Aidan Clark, Diego De Las Casas, Aurelia Guy, Arthur Mensch, Michela Paganini, Jordan Hoffmann, Bogdan Damoc, Blake Hechtman, Trevor Cai, Sebastian Borgeaud, et al. Unified scaling laws for routed language models. In International Conference on Machine Learning , pages 4057–4086. PMLR, 2022. URL https://arxiv.org/abs/2202.01169 .Damai Dai, Chengqi Deng, Chenggang Zhao, RX Xu, Huazuo Gao, Deli Chen, Jiashi Li, Wangding Zeng, Xingkai Yu, Y Wu, et al. Deepseekmoe: Towards ultimate expert specialization in mixture-of-experts language models. arXiv preprint arXiv:2401.06066 ,2024. Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher R´ e. Flashattention: Fast and memory-efficient exact attention with io-awareness. Advances in Neural Information Processing Systems , 2022. URL https://arxiv.org/abs/2205.14135 .DeepSeek-AI. DeepSeek-V3 technical report. arXiv preprint arXiv:2412.19437 , 2024. URL 
+
+https://arxiv.org/abs/2412.19437 .William Fedus, Barret Zoph, and Noam Shazeer. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. The Journal of Machine Learning Research , 23(1):5232–5270, 2022. Jared Fernandez, Luca Wehrstedt, Leonid Shamis, Mostafa Elhoushi, Kalyan Saladi, Yonatan Bisk, Emma Strubell, and Jacob Kahn. Hardware scaling trends and diminishing returns in large-scale distributed training. arXiv preprint arXiv:2411.13055 , 2024. Trevor Gale, Deepak Narayanan, Cliff Young, and Matei Zaharia. Megablocks: Efficient sparse training with mixture-of-experts. Proceedings of Machine Learning and Systems , 5, 2023. Alexander H¨ agele, Elie Bakouch, Atli Kosson, Loubna Ben Allal, Leandro Von Werra, and Martin Jaggi. Scaling laws and compute-optimal training beyond fixed training durations. 
+
+arXiv preprint arXiv:2405.18392 , 2024. Joel Hestness, Sharan Narang, Newsha Ardalani, Gregory Diamos, Heewoo Jun, Hassan Kianinejad, Md Mostofa Ali Patwary, Yang Yang, and Yanqi Zhou. Deep learning scaling is predictable, empirically. arXiv preprint arXiv:1712.00409 , 2017. Jordan Hoffmann, Sebastian Borgeaud, Arthur Mensch, Elena Buchatskaya, Trevor Cai, Eliza Rutherford, Diego de Las Casas, Lisa Anne Hendricks, Johannes Welbl, Aidan Clark, et al. Training compute-optimal large language models. arXiv preprint arXiv:2203.15556 ,2022. Qingguo Hu, Zhenghao Lin, Ziyue Yang, Yucheng Ding, Xiao Liu, Yuting Jiang, Ruizhe Wang, Tianyu Chen, Zhongxin Guo, Yifan Xiong, et al. Sigma-moe-tiny technical report. 
+
+arXiv preprint arXiv:2512.16248 , 2025. 
+
+> 35 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+Haiyang Huang, Newsha Ardalani, Anna Sun, Liu Ke, Hsien-Hsin S Lee, Anjali Sridhar, Shruti Bhosale, Carole-Jean Wu, and Benjamin Lee. Towards moe deployment: Mitigating inefficiencies in mixture-of-expert (moe) inference. arXiv preprint arXiv:2303.06182 , 2023. Mikhail Isaev, Nic McDonald, Larry Dennison, and Richard Vuduc. Calculon: a methodology and tool for high-level co-design of systems and large language models. In Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis (SC) . ACM, 2023. doi: 10.1145/3581784.3607102. Tianze Jiang, Blake Bordelon, Cengiz Pehlevan, and Boris Hanin. Hyperparameter transfer with mixture-of-expert layers. arXiv preprint arXiv:2601.20205 , 2026. URL https: //arxiv.org/abs/2601.20205 .Ziheng Jiang, Haibin Lin, Yinmin Zhong, Qi Huang, Yangrui Chen, Zhi Zhang, Yanghua Peng, Xiang Li, Cong Xie, Shibiao Nong, et al. {MegaScale }: Scaling large language model training to more than 10,000 {GPUs }. In 21st USENIX Symposium on Networked Systems Design and Implementation (NSDI 24) , pages 745–760, 2024. Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B Brown, Benjamin Chess, Rewon Child, Scott Gray, Alec Radford, Jeffrey Wu, and Dario Amodei. Scaling laws for neural language models. arXiv preprint arXiv:2001.08361 , 2020. Wouter Kool, Herke van Hoof, and Max Welling. Stochastic beams and where to find them: The Gumbel-top-k trick for sampling sequences without replacement. In Proceedings of the 36th International Conference on Machine Learning (ICML) , volume 97 of Proceedings of Machine Learning Research , pages 3499–3508. PMLR, 2019. Jakub Krajewski, Jan Ludziejewski, Kamil Adamczewski, Maciej Pi´ oro, Michal Krutul, Szymon Antoniak, Kamil Ciebiera, Krystian Kr´ ol, Tomasz Odrzyg´ o´ zd´ z, Piotr Sankowski, et al. Scaling laws for fine-grained mixture of experts. arXiv preprint arXiv:2402.07871 ,2024. Teven Le Scao, Thomas Wang, Daniel Hesslow, Lucile Saulnier, Stas Bekman, M Saiful Bari, Stella Biderman, Hady Elsahar, Niklas Muennighoff, Jason Phang, Ofir Press, Colin Raffel, Victor Sanh, Sheng Shen, Lintang Sutawika, Jaesung Tae, Zheng Xin Yong, Julien Launay, and Iz Beltagy. What language model to train if you have one million GPU hours? arXiv preprint arXiv:2210.15424 , 2022. Wanchao Liang, Tianyu Liu, Less Wright, Will Constable, Andrew Gu, Chien-Chin Huang, Iris Zhang, Wei Feng, Howard Huang, Junjie Wang, Sanket Purandare, Gokul Nadathur, and Stratos Idreos. Torchtitan: One-stop pytorch native solution for production ready llm pre-training. arXiv preprint arXiv:2410.06511 , 2024. Liyuan Liu, Jianfeng Gao, and Weizhu Chen. Sparse backpropagation for MoE training. 
+
+arXiv preprint arXiv:2310.00811 , 2023. Ilya Loshchilov and Frank Hutter. Decoupled weight decay regularization. arXiv preprint arXiv:1711.05101 , 2017. 
+
+> 36 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+Justin Lovelace, Christian Belardi, Srivatsa Kundurthy, Shriya Sudhakar, and Kilian Q Weinberger. Prescriptive scaling laws for data constrained training. arXiv preprint arXiv:2605.01640 , 2026. Jan Ludziejewski, Maciej Pi´ oro, Jakub Krajewski, Maciej Stefaniak, Michal Krutul, Jan Mala´ snicki, Marek Cygan, Piotr Sankowski, Kamil Adamczewski, Piotr Milo´ s, and Se-bastian Jaszczur. Joint MoE scaling laws: Mixture of experts can be memory efficient. In Proceedings of the 42nd International Conference on Machine Learning (ICML) , 2025. 
+
+https://openreview.net/forum?id=70DGIxEHiB .Sean McLeish, John Kirchenbauer, David Yu Miller, Siddharth Singh, Abhinav Bhatele, Micah Goldblum, Ashwinee Panda, and Tom Goldstein. Gemstones: A model suite for multi-faceted scaling laws. arXiv preprint arXiv:2502.06857 , 2025. URL https: //arxiv.org/abs/2502.06857 .Mohammed Muqeeth, Haokun Liu, and Colin Raffel. Soft merging of experts with adaptive routing. arXiv preprint arXiv:2306.03745 , 2023. Zihan Qiu, Zekun Wang, Bo Zheng, Zeyu Huang, Kaiyue Wen, Songlin Yang, Rui Men, Le Yu, Fei Huang, Suozhi Huang, Dayiheng Liu, Jingren Zhou, and Junyang Lin. Gated attention for large language models: Non-linearity, sparsity, and attention-sink-free. arXiv preprint arXiv:2505.06708 , 2025. URL https://arxiv.org/abs/2505.06708 .Alec Radford, Jeffrey Wu, Rewon Child, David Luan, Dario Amodei, Ilya Sutskever, et al. Language models are unsupervised multitask learners. OpenAI blog , 1(8):9, 2019. Samyam Rajbhandari, Conglong Li, Zhewei Yao, Minjia Zhang, Reza Yazdani Aminabadi, Ammar Ahmad Awan, Jeff Rasley, and Yuxiong He. Deepspeed-moe: Advancing mixture-of-experts inference and training to power next-generation ai scale. In International Conference on Machine Learning , pages 18332–18346. PMLR, 2022. Ranajoy Sadhukhan, Zhuoming Chen, Haizhong Zheng, and Beidi Chen. Kinetics: Rethinking test-time scaling law. Advances in Neural Information Processing Systems , 38, 2025. Soumajyoti Sarkar, Leonard Lausen, Volkan Cevher, Sheng Zha, Thomas Brox, and George Karypis. Revisiting smoe language models by evaluating inefficiencies with task specific expert pruning. arXiv preprint arXiv:2409.01483 , 2024. Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. arXiv preprint arXiv:1701.06538 , 2017. Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Bryan Catanzaro. Megatron-lm: Training multi-billion parameter language models using model parallelism. arXiv preprint arXiv:1909.08053 , 2019. Siddharth Singh, Olatunji Ruwase, Ammar Ahmad Awan, Samyam Rajbhandari, Yuxiong He, and Abhinav Bhatele. A hybrid tensor-expert-data parallelism approach to optimize mixture-of-experts training. In Proceedings of the 37th International Conference on Supercomputing , pages 203–214, 2023. 
+
+> 37 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+Varun Singh, Lucas Krauss, Sami Jaghouar, Matej Sirovatka, Charles Goddard, Fares Obied, Jack Min Ong, Jannik Straube, Aria Harley, Conner Stewart, et al. Arcee trinity large technical report. arXiv preprint arXiv:2602.17004 , 2026. Luoyang Sun, Jiwen Jiang, Yifeng Ding, Fengfa Li, Yan Song, Haifeng Zhang, Jian Ying, Lei Ren, Kun Zhan, Wei Chen, Yan Xie, and Cheng Deng. Hardware co-design scaling laws via roofline modelling for on-device LLMs. arXiv preprint arXiv:2602.10377 , 2026. Kimi Team, Yifan Bai, Yiping Bao, Y Charles, Cheng Chen, Guanduo Chen, Haiting Chen, Huarong Chen, Jiahao Chen, Ningxin Chen, et al. Kimi k2: Open agentic intelligence. 
+
+arXiv preprint arXiv:2507.20534 , 2025. Changxin Tian, Kunlong Chen, Jia Liu, Ziqi Liu, Zhiqiang Zhang, and Jun Zhou. To-wards greater leverage: Scaling laws for efficient mixture-of-experts language models. In 
+
+International Conference on Learning Representations , 2026. Weilin Wan, Jingtao Han, Weizhong Zhang, and Cheng Jin. Holistic scaling laws for optimal mixture-of-experts architecture optimization. arXiv preprint arXiv:2603.21862 , 2026. Irene Wang, Newsha Ardalani, Mostafa Elhoushi, Daniel Jiang, Samuel Hsia, Ekin Sumbul, Divya Mahajan, Carole-Jean Wu, and Bilge Acun. CATransformers: Carbon aware transformers through joint model-hardware optimization. arXiv preprint arXiv:2505.01386 ,2025a. Lean Wang, Huazuo Gao, Chenggang Zhao, Xu Sun, and Damai Dai. Auxiliary-loss-free load balancing strategy for mixture-of-experts. In International Conference on Learning Representations (ICLR) , 2025b. Yangzhen Wu, Zhiqing Sun, Shanda Li, Sean Welleck, and Yiming Yang. Inference scaling laws: An empirical analysis of compute-optimal inference for problem-solving with language models. arXiv preprint arXiv:2408.00724 , 2024. Linting Xue, Noah Constant, Adam Roberts, Mihir Kale, Rami Al-Rfou, Aditya Siddhant, Aditya Barua, and Colin Raffel. mt5: A massively multilingual pre-trained text-to-text transformer. arXiv preprint arXiv:2010.11934 , 2020. John I. Yellott. The relationship between Luce’s choice axiom, Thurstone’s theory of comparative judgment, and the double exponential distribution. Journal of Mathematical Psychology , 15(2):109–144, 1977. doi: 10.1016/0022-2496(77)90026-8. Ted Zadouri, Markus Hoehnerbach, Jay Shah, Timmy Liu, Vijay Thakkar, and Tri Dao. Flashattention-4: Algorithm and kernel pipelining co-design for asymmetric hardware scaling. arXiv preprint arXiv:2603.05451 , 2026. Muru Zhang, Mayank Mishra, Zhongzhu Zhou, William Brandon, Jue Wang, Yoon Kim, Jonathan Ragan-Kelley, Shuaiwen Leon Song, Ben Athiwaratkun, and Tri Dao. Ladder-residual: parallelism-aware architecture for accelerating large model inference with com-munication overlapping. arXiv preprint arXiv:2501.06589 , 2025. 
+
+> 38 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+Size Zheng, Xuegui Zheng, Li-wen Chang, and Jidong Zhai. UniEP: Unified expert-parallel MoE MegaKernel for LLM training. arXiv preprint arXiv:2604.19241 , 2026. Yanqi Zhou, Tao Lei, Hanxiao Liu, Nan Du, Yanping Huang, Vincent Zhao, Andrew M Dai, Quoc V Le, James Laudon, et al. Mixture-of-experts with expert choice routing. Advances in Neural Information Processing Systems , 35:7103–7114, 2022. Barret Zoph, Irwan Bello, Sameer Kumar, Nan Du, Yanping Huang, Jeff Dean, Noam Shazeer, and William Fedus. St-moe: Designing stable and transferable sparse expert models. arXiv preprint arXiv:2202.08906 , 2022. 
+
+Appendix A. Pre-training Recipe 
+
+In this section, we cover some more details of the pretraining recipe and the architecture that went into the training runs. 
+
+A.1 Architecture and Pretraining Details Sparse MoE Architecture. Our MoE block follows the DeepSeekMoE design (Dai et al., 2024), which splits the reference FFN into fine-grained routed experts and adds a shared expert that every token passes through, paired with the auxiliary-loss-free bias balancing of Wang et al. (2025b) in the router. In our instantiation, the shared expert has the same hidden width dexpert as a routed expert, so as the expert split factor G increases, dexpert 
+
+decreases and so does the shared expert size. The attention mechanism is gated (Qiu et al., 2025) and a head-specific sigmoid gate is applied to the output of each scaled-dot-product attention head before the output projection, which the authors find consistently improves loss for both dense and MoE models at this scale. We use pre-LayerNorm and SwiGLU activations inside each expert and the embedding and unembedding matrices are not tied. We do not use QK layernorm for the attention layer. 
+
+Pretraining objective and data. Every run is a pure text-to-text pretraining run with the next-token-prediction objective of GPT-2 (Radford et al., 2019). We do not use any auxiliary denoising or instruction-tuning loss aside the sequence auxiliary loss in the MoE routing layer which we discuss in later sections. The training corpus is the English portion of mC4 (Xue et al., 2020), the multilingual extension of the Colossal Clean Crawled Corpus (C4) that is itself a cleaned subset of Common Crawl. We tokenize with the GPT-2 BPE tokenizer, which has a vocabulary of 50,257 tokens. 
+
+Numerical precision. All training runs use bf16 weights and activations with a fp32 master copy of the optimizer state. 
+
+Initialization. We use the Megatron/GPT-2 architecture in our runs (Radford et al., 2019). Fan-in (input-side) projections, the QKV and first FFN matrices, the router Wr,and the embedding and readout matrices, are drawn flat from N (0 , 0.006 2). Output-side residual projections, the attention output projection and the expert/FFN down-projection, are depth-scaled to N 0, (0 .006 /p2Llayers )2, so deeper models initialize the residual-write weights smaller and keep the residual-stream variance stable across the 2 Llayers residual 
+
+> 39 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+additions per forward pass. For the normalization layers, their gains are set to 1 and biases to 0. Initializing Wr like any other fan-in matrix leaves router logits approximately uniform across experts at step zero. We leave μP-style initialization for hyperparameter transfer (Jiang et al., 2026) in sparse MoE models as future work.                   
+
+> (a) Loss vs. peak learning rate per configuration, with the per-configuration optimum (stars) read from a quadratic fit in log 10 lr.
+> (b) Optimal learning rate vs. model FLOPs
+> Cmodel =6Nact D,solid line is the fit lr ⋆(Cmodel ) = 3 .30 C−0.199 model , shaded region is the near-optimal band.
+
+Figure 13: Setting the peak learning rate. Left: loss-vs-learning-rate curves across MoE configurations, each with a quadratic-fit optimum. Right: those optima collapse onto a single power law in the model FLOPs Cmodel , with one law predicting the optimal learning rate across the full range of total parameters and sparsity. 
+
+A.2 Optimizer and Learning-rate Settings 
+
+We use AdamW at weight decay 0 .1 with the warmup-stable-decay (WSD) schedule of H¨ agele et al. (2024), namely a fixed warmup of approximately 100-million tokens regardless of run length, a stable phase at peak learning rate, and a linear decay to zero over the final 20% training steps. The AdamW moments are the standard defaults β1 = 0 .9 and β2 = 0 .999 with 
+
+ε = 10 −14 , and we do not clip gradients. We do not conduct an independent learning-rate sweep for every scaling law run. Instead, each run’s peak learning rate is assigned from a single compute-conditioned rule fitted on a separate pilot sweep. To keep learning rate from confounding the scaling law runs, we set the peak learning rate from a single power law in the model FLOPs Cmodel = 6 Nact D. We sweep a small grid of peak learning rates across MoE configurations spanning a wide range of total parameters, sparsity, and token budgets. Each configuration traces a loss-vs-learning-rate curve whose optimum we read from a quadratic fit in log 10 lr (Figure 13, left). For each configuration we keep the near-optimal band, every swept rate whose loss lands within a small tolerance of that configuration’s best, following the band-fit practice of prior learning-rate studies (Tian et al., 2026). Fitting log 10 lr ⋆ against 
+
+> 40 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+log 10 Cmodel over these near-optimal points gives lr ⋆(Cmodel ) = 3 .30 C−0.199 model , Cmodel = 6 Nact D (17) with a tight parallel band around the central line (Figure 13b) where any rate inside the band is well tuned, and the band width reflects the resolution of the swept grid. We use compute alone as the axis for learning rate predictions and we leave more appropriate sparsity specific learning rate predictions (if there are any) for future work. AWithin our pilot sweep, after conditioning on Cmodel , we detect no systematic residual dependence of the near-optimal learning rate on Ntot , sparsity, or the Nact /D split. We therefore use the compute-conditioned rule rather than fitting a higher-dimensional learning-rate surface, which would require substantially more dedicated hyperparameter sweeps and could itself confound the scaling law fit. The decay exponent also agrees with independent MoE learning-rate fits, where Tian et al. (2026) report a slope of −0.153 over a comparable compute range, close to our value. In practice, this gives a single rule, where for any candidate configuration we compute Cmodel = 6 Nact D and read the peak learning rate off Equation (17). 
+
+Out-of-scope HPO axes. Optimizer hyper-parameters (weight decay 0 .1, warmup, scheduler shape), sequence length ( Tseq = 2048), drop-token capacity factor (default infinite capacity), are each held to a single value across all runs. The law is therefore conditional on this recipe. 
+
+A.3 MoE Routing Details 
+
+In this section, we describe the choices behind the routing algorithm for our scaling recipe presented in Algorithm 1. 
+
+Sigmoid scoring with per-expert bias. Following Wang et al. (2025b), we instantiate the score vector s(x) of Equation (7) as a clean sigmoid score s′
+
+> i
+
+(x) plus an additive per-expert bias ϕ ∈ RE , so that 
+
+si(x) = s′
+
+> i
+
+(x) + ϕi = σ θi(x) + ϕi, θi(x) = ˜w⊤ 
+
+> r,i
+
+x (18) where ˜ wr,i denotes the row-normalized i-th row of Wr. The sigmoid form decouples per-expert logits, avoiding the shared-softmax competition that drives unbounded logit growth and forces ad-hoc remedies such as router z-loss or logit capping. The bias ϕ is not a learned parameter and it is updated by a controller using only routing statistics, and it influences which experts are selected. 
+
+LFLB bias controller. Following Algorithm 1, let ni denote the number of tokens routed to expert i in a batch and let ¯ n = 1
+
+> E
+
+PEi=1 ni. Following Wang et al. (2025b); Team et al. (2025), we update ϕ in the direction of imbalance, but adopt an RMS-normalized violation rather than a raw sign so that the magnitude of the correction is proportional to the shape of the imbalance pattern and not the absolute batch size, as follows 
+
+ui = ¯n − ni
+
+q
+
+E−1 P 
+
+> j
+
+(¯ n − nj )2 + ε, ϕi ← ϕi + μb ui (19) 
+
+> 41 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+We additionally center the bias after each update, ϕi ← ϕi − 1
+
+> E
+
+P 
+
+> j
+
+ϕj , since only relative bias differences affect routing. 
+
+Probabilistic top-K via Gumbel proposal–correction. We replace deterministic selection with a Gumbel-noise proposal–correction sampler operating at a fixed temperature 
+
+τ :(Gumbel proposal) Ct = Top Mi
+
+ log s′ 
+
+> t,i
+
++ τ g t,i 
+
+, gt,i ∼ Gumbel(0 , 1) , (20) (Gumbel correction) TK,t = Top Ki∈C t
+
+ st,i 
+
+, M = min( ρK, E ). (21) The construction rests on the Gumbel-max theorem. For K = 1 and gi ∼ Gumbel(0 , 1), arg max 
+
+> i
+
+ log pi + τ g i
+
+ ∼ Categorical 
+
+ p1/τ i 
+
+> P
+> jp1/τ j
+
+
+
+(22) and its top-K extension gives exact sampling without replacement from the same dis-tribution (Yellott, 1977; Kool et al., 2019). Injecting the noise in log-score space, as in Equation (20), therefore draws the proposal set exactly from P (i) ∝ s′1/τ t,i on the clean scores, and the bias ϕ is then applied in the correction stage of Equation (21) to preserve those sampling semantics. This tempered sampling interpretation holds for the proposal before centering and correction, and the implemented algorithm modifies that distribution. The per-expert centering of Algorithm 1 makes the gt,i dependent across the batch and the bias-aware correction reweights the survivors, so we treat both as heuristic variance-control and load-balancing steps rather than as sampling from the tempered clean-score distribution. The proposal size is M = min( ρK, E ) with K ≤ E, since ρK exceeds E at the small expert counts in our grid. The temperature τ sets how peaked the proposal distribution is, and as 
+
+τ → 0 the algorithm approaches a deterministic clean-score top-M proposal followed by the bias-aware top-K correction within that proposal. This limit need not coincide with the global deterministic top-K on st,i , since the bias can favor an expert outside the clean top-M .For the uncentered, uncorrected Gumbel-max baseline with two experts and K = 1, the probability of selecting b over a is σ τ −1 log( s′
+
+> b
+
+/s ′
+
+> a
+
+), so near-tied experts receive meaningful exploration while confident decisions are exponentially protected. In Algorithm 1 itself, at two experts ρ = 12 puts both in the proposal and the correction then selects deterministically under st,i .As a final, empirically important step, we center the noise per expert across the current batch, ˜ gt,i = gt,i − 1
+
+> T
+
+P 
+
+> t
+
+gt,i , so that finite-sample noise means do not waste the bias controller’s correction budget chasing purely stochastic imbalances. We set τ = 0 .01 and 
+
+ρ = 12, with token-level granularity across all our runs, and we use μb = 10 −3 and ε = 10 −4
+
+in the bias update of Equation (19). We find that this method of sampling with low τ allows us to overcome issues of load balancing and experts starved of tokens in a single batch later in long horizon runs especially at large active parameters of the scale of 18 billion parameters Nact and more. Compared to adding more dense layers at the beginning as done in Singh et al. (2026) which reduces the model capacity at matched Nact , we find that our Gumbel sampling method along with the proposed routing algorithm helps in more efficient mitigation of instabilities due to spikes in starved experts. 
+
+> 42 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+Router-weight row normalization. A subtle source of routing pathology is heterogeneity in the row norms of Wr. Experts whose corresponding rows have grown a larger norm are favored for reasons unrelated to specialization. We optionally row-normalize the router weights at every forward pass ˜wr,i = cr · wr,i  
+
+> ∥wr,i ∥2
+
+, where the target norm cr is a fixed constant, in our case set to 1.0. It allows to recover routing decisions that depend on directional alignment between wr,i and x rather than on accidental norm drift. This is the 
+
+RowNorm (Wr, c r) step in Algorithm 1, which produces the normalized router ˜Wr used to compute the pre-sigmoid logits Θ. Additionally, the bias update of Eq. (19) is invoked once per optimizer step on the per-expert counts n returned by the algorithm. We emphasize that load balancing is carried by the bias controller and the noise distribution, where no batch-level load-balancing loss term is added to the optimization objective, in contrast to the auxiliary LBL of Shazeer et al. (2017); Fedus et al. (2022). The one auxiliary term we retain is the sequence-level loss described below. 
+
+Router regularization. In addition to the LFLB bias controller of Section 3.3, we apply the router z-loss of Zoph et al. (2022) to suppress unbounded growth in the pre-sigmoid router logits Θ t,i = θi(xt) of Eq. (18): 
+
+Lz = 1
+
+T
+
+> T
+
+X
+
+> t=1
+
+
+
+log 
+
+> E
+
+X
+
+> i=1
+
+eΘt,i 
+
+2
+
+(23) added to the cross-entropy loss with a small fixed coefficient. Because selection in our routing variant is taken on σ(Θ) + ϕ rather than on Θ directly, Lz acts purely as a numerical guard on the logits and does not interfere with the bias controller. We set the coefficient of z-loss to 1e-4 in all our runs. 
+
+Sequence Auxiliary Loss. Unlike the load balancing batch auxiliary loss used in the softmax routing variants, we follow the sequence auxiliary loss as used in DeepSeek-AI (2024). We set its coefficient to 1e-3 in all our runs. 
+
+Appendix B. Scaling Analysis 
+
+This appendix collects the per-G evidence behind the scaling laws of Section 4, starting with Figure 14, which shows how the expert split factor G of Section 3 reshapes an MoE layer. 
+
+B.1 Per-G Scaling Law Fits 
+
+This appendix section gives the per-G details behind Section 4.1. We fit L(Ntot , S, D ) in Equation (9) on each G separately, holding out the largest 10% by active parameters. The fit is noise-limited in all the per G optimization of the functional form and the held-out large models match it, with no residual structure on E, K, Ntot , S, D, or Llayers (all Pearson correlations below 0 .13 in magnitude). Refitting the same form independently per expert split factor as shown in Figure 15, ( G ∈ { 1, 2, 4, 8}) fits each G well in isolation, but the fitted coefficients drift substantially across G, so no single set of ( Ntot , S, D ) coefficients describes all expert split factors at once. This is the signal that G must enter the law itself, which we do in Section 4.2. 
+
+> 43 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+Figure 14: Example of an MoE layer in a transformer block, at three expert split factors 
+
+G ∈ { 1, 4, 8}. In every panel, the routed experts sit beside a shared expert. dff is the hidden width of a single reference dense feed-forward expert ( G = 1), and the total routed model width E d ff is held fixed across the panels. Raising 
+
+G splits each reference FFN into G narrower experts, so the routed-expert count grows ( E → G E ) while each expert’s hidden width shrinks proportionally (dexpert = dff /G ). Relative to G = 1, a factor-G configuration has G times as many experts, each G times narrower. The top-K selection is kept the same across the three panels, so the active parameters Nact shrink with higher G rather than staying fixed. Note that this is different from granularity defined in Krajewski et al. (2024). 
+
+B.2 Joint-Law Uncertainty and Identifiability 
+
+This appendix section gives the evidence behind the G-augmented joint law of Section 4.2, namely that a larger expert split factor G lowers loss at a fixed parameter and data budget. When we fit the joint law, this preference shows up as the split-factor exponent η ≈ +0 .95, and the question is whether that value is a real effect or an artifact of the particular runs we happened to collect. To quantify uncertainty in η, we perform 500 warm-started wild-bootstrap refits using Rademacher residual perturbations and report a 95% BCa interval. The resulting interval is [+0 .91 , +0 .95], which remains well above zero. 
+
+Which coefficients are identified. The bootstrap above is warm-started at the fitted point, so it describes only the local basin around it. A separate scan of 400 fresh restarts shows the loss surface has a wide, near-flat identifiability ridge along which the prefactors           
+
+> 44 Systems-Aware Scaling for Sparse Mixture-of-Experts
+> (a) G= 1. (b) G= 2.
+> (c) G= 4. (d) G= 8.
+
+Figure 15: Predicted-vs-observed loss for the L(Ntot , S, D ) fit with Equation (9), refit in-dependently on each expert split factor stratum G ∈ { 1, 2, 4, 8}. The G = 4 and 
+
+G = 8 panels are the ones reproduced in Figure 3. and the remaining exponents move at near-constant objective. Only η and β are separately identified, the former with the interval reported above and the latter with a BCa interval of [+0 .206 , +0 .208]. The other coefficients are best read as coordinates along this ridge, where their tight local intervals in Table 2 understate the true cross-basin spread, so downstream sensitivity studies should perturb them jointly along the ridge rather than one at a time. 
+
+Identifiability caveats. Because the fit sits close to the run-to-run scatter, the loss surface is flat along a ridge in coefficient space. The capacity prefactor and exponent ( a, α ), the joint-term parameters ( j, γ, δ ), and the stand-alone sparsity floor ( c, λ ) trade off against one another at near-constant objective. This is why we report only η and β as identified and treat the rest as ridge coordinates: the law’s loss value and its per-G calibration are robust, but no single split of the prefactors and exponents is privileged, and pinning one for publication requires fixing a prefactor (for example a) and refitting. The stand-alone sparsity-floor term c/ (1 − S)λ is also numerically small at our S ≤ 0.981 because most of the sparsity penalty is carried by the joint j/ ((1 − S)δ N γ 
+
+> tot
+
+Gη) term. Finally, the asymptotic blow-up L → ∞ as S → 1 is imposed by the form rather than measured. Pinning ( c, λ, δ )empirically would require runs at S near 0 .999, which our grid does not contain. 
+
+> 45
+
+Systems-Aware Scaling for Sparse Mixture-of-Experts 
+
+Quantity Min Median Max Total parameters Ntot (B) 0.22 5.34 79.24 Active parameters Nact (B) 0.104 0.339 2.72 Sparsity S 0.499 0.944 0.981 Expert split factor G 1 - 8Expert count E 8 - 512 Top-K activation 1 - 8
+
+Llayers 8 - 24 Residual width d 1024 - 3072 Training tokens D (B) 2.88 5.76 56.38 TPP = D/N act 10.8 - 70 Compute (non-embedding FLOPs) 1.9 × 10 18 - 8.1 × 10 20 
+
+Table 6: Coverage of the training run dataset. These statistics cover only the runs used to fit and validate the scaling law. The staged MOSAIC validation runs of Section 7.5, trained for over 200B tokens each, are not included. 
+
+Appendix C. Scaling Sweep Training Runs 
+
+G Ntot (B) Nact (B) S D (B) Llayers E, K
+
+1 0.54–30.91 0.152–1.179 0.72–0.98 3.84–28.19 {8,12,16 } E ∈ { 8–128 }, K ∈ { 1, 2}
+
+2 0.95–12.65 0.124–0.387 0.87–0.97 3.84–5.76 {8,12,16 } E ∈ { 32–128 }, K ∈ { 1, 2}
+
+4 0.22–79.24 0.110–2.723 0.50–0.98 2.88–56.38 {8,12,16,24 } E ∈ { 12–384 }, K ∈ { 2, 4, 6, 8}
+
+8 0.71–53.0 0.104–2.52 0.85–0.98 3.84–50.00 {8,12,16,24 } E ∈ { 96–512 }, K ∈ { 2, 4, 8}
+
+Table 7: Ranges of total and active parameters, sparsity, training tokens, depth, expert count, and top-K spanned by the scaling runs at each expert split factor G, where B denotes billions. 
+
+C.1 Coverage of the Scaling-Law Dataset 
+
+This appendix documents the slice of the ( Ntot , N act , S, G, D ) space that the joint law of Section 4.2 is fit on. The dataset comprises nruns = 150 from-scratch sparse MoE pretraining runs. Our runs span Ntot ∈ [0 .22 , 79 .24] B parameters, Nact ∈ [0 .10 , 2.72] B parameters, 
+
+S ∈ [0 .499 , 0.981], G ∈ { 1, 2, 4, 6, 8}, E ∈ { 8, 12 , 16 , 24 , 32 , 48 , 64 , 96 , 128 , 192 , 256 , 384 , 512 },
+
+K ∈ { 1, 2, 4, 6, 8}, training tokens D ∈ [2 .88 , 56 .38] B (TPP = D/N act ∈ [10 .8, 70]), across four architecture families (Llayers , d ) ∈ { (8 , 1024) , (12 , 1536) , (16 , 2048) , (24 , 3072) }. Total compute for our scaling law fits spans 1 .9 × 10 18 –8 .1 × 10 20 FLOPs. We display some of the statistics of our training runs in Table 6. 
+
+46 Systems-Aware Scaling for Sparse Mixture-of-Experts                                         
+
+> Llayers dnruns D(B) Ntot (B) Gvalues 81024 52 2.88–7.68 0.22–7.14 {1,2,4,6,8}
+> 12 1536 56 5.76–11.52 0.73–25.20 {1,2,4,6,8}
+> 16 2048 39 28.19–56.38 4.13–45.66 {1,2,4,8}
+> 24 3072 450.00 40.16–79.24 {4,8}
+
+Table 8: Per-family coverage. D is chained to ( Llayers , d ) by an outer Chinchilla-style budgeting decision. 
+
+C.2 Training Dynamics of the MoE Models 
+
+Figure 16 shows the training dynamics of the four largest MoE models in our scaling runs. For each run we plot, over training steps, the loss, the gradient norm, the number of starved (under-utilized) experts, and the range and mean of the per-expert routing bias. We call an expert “ starved ” when it receives fewer than 5% of the tokens in a batch that a uniform assignment over the E experts would send it, so the reported count “starved experts” is the number of such experts in an MoE layer averaged over all layers. Across all four, the loss descends smoothly, the starved- expert count collapses to near zero early in training and stays there, and the expert-bias range contracts steadily, indicating that the load-balancing controller of Section 3.3 keeps routing stable and balanced throughout training even at the largest scales. 
+
+Appendix D. MOSAIC Optimization 
+
+D.1 Sparse-MoE Execution-Plan Realization 
+
+For the Megatron-Core stack used in our experiments, the dense layers factor the world size as Ndev = PTP PCP PPP PDP , the factorized device mesh of Megatron-LM (Shoeybi et al., 2019) and PyTorch (Liang et al., 2024), with the degrees running over tensor, context, pipeline, and data parallel groups. Within an MoE layer, the dense data-parallel domain is repartitioned into expert parallelism and expert data parallelism, 
+
+PDP = PEP PEDP , PEDP = PDP 
+
+PEP 
+
+(24) which requires that PEP divides PDP . Equivalently, the MoE-layer mesh factors as Ndev =
+
+PTP PCP PPP PEP PEDP . Thus PEP is an input degree of the plan that participates in the MoE-layer device factorization, but it does not multiply the dense-layer PDP axis independently, and the expert data parallelism PEDP is determined rather than chosen. These constraints, together with the discrete micro-batch and activation-checkpointing choices, define the realizable plan set Pdisc (Ndev ) of Section 2.2. 
+
+D.2 Structural Properties 
+
+Three properties of Equation (5) are directly useful for interpreting the result. 
+
+> 47 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+Figure 16: Training dynamics of the four largest MoE models in our scaling run sweep (annotated with Ntot , Nact , E, K, G). Each panel stacks, over training steps, the loss, gradient norm, starved-expert count, and per-expert bias range and mean. Loss descends smoothly, starved experts vanish early, and the bias range contracts, showing stable and balanced routing at scale. 
+
+> 48 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+Property 1 (objective convexity). In the continuous variables (log Ntot , log D, log(1 −
+
+S), log G) ∈ R4, the loss L(Ntot , S, D, G ) of Equation (10) is convex, since L is a posynomial in ( Ntot , D, 1−S, G ) (Boyd et al., 2007) on the positive orthant and posynomials are log-convex in these coordinates. 
+
+Property 2 (constraint-driven non-convexity). The non-convexity of Equation (5) resides in the constraints, not in the objective. 
+
+Property 3 (decoupling of D from layout). Tokens D enter only the objective and the FLOPs budget, never the memory cap or the layout product. Consequently, for any Z
+
+and any Pℓ ∈ P feas (Z, B ), the largest admissible D is the closed-form 
+
+D⋆(Z, P ℓ) = Fpeak Ndev Ttrain MFU( Z, P ℓ, B ) ηgood (Ndev )6 Nact (Ntot , S ) (25) and since L is monotone-decreasing in D, any optimum saturates Equation (C-FLOPs) at 
+
+D = D⋆(Z, P ℓ). This eliminates one continuous decision variable analytically and reduces the inner problem to a search over ( Z, P ℓ) alone. 
+
+Algorithmic consequence. Properties 1–3 are what let the bilevel program of Equa-tion (5) be solved exactly by the single-stage search of Section 7, with no generic MINLP machinery. The decision space is finitely realizable, since a deployable architecture ranges over the discrete ladder geometries ( Llayers , d, E, K, G ) and an execution plan over small grids of parallelism degrees, micro-batch sizes, and checkpointing modes, and a fractional expert count or parallel degree is not something one can launch. Tokens then drop out analytically. Loss decreases monotonically in D, so an optimal run never leaves wall-clock budget unused and Equation (25) fixes the saturating D⋆ in closed form, removing the only continuous decision variable. The deployed search of Section 7 realizes this on the finite grid TPP ∈ [40 , 150], taking for each candidate the largest ratio the budget supports, so 
+
+D⋆ is reached up to grid resolution and the cap binds only for the smallest models. What remains splits cleanly, because at fixed Z the best execution plan is simply the feasible plan of maximum MFU within Equation (4), so the scaling law never participates in the layout search. MOSAIC therefore reduces to enumerating the ladder geometries, selecting the max-MFU feasible plan for each, fixing D from Equation (25), and scoring the loss with Equation (10), and the configuration it returns is the exact optimum of Equation (5) over the realizable grid rather than a heuristic solution. A generic MINLP solver would in any case have little to work with here, since MFU and Mem come out of the calibrated performance model of Section 5 as measured kernel and collective lookup tables rather than symbolic expressions that relaxation or branch-and-bound machinery can bound. Searching the discrete geometries directly, rather than relaxing to a continuum and projecting back, is what returns the loss-versus-wall-clock frontier that practitioners want. 
+
+D.3 Optimal Resource Allocation 
+
+MOSAIC solves the allocation problem numerically by enumerating realizable architectures and searching over their feasible execution plans. This section asks what an additional closed-form prescription in the style of Hoffmann et al. (2022) would look like, and what 
+
+> 49
+
+Systems-Aware Scaling for Sparse Mixture-of-Experts 
+
+assumptions would be required to state one. Nothing below replaces the discrete search of Section 7. 
+
+D.3.1 Reduction to a Cpeak Law 
+
+The exogenous hardware-time budget is the raw ceiling Cpeak = Fpeak Ndev Ttrain of Section 2.1 together with the goodput fraction ηgood (Ndev ). Both are fixed before an architecture is selected, so Cpeak ηgood is the counterpart of the compute budget in a Chinchilla-style prescrip-tion, whereas the deliverable budget Cdeliverable is not, since it also carries the best attainable MFU ⋆(Z) = max Pℓ∈P feas (Z,B ) MFU( Z, P ℓ, B ) over the feasible plan set Pfeas (Z, B ) of Sec-tion 2.2. Loss decreases monotonically in the token count, so saturating Equation (C-FLOPs) recovers Property 3, 
+
+D⋆(Z, C peak ) = Cpeak MFU ⋆(Z) ηgood 
+
+6Nact (Z) . (26) Since MFU ⋆(Z) does not depend on the training-window length, substituting Equation (26) into Equation (10) collapses the law to 
+
+L⋆(Z, C peak ) = L∞(Z) + Ψ( Z)
+
+Cβ
+
+> peak
+
+, Ψ( Z) = b
+
+ 6Nact (Z)MFU ⋆(Z) ηgood 
+
+β
+
+(27) where L∞(Z) collects the three terms of Equation (10) that do not involve D, together with the irreducible constant e. We note that D⋆ ∝ Cpeak at any fixed architecture, provided no external data or tokens-per-parameter cap binds, though the globally optimal token count doesn’t need to be linear in Cpeak because the selected architecture can change the constant MFU ⋆(Z)/N act (Z). 
+
+D.3.2 Conditions for an allocation law 
+
+The reduction above is exact for each discrete candidate, but a continuous optimal solution needs more assumptions, and what follows is a local, regime-specific approximation rather than a universal law. We write r ≡ 1 − S and N ≡ Ntot , and we assume (1) an interior memory-slack region where any memory or geometry boundary constraint is non-existent, (2) the same execution layout stays optimal locally, and (3) MFU ⋆(N, r, G ) is differentiable. We define the local MFU log-slopes ωN = ∂ log MFU ⋆ /∂ log N , ωS = ∂ log MFU ⋆ /∂ log r,and ωG = − ∂ log MFU ⋆ /∂ log G, so that ωG > 0 means MFU falls as experts become finer. After writing the four terms of Equation (10) as Lcap = aN −α, Ldata = bD −β ,
+
+Lsp = cr −λ and Lint = jN −γ r−δG−η, and eliminating D through Equation (26), stationarity in (log N, log r, log G), we obtain 
+
+α Lcap = β Ldata 
+
+ 1 − ωN − γω G/η ,λ Lsp = β Ldata 
+
+ 1 − ωS − δω G/η , η Lint = β ω G Ldata . (28) Since all four loss components and their exponents are positive, these stationarity equations require necessary sign conditions for an interior solution. In particular, the G equation requires ωG > 0, while the N and r equations require 1 −ωN −γω G/η > 0 and 1 −ωS −δω G/η > 
+
+50 Systems-Aware Scaling for Sparse Mixture-of-Experts 
+
+0, respectively. Without a systems penalty on finer experts, ωG = 0, the third stationarity condition cannot hold. The objective is then strictly decreasing in G within this regime, so no interior G optimum exists and the solution lies at the largest admissible expert split factor. Where memory binds, a geometry boundary is active, or the optimal layout changes, the corresponding KKT or nonsmooth terms must be included instead. Note that Equation (28) alone does not give a power law, since the log-slopes may drift as the architecture moves. The key additional assumption is that they stay approximately constant within one systems regime, so that MFU ⋆ ≃ m0(N/N 0)ωN (r/r 0)ωS (G/G 0)−ωG .Under this approximation the four terms stay in fixed ratios and the optimum traces the regime-local path 
+
+r⋆ ∝ (N ⋆)α/λ , D⋆ ∝ (N ⋆)α/β , G⋆ ∝ (N ⋆)(α−γ−αδ/λ )/η (29) Writing p = α/λ , ϱ = α/β and g = ( α − γ − αδ/λ )/η for these exponents, and ν =[(1 − ωN ) + (1 − ωS )p + ϱ + ωGg]−1, the same path in terms of the purchased budget is 
+
+N ⋆ ∝ Cν
+
+> peak
+
+, 1 − S⋆ ∝ Cpν 
+
+> peak
+
+, D⋆ ∝ Cϱν 
+
+> peak
+
+, G⋆ ∝ Cgν 
+
+> peak
+
+. (30) These relations hold conditional on fixed hardware, device count, batch envelope, goodput model, and systems regime. Layout transitions, memory boundaries, and topology changes alter the log-slopes and therefore produce different allocation phases. 
+
+Appendix E. Performance Model Input/Outputs 
+
+The listings below describe ScalePlan ( https://github.com/dmlc/ScalePlan ), the perfor-mance model released with this paper. Beyond scoring one plan, it enumerates the execution plans Pℓ = ( PTP , P EP , P CP , P PP , P DP , B micro , A ckpt ) for a given device count, discards those that breach the memory cap, and returns the survivors ranked by predicted MFU. That search is what supplies the inner maximization over Pfeas of Equation (C-FLOPs), so MO-SAIC calls it once per candidate architecture rather than assuming a layout. The field names below are those of the tool, and the trailing comment on each line gives the corresponding paper symbol where one exists.  
+
+> 1
+
+model :  
+
+> 2
+
+n_layers : 48 # L_layers , transformer blocks  
+
+> 3
+
+hidden_sz : 6144 # d , residual - stream width  
+
+> 4
+
+inter_sz : 15360 # d_ff , dense FFN width (2.5 d )  
+
+> 5
+
+n_q_heads : 48 # n_head , query heads  
+
+> 6
+
+n_kv_heads : 8 # key / value heads ( grouped - query attention )  
+
+> 7
+
+head_dim : 128 # d_head , so d = n_head * d_head  
+
+> 8
+
+vocab_sz : 257536 # vocabulary size  
+
+> 9
+
+precision : " bf16 "  
+
+> 10
+
+sdpa_precision : " bf16 "  
+
+> 11
+
+glu : true  
+
+> 12
+
+rotary_embeds : true  
+
+> 13
+
+dropout : false  
+
+> 14
+
+tie_embeddings : false 
+
+> 15
+
+51 Systems-Aware Scaling for Sparse Mixture-of-Experts  
+
+> 16
+
+moe :  
+
+> 17
+
+n_experts : 128 # E , routed experts per MoE block  
+
+> 18
+
+experts_per_token : 3 # K , top - K active experts  
+
+> 19
+
+capacity_factor : 1.0  
+
+> 20
+
+expert_inter_sz : 3840 # d_expert , so G = d_ff / d_expert = 4 
+
+> 21
+
+moe_frequency : 1 
+
+> 22
+
+expert_tp_degree : 1 # P_ETP , expert tensor parallel degree  
+
+> 23 24
+
+search :  
+
+> 25
+
+num_devices : 512 # N_dev  
+
+> 26 27
+
+performance :  
+
+> 28
+
+activation_checkpointing_type : full  
+
+> 29 30
+
+optimizer :  
+
+> 31
+
+optimizer_type : muon  
+
+> 32 33
+
+data :  
+
+> 34
+
+gbs : 8192 # B_global , sequences per optimizer step  
+
+> 35
+
+seqlen : 8192 # T_seq , sequence length  
+
+> 36
+
+microbatch_sz : 2 # B_micro  
+
+> 37 38
+
+hardware :  
+
+> 39
+
+node_type : p6 - b200 .48 xlarge # 8 GPUs per node , so N_gpu / node = 8
+
+Listing 1: Performance model input specification. Output example, where the layout degrees are ( PTP , P EP , P PP , P CP , P DP ) of Pℓ and the reported MFU and memory are the MFU( Z, P ℓ, B ) and Mem( Z, P ℓ, B ) predictions of Sec-tion 5.  
+
+> 1
+
+Rank 1:  
+
+> 2
+
+Configuration : tp =1 , ep =8 , pp =16 , cp =1 , dp =32  
+
+> 3
+
+Analytical MFU : 13.69%  
+
+> 4
+
+Memory per device : 21.30 GB  
+
+> 5
+
+Iteration time : 44.892 s
+
+Listing 2: Performance model output. 
+
+Appendix F. Results 
+
+F.1 Geometry Scale Ladders 
+
+Table 9 lists the rungs of the geometry scaling ladder of Section 7.1 that our search enumerates. Each row is one seed q, giving the backbone dimensions the seed fixes and, at a representative MoE configuration, the parameter counts and sparsity that backbone realizes. 
+
+52 Systems-Aware Scaling for Sparse Mixture-of-Experts                                                                  
+
+> qLlayers nhead ddff Ntot (B) ∗Nact (B) ∗S
+> 416 16 2048 5120 15.5 0.7 0.954 624 24 3072 7680 53.2 2.3 0.957 832 32 4096 10240 127.3 5.4 0.958 10 40 40 5120 12800 250.0 10.4 0.958 12 48 48 6144 15360 433.7 17.9 0.959 14 56 56 7168 17920 690.5 28.2 0.959 16 64 64 8192 20480 1032.8 41.9 0.959 18 72 72 9216 23040 1472.8 59.5 0.960
+
+Table 9: Seeds of the model-scale ladder used in our experiments. The geometry seed 
+
+q sets the backbone depth Llayers = 4 q, head count nhead = 4 q, residual width 
+
+d = 128 nhead , and reference dense FFN width dff = 2 .5 d. The last three columns give the total and active parameter counts and the induced sparsity S at an example MoE configuration E = 128, K = 3, G = 4. The MoE axes ( E, K, G ) are searched at each rung. ∗Non-embedding parameter counts. 
+
+F.2 Implications for Sparse-MoE Parallelism Design 
+
+This appendix develops the design rules summarized in Section 7.2.2. Reading the measured best MFU achieved by different parallelism configurations in the validation sweeps yields two design rules and one caveat that bounds them. 
+
+• The dominant lever is not any single degree but the pipeline fill ratio 
+
+rfill = nmb /P PP , the microbatches in flight per pipeline stage. Within a sweep, layout choice moves measured MFU by up to 3 .1× (18B) and 2 .1× (700M), and almost all of that spread tracks rfill , since 1F1B leaves each stage idle for a bubble fraction of ( PPP −1) /(PVPP nmb ), so throughput collapses as rfill falls toward 1 and saturates once rfill is large. The 18B pipeline sweep makes this explicit, where at PPP =16, MFU climbs as rfill goes 0 .25 → 0.5 → 1, then plateaus at ∼ 10–12% for rfill ≥ 4. This reframes the two parallelism knobs that people tune independently, since deeper pipelines and larger microbatches both shrink rfill and are only free once the fill ratio is already comfortable. Concretely, every extra pipeline stage or microbatch that drops 
+
+rfill below ∼ 4 costs measurable MFU, whereas the same change at rfill ≥ 4 is nearly free. 
+
+• Keep the expert all-to-all inside the scale-up (NVLink) domain, and, once the fill ratio is satisfied, pipeline depth is what should absorb the rest of the budget. Expert parallelism helps up to the node boundary and hurts past it, where MFU rises monotonically with PEP in the 700M sweep (for PEP ∈ { 1, 2, 4, 8}
+
+at fixed depth) and drops from PEP =8 to PEP =16 in both 5.4B sweeps as the group leaves the 8-GPU node. Once PEP is pinned to the domain, moderate pipeline depth is the cheapest remaining axis provided it does not push rfill below the plateau, and the 5.4B optima use PPP ∈{ 2, 4} because at these depths rfill stays ≥ 8. This is the actionable ordering the model exposes, where we set PEP to the scale-up domain, then add pipeline depth only while rfill remains large. 
+
+> 53 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+• Spend the FFN-parallelism budget on expert parallelism rather than expert tensor parallelism. For the expert FFN this is the expected ordering, since expert parallelism partitions the experts with one all-to-all per layer, whereas tensor parallelism adds two all-reduces per layer on the critical path. Scoped this way, the rules collapse the viable search region sharply and in a model-checkable order, where we fix PTP =1, set PEP to the scale-up domain, then choose the ( PPP , B micro ) pair that keeps the pipeline fill ratio rfill ≥ 4 at the target global batch. This retains the measured optimum in every sweep that is not memory-bound while discarding the configurations the analytical model also ranks worst, which lowers the cost of the hardware-confirmation step. Long-context, memory-bound, or wider-NVLink regimes shift the thresholds along the principles above. 
+
+F.3 The Training Stack Behind the Staged Runs 
+
+The staged runs of Section 7.5 are launched on the same discrete grid that Stage-2 enumerates, but their realized throughput is set by a production training stack whose overheads the analytical performance model only approximates. Each run is driven by a PyTorch Lightning, NeMo, and Megatron-Core pipeline with one process per GPU and eight GPUs per p6-b200 node. We use the Megatron-Core MoE training stack 7 as is, both for the performance-model validation and for the staged runs, so we measure a standard stack and not a custom one. From that stack we enable the grouped-GEMM expert path (so the per-expert matrix multiplications for a layer are issued as one batched kernel), cross-entropy loss fusion, the all-to-all token dispatcher for expert parallelism, and shared-expert overlap (which hides the shared-expert compute behind the routed all-to-all). Fine-grained activation recomputation is treated as a sweep axis inside the MFU search rather than fixed, since it trades memory for recompute cost and thereby moves the feasible-layout boundary. We deliberately leave the rest of the stack’s kernels and fusions off, and in particular we do not use parallel folding or DeepEP, and we leave many of the newer optimizations in the stack as future work. An important point is that our performance model is itself an evolving artifact that mirrors one systems stack at a given point in time, so as we turn on new kernels or change the stack, the model is simply re-calibrated or replaced by an updated one rather than being a fixed assumption of the framework. Several loop-level effects open a gap between this realized MFU and the value the analyt-ical model predicts, and they are the reason the analytical model at times is systematically optimistic (Section 7.5). Pipeline parallelism over large number of micro-batches leaves an idle bubble that a steady-state FLOPs count does not see. Full activation recomputation, used to fit the model in memory, adds an extra forward pass per layer inside the backward, raising step time without adding any of the idealized compute that MFU credits. The expert all-to-all dispatch is exposed collective time whose cost depends on whether an expert-parallel group stays inside a node or crosses the fabric, and the fp32 router is a precision island inside an otherwise bf16 model. Together with asynchronous S3 checkpointing, periodic garbage collection, and launch jitter, these are wall-clock the device-side model does not fully charge, so it over-predicts MFU while preserving the ranking the selection relies on. 
+
+> 7. https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/core/transformer/moe
+> 54 Systems-Aware Scaling for Sparse Mixture-of-Experts
+
+A second class of overhead lives entirely on the host. Our tokenizer is a fast Hugging Face tokenizer, downloaded once per node from S3 into shared memory and patched to be thread-safe because the loader calls it from worker threads. The collator pads every micro-batch to a multiple of eight and then to the full 2048-token context, since pipeline parallelism requires uniform shapes across stages. The streaming dataloader shards only along the data-parallel axis, replicates identical batches across the tensor-, pipeline-, and expert-parallel ranks of a group. Because we run a single loader worker per rank with a prefetch depth of two, host-side tokenization, collation, and the host-to-device copy can stall the accelerators. Such input-pipeline stalls lower realized MFU and are invisible to a device-side performance model, which is one more reason in the gap between the measured throughput and the prediction. Finally, the realization is specific to the accelerator and its interconnect, so the same architecture can land at a different optimum on different hardware. A p6-b200 node 8 pairs eight NVIDIA B200 GPUs with up to 14 .4 TB/s of bidirectional intra-node NVLink and a fourth-generation Elastic Fabric Adapter delivering 3 .2 Tbps (400 Gbps per GPU) between nodes. On an H200 platform the per-device peak FLOPs, the HBM capacity, and the NVLink bandwidth are all lower, which shifts both the memory cap and the throughput-optimal layout. Because intra-node collectives ride NVLink and NVSwitch while inter-node collectives ride EFA RDMA, whether the expert all-to-all is confined to a node or spills across the fabric can swing MFU sharply. The optimum MOSAIC returns is therefore tied to the device peak FLOPs and the bandwidth constants of the target platform, and it must be resolved, not merely rescaled, when the hardware changes.

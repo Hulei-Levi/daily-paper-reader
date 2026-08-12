@@ -1,0 +1,509 @@
+Title: Share First, Route What Remains: A Unified Framework for Token-Adaptive MoE Computation
+
+URL Source: https://arxiv.org/pdf/2608.10392v1
+
+Published Time: Wed, 12 Aug 2026 00:28:22 GMT
+
+Number of Pages: 11
+
+Markdown Content:
+# Share First, Route What Remains: A Unified Framework for Token-Adaptive MoE Computation 
+
+Gongli Zhang , Zhulin Liu *, and C. L. Philip Chen 
+
+Guangdong Provincial Key Laboratory of Computational AI Models and Cognitive Intelligence, School of Computer Science and Engineering, South China University of Technology, Guangzhou 510006, China Pazhou Lab, Guangzhou 510335, China Engineering Research Center of the Ministry of Education on Health Intelligent Perception and Paralleled Digital-Human, Guangzhou 510641, China 
+
+> *
+
+Corresponding author: Zhulin Liu. Emails: csglzhang@mail.scut.edu.cn, liuzhl@scut.edu.cn, philip.chen@ieee.org 
+
+Abstract —Mixture-of-experts (MoE) models have recently moved beyond routing a fixed number of complete experts. Shared-expert designs preserve reusable knowledge, fine-grained methods vary computation within experts, and dynamic routers adapt the number of active experts. Yet these decisions are usually made independently, overlooking a basic dependency: extracting reusable computation changes both what remains and how much expert capacity the remainder needs. We study this dependency by decomposing sparsely upcycled feed-forward experts into key-value channels. Co-activated experts align at a subset of value positions; removing these positions changes expert preference; and greater shared coverage is associated with lower residual expert demand. These observations lead to one principle: share first, then route what remains. We instantiate it in UniF-MoE, a unified framework for token-adaptive MoE computation. Each expert is partitioned into aligned blocks. A shared-demand score sets the shared block count and pathway weight, key prototypes select the shared content, and the complementary demand deter-mines the residual expert count through cumulative routing mass. A Gram regularizer separates and normalizes router embeddings, promoting diverse routing directions, sparse expert overlap, and a simple routing geometry. Experiments on DomainBed and GLUE show that this unified design improves predictive performance over representative static and dynamic MoEs while reducing activated computation, inference latency, and memory. Code is available at https://github.com/existence0420/UniF-MoE. 
+
+Index Terms —mixture of experts, unified framework, token-adaptive computation, shared, residual 
+
+I. I NTRODUCTION 
+
+Mixture-of-experts (MoE) models increase parameter capac-ity without evaluating every parameter for every token [1]. A router sends each token to a small set of feed-forward networks (FFNs), or experts, so capacity can grow while execution remains sparse [2], [3]. Conventional top-k routing answers one question: which experts should process this token? This direct formulation hides two allocation decisions. It treats a complete expert as the unit of computation, even when selected experts repeat common responses, and it gives every token the same expert count, even when their semantic requirements differ. The result can be redundant computation for simple tokens and insufficient capacity for harder ones. Recent work relaxes this formulation along three comple-mentary directions. Shared experts capture common knowl-edge [4], [5]; modular, nested or slimmable experts vary com-putation within an expert [6]–[8]; and dynamic routers vary the number of active experts [9]–[12]. Other methods encourage experts to remain distinct [13], [14]. These advances are usually developed as separate mechanisms, but their decisions are not independent. Once reusable computation is extracted, the residual content changes, the best experts can change, and the capacity needed from them can change as well. A router that decides these quantities separately can therefore repeat shared work or allocate expert capacity for a response that has already been partly computed. To expose this dependency, we delve into the internal structure of the FFN. An expert can be written as a sum of hidden channels, each defined by an up-projection key and a down-projection value [15]. In a sparsely upcycled MoE [16], experts start from the same pretrained FFN, so matching channel positions remain comparable across experts. This lets us test whether co-activated experts produce reusable responses at aligned positions and what happens to routing after those responses are separated. Our analysis gives a consistent answer. Co-activated experts are neither wholly redundant nor wholly distinct: they align at a subset of value positions, and frequently co-activated pairs tend to align more. Removing these positions substantially changes the preferred experts. The number of residual experts needed to recover the original output also varies across tokens and decreases as shared coverage grows. Shared modeling, fine-grained computation, and dynamic routing are therefore three stages of one allocation problem, not three parallel knobs. The reusable response should be identified first; routing should then act on what remains. This principle leads to UniF-MoE, a unified framework for token-adaptive MoE computation. Each layer contains one shared expert and K residual experts, all divided into aligned blocks. For each token, a shared-demand score first determines how much computation belongs to the shared pathway and how strongly that pathway contributes. Key prototypes then select which blocks provide that reusable content. Only the complementary blocks are routed onward, and their demand determines how many residual experts are arXiv:2608.10392v1 [cs.LG] 11 Aug 2026 activated by cumulative routing mass. A single router thus coordinates three decisions in functional order: how much to share , what to share , and how many experts the remainder needs . A Gram constraint shapes its embeddings into distinct, normalized directions, encouraging diverse expert roles and sparse overlap through a simple routing geometry. Our contributions are summarized as follows:  
+
+> •
+
+We reveal a routing-conditioned dependency between reusable and token-specific computation inside sparsely upcycled experts. This turns shared modeling, fine-grained computation, and dynamic routing into one or-dered principle: share first, then route what remains . 
+
+> •
+
+We instantiate this principle in UniF-MoE, which cou-ples shared width , shared content , and residual expert count through one token-dependent budget. The resulting process coordinates intra-expert and inter-expert sparsity instead of deciding them independently.  
+
+> •
+
+Across vision and language benchmarks, UniF-MoE achieves a stronger accuracy–efficiency trade-off than representative MoEs. Ablations and routing analyses fur-ther show that its gains arise from coordinating shared reuse with residual specialization. II. M OTIVATION 
+
+A. Preliminaries 
+
+Let x ∈ R1×d be one input token to a sparse MoE layer with K experts. The router stores one embedding per expert: 
+
+Wg = [ W1, W2, . . . , WK ] ∈ Rd×K , (1) where Wj ∈ Rd×1 is the embedding of expert j. The router produces an affinity distribution and selects its k largest entries: 
+
+s(x) = softmax( xW g ) ∈ R1×K , (2) 
+
+Tk(x) = TopK( s(x), k ), (3) where TopK returns the index set of the selected entries. Expert j is an FFN with up-projection Kj ∈ Rd×H and down-projection Vj ∈ RH×d. The intermediate width H is also the number of hidden channels. Its output can be written as 
+
+Ej (x) = 
+
+> H
+
+X
+
+> h=1
+
+GeLU( xK j [: , h ]) Vj [h, :] . (4) The column Kj [: , h ] is the key of channel h: its inner product with x determines the channel activation. The row Vj [h, :] is the value: it determines the direction written to the output. We omit bias terms for clarity. A conventional top-k MoE returns 
+
+y = X 
+
+> j∈T k(x)
+
+sj (x)Ej (x). (5) Here, sj (x) denotes entry j of s(x). Equation (5) routes complete experts. Equation (4), however, shows that each expert is itself a sum of channel responses. This internal structure provides a natural place to separate shared and residual computation. 
+
+(a) Shared ratio and co-activation frequency 
+
+(b) Router rank transition (c) Functional-demand CDF        
+
+> Fig. 1. Diagnosing the MoE module in Transformer layer 10 trained on TerraIncognita. (a) Value alignment and co-activation for each expert pair. (b) Expert-rank transitions after the aligned positions are extracted. (c) Pair-balanced cumulative distribution function (CDF) Fε(m) = Pr[ kε(x)≤m]
+> at ε= 0 .05 for the five pairs with the lowest and highest shared ratios. Shading shows the standard error across pairs.
+
+B. Observations a) Diagnostic setup.: We analyze layer 10 of a standard top-2 MoE model trained on TerraIncognita [17]. The layer contains 6 experts with 1536 hidden channels each. All experts are copied from the same pretrained Transformer [18] FFN before fine-tuning. Channel index h therefore refers to the same initial position across experts, which makes same-index values directly comparable. For expert pair (i, j ), we define 
+
+cijh = Vi[h, :] Vj [h, :] ⊤
+
+∥Vi[h, :] ∥2∥Vj [h, :] ∥2
+
+,
+
+Sij (δ) = {h ∈ { 1, . . . , H } : cijh ≥ δ} ,ρij (δ) = |S ij (δ)|
+
+H .
+
+(6) We use δ = 0 .98 . The set Sij contains positions where the two experts write in nearly the same direction, and ρij is the fraction of such positions. We treat this set as a weight-space estimate of the pair’s reusable response. Its complement Rij =
+
+{1, . . . , H } \ S ij contains the residual positions. 
+
+b) Observation 1: co-activation identifies reusable re-sponses.: Figure 1(a) compares ρij with the fraction of tokens routed to pair (i, j ). Their Pearson correlation is 0.697. Frequently co-activated pairs align at up to roughly 80% of their value positions, while some rarely selected pairs align at less than 2%. The aligned positions are therefore not spread uniformly across expert pairs. They concentrate among the pairs that the router most often asks to work together, which makes them a useful target for shared computation. 
+
+c) Observation 2: residual computation needs a new routing decision.: Similarity alone does not show that the aligned positions should be separated from routing. We there-fore freeze the experts, extract Sij for each token’s original top-2 pair, and train a new top-2 router on the residual positions. Figure 1(b) compares the two expert rankings. Only 5.7% of tokens keep the same top-2 set, and the mean diag-onal mass is 26.9%. The original router scores the complete response, not the residual alone. Once the shared response is handled, different experts often become better choices. 
+
+d) Observation 3: residual demand varies across tokens.: 
+
+We next ask how many residual experts are needed after the shared response has been separated. For the active pair (i, j ),let ese(x) = se(x)/(si(x) + sj (x)) be the normalized original gate weight. We split each expert output into ESij  
+
+> e
+
+and ERij  
+
+> e
+
+,which retain the shared and residual positions, respectively. Merging the shared responses once gives 
+
+yorig  
+
+> ij
+
+(x) = X
+
+> e∈{ i,j }
+
+ese(x)Ee(x), (7) 
+
+Sij (x) = X
+
+> e∈{ i,j }
+
+ese(x)ESij  
+
+> e
+
+(x), (8) 
+
+rij (x) = yorig  
+
+> ij
+
+(x) − Sij (x). (9) The residual target is rij (x). Let q1(x), . . . , q K (x) be the expert order produced by the residual router. For a prefix of length m ∈ { 1, . . . , K }, we stack its residual outputs: 
+
+Rm(x) = 
+
+
+
+ERij 
+
+> q1(x)
+
+(x)
+
+...
+
+ERij 
+
+> qm(x)
+
+(x)
+
+ ∈ Rm×d. (10) We then use ridge-stabilized least squares to measure the best reconstruction available in the row span of Rm(x):
+
+a⋆m(x) = arg min  
+
+> a∈Rm
+
+a⊤Rm(x) − rij (x) 22
+
++ γm(x)∥a∥22, (11) 
+
+bym(x) = Sij (x) + ( a⋆m(x)) ⊤Rm(x), (12) 
+
+em(x) = ∥bym(x) − yorig  
+
+> ij
+
+(x)∥2
+
+max {∥ yorig  
+
+> ij
+
+(x)∥2, η } , (13) 
+
+Aε(x) = {m ∈ { 1, . . . , K } : em(x) ≤ ε} , (14) 
+
+kε(x) = min ( Aε(x) ∪ { K + 1 }) . (15) We set γm(x) = 10 −6 tr( Rm(x)Rm(x)⊤)/m and η =10 −12 . ε is the fidelity tolerance, and Aε(x) is the set of prefixes that attain it. The sentinel K + 1 records that no available prefix reaches the target. Thus, kε(x) measures how quickly the ordered residual span recovers the original output. Figure 1(c) plots its CDF with ε set to 0.05. At m = 2 , the pair-balanced success rates are 56.3% for high-shared pairs and 11.8% for low-shared pairs; their mean kε values are 2.70 and 4.61. Across pairs, shared ratio and mean demand correlate at −0.673 (bootstrap 95% CI [−0.899 , −0.315] ), and the trend persists under uniform shared averaging and across all four held-out environments at ε ∈ { 0.10 , 0.20 }. Shared coverage is therefore related to the full distribution of residual demand. 
+
+C. Design Implications 
+
+These observations show that the key question is not whether shared modeling, fine-grained computation, and dy-namic routing coexist, but in what order they act. Shared mod-eling must first determine how much computation is reusable. Fine-grained computation must then identify which content provides that response. Only after these choices should dy-namic routing decide how many experts the remainder needs. Reversing or separating this order would route a response that has already changed. The next section implements this principle as share first, then route what remains .III. M ETHOD 
+
+Figure 2 compares UniF-MoE with conventional top-k
+
+MoE. Rather than attaching independent controllers for shared computation, internal selection, and expert count, UniF-MoE makes these decisions sequentially under one token-dependent budget. 
+
+A. Blockwise Shared-Residual Partitioning 
+
+A UniF-MoE layer contains one shared expert Eshr and K
+
+residual experts {E1, . . . , E K }. Each expert has intermediate width H and is divided into B aligned blocks of width 
+
+M = H/B . Block b contains positions Hb = {(b − 1) M +1, . . . , bM } and produces 
+
+E(b) 
+
+> j
+
+(x) = 
+
+> bM
+
+X 
+
+> h=( b−1) M+1
+
+GeLU( xK j [: , h ]) Vj [h, :] . (16) Thus, Ej (x) = PBb=1 E(b) 
+
+> j
+
+(x). All experts are initialized from the same dense FFN, so their block boundaries are aligned at the start of training. For each token, the shared expert executes one subset of blocks, and the residual experts execute the complementary subset. Here, “residual” refers to the channel positions left after shared-block selection, not to the Transformer residual connection. No hidden position is assigned to both pathways for the same token. 
+
+B. Token-Adaptive Shared Modeling a) Shared demand.: The standard router Wg contains the embeddings of K residual experts. We add one learnable column Wshr for the shared expert: 
+
+W⋆g = [ Wshr , Wg ] ∈ Rd×(K+1) . (17) This column produces the shared-demand score 
+
+α(x) = τ + (1 − 2τ )σ(xW shr ) , τ = B − 1
+
+B2 , (18) where σ(·) is the sigmoid function. We interpret α(x) as the token’s demand for shared computation. It controls both the (a) Conventional top-k MoE (b) UniF-MoE   
+
+> Fig. 2. Conventional top-kMoE selects complete experts in one step. UniF-MoE first executes token-selected blocks once in a shared expert, then routes only the complementary blocks to a token-dependent number of residual experts. Colored blocks are active.
+
+number of shared blocks and the mixture weight of the shared pathway. The shared block count is 
+
+b(x) = round( Bα (x)) . (19) Because σ(z) ∈ (0 , 1) , the chosen bound gives τ < α (x) <
+
+1 − τ . For B ≥ 2, rounding therefore guarantees b(x) ∈{1, . . . , B − 1}: every token uses at least one shared block and leaves at least one block for residual computation. 
+
+b) Shared block selection.: The score α(x) determines how many blocks to share, but not which blocks. We represent shared block b by the mean of its up-projection keys: 
+
+μb = 1
+
+M
+
+> bM
+
+X 
+
+> h=( b−1) M+1
+
+Kshr [: , h ] ∈ Rd×1. (20) Its priority for token x is 
+
+ub(x) = xμb. (21) The b(x) blocks with the largest priorities form the shared index set. All other blocks form the residual index set: 
+
+Ishr (x) = TopK  {ub(x)}Bb=1 , b (x) , (22) 
+
+Ires (x) = {1, . . . , B } \ I shr (x). (23) Two tokens can therefore use the same shared width while choosing different content. This second decision prevents shared demand from collapsing into a fixed prefix or a scalar width rule. 
+
+C. Cumulative Residual-Expert Routing 
+
+The residual embeddings produce an affinity distribution 
+
+s(x) = softmax( xW g ) ∈ R1×K . (24) Let q1(x), . . . , q K (x) be the expert indices sorted by decreas-ing affinity. We write the sorted values as pi(x) = sqi(x)(x):
+
+p1(x) ≥ p2(x) ≥ · · · ≥ pK (x), pi(x) = sqi(x)(x). (25) The residual demand is the complement of the shared demand: 
+
+β(x) = 1 − α(x). (26) Thus, the two pathways divide one budget instead of estimat-ing their importance independently. We activate the smallest prefix whose cumulative affinity covers this demand: 
+
+k(x) = min 
+
+(
+
+n ∈ { 1, . . . , K } :
+
+> n
+
+X
+
+> i=1
+
+pi(x) ≥ β(x)
+
+)
+
+. (27) Equation (27) makes expert count conditional on the preceding shared allocation. The value β(x) says how much computation remains, while the shape of s(x) says how concentrated that demand is across experts. A large residual can still be covered by one expert when the distribution is sharp, whereas a diffuse distribution recruits more experts. 
+
+D. Shared-Residual Output Merging 
+
+The selected output of the shared expert and the output of residual expert j are 
+
+ES
+
+> shr
+
+(x) = X
+
+> b∈I shr (x)
+
+E(b)shr (x), (28) 
+
+ER 
+
+> j
+
+(x) = X
+
+> b∈I res (x)
+
+E(b) 
+
+> j
+
+(x). (29) The final layer output is 
+
+y = α(x)ES
+
+> shr
+
+(x) + 
+
+> k(x)
+
+X
+
+> i=1
+
+pi(x)ER
+
+> qi(x)
+
+(x). (30) The shared output is weighted by α(x). Selected residual experts keep their affinities. Define Pn(x) = Pni=1 pi(x). By the definition of the smallest sufficient prefix, 
+
+β(x) ≤ Pk(x)(x) < β (x) + pk(x)(x), (31) 
+
+1 ≤ α(x) + Pk(x)(x) < 1 + pk(x)(x). (32) The residual routing mass is at least β(x) and exceeds it by less than the affinity of the final expert. Because α(x)+ β(x) = 1, the total coefficient mass has a controlled overshoot while preserving the router’s confidence. E. Training Objective and Compute 
+
+The shared and residual embeddings should remain distinct rather than collapse into interchangeable routes. We therefore initialize the columns of W⋆g orthonormally and regularize their Gram matrix: 
+
+Ldiv = (W⋆g )⊤W⋆g − IK+1 F , (33) 
+
+L = Ltask + λdiv Ldiv , (34) where IK+1 is the identity matrix. The diagonal terms keep each embedding at unit scale, yielding a simple normalized routing geometry. The off-diagonal terms separate routing di-rections, increasing expert diversity. Orthonormal initialization starts from the same geometry when K + 1 ≤ d. Together, these effects promote diverse roles and sparse expert overlap without forcing the expert outputs themselves to be orthogonal. Measured in blocks, token x activates 
+
+CB (x) = b(x) + k(x)[ B − b(x)] (35) blocks. A conventional top-k layer executes kB blocks. When 
+
+k(x) = 1 , the shared and residual blocks together equal one complete FFN. Every additional residual expert adds only the B − b(x) blocks that remain. The ordered decomposition therefore performs reusable work once and confines repeated expert cost to the residual pathway. IV. E XPERIMENTS 
+
+A. Experimental Setup a) Benchmarks and implementation details.: We evaluate UniF-MoE on vision and language tasks. For vision, the backbone is DeiT-S/16 [19] pretrained on ImageNet [20]. We use the train-validation selection criterion of DomainBed [21] and report out-of-domain accuracy on PACS [22], VLCS [23], OfficeHome [24], TerraIncognita [17], and DomainNet [25]. 
+
+K and B are set to 6 and 8, respectively. For language, the backbone is BERT-large [26]. We evaluate CoLA [27], MRPC [28], QNLI [29], MNLI [30], and RTE [31] from GLUE [32], using K = 16 and B = 16 . Learning rate and other settings follow the corresponding baselines. Our results are averaged over three runs. 
+
+b) Comparative baselines.: Vision baselines include dense DeiT-S/16; static MoEs GMoE [33], EMoE, and EMoE-L (EMoE-learn) [6]; domain-generalization methods LFME [34], DMDA [35], and PC-MoE [36]; and dynamic MoEs DynMoE [10] and MASS [11]. Language baselines include dense BERT-large, fixed top-k MoEs with k ∈ { 1, 2, 4, 8},DynMoE, and MASS. For fixed routing, we also report the average across k and the per-task best result. 
+
+B. Main Results a) Vision tasks.: Table I shows that UniF-MoE obtains the best average result on DomainBed, leading on PACS, VLCS, and DomainNet and tying the best result on Office-Home. These four datasets mix category evidence with strong style or source variation, a setting that plays to UniF-MoE’s strength: reusable blocks preserve transferable cues, while residual routing directs the remaining appearance-specific computation to the patches that need it. TerraIncognita is dominated by location-dependent backgrounds and camera viewpoints, where LFME’s explicit domain specialization re-mains stronger. The overall pattern supports the value of coor-dinating reusable and residual computation without imposing one budget on every patch. 
+
+b) Language tasks.: Table II shows that UniF-MoE per-forms best on all five GLUE tasks, spanning linguistic ac-ceptability, paraphrase detection, and several forms of textual inference. The strongest fixed k changes across tasks, yet even their per-task oracle envelope remains below UniF-MoE. Choosing k per dataset still assigns one operating point to every token. UniF-MoE instead identifies reusable linguistic computation before adapting the residual expert count within each sequence, replacing a global expert budget with a token-level dependency. 
+
+C. Token-Adaptive Computation and Cost a) Element-conditioned pathway composition.: Figure 3 groups image patches by semantic element and records their routing choices in Transformer layer 10. Shared blocks recur across several elements, whereas residual experts show more selective preferences. Patches that reuse the same shared block can still activate different residual experts, confirming the dependency at the center of our design: shared selection removes common computation, but does not predetermine who should process the remainder. 
+
+b) Patch-wise resource allocation.: Figure 4 shows alarm clocks from different domains. High-compute patches fall on the display in Product and Real World, and on the bells, ticks, and hands in Clipart. The Art example assigns minimal computation to a watermark and several strong but irrelevant strokes. The joint budget therefore responds neither to domain nor contrast alone; it reserves residual capacity for regions that carry useful class evidence after reusable features are handled. 
+
+c) Measured cost comparison.: Table III compares UniF-MoE with representative dense, static-MoE, and dynamic-MoE designs. EMoE has the lowest activated parameter count and FLOPs among the MoEs, whereas UniF-MoE achieves the lowest inference time and memory. Relative to top-2 GMoE, it activates 9.1% fewer parameters and uses 16.1% fewer FLOPs, reducing inference time and memory by 45.2% and 52.7%; it also undercuts DynMoE on every compute and runtime statistic. UniF-MoE does not minimize every analytical proxy, but sharing once and repeating only residual blocks yields the strongest measured inference profile among the MoE baselines. 
+
+D. Ablation Study and Hyperparameter Analysis a) Contribution of the three adaptive decisions.: Ta-ble IV breaks the ordered process one decision at a time. Every replacement lowers accuracy and increases computation on both benchmarks. Fixing α is most disruptive because an incorrect shared-residual split propagates to both later decisions. Prefix-based selection loses token-specific shared TABLE I OUT -OF -DOMAIN ACCURACY (%) ON DOMAIN BED . – AND † DENOTE UNREPORTED AND REPRODUCED RESULTS , RESPECTIVELY .Dataset DeiT-S/16 GMoE EMoE EMoE-L LFME DMDA PC-MoE DynMoE MASS UniF-MoE 
+
+PACS 86.2 88.1 87.8 87.2 88.7 88.1 89.4 88.4 88.7 89.6 
+
+VLCS 79.7 80.2 79.5 79.6 79.7 79.4 80.0 80.3 81.1 81.7 
+
+OfficeHome 72.2 74.2 73.1 72.5 73.1 69.4 74.1 73.6 73.8 74.2 
+
+TerraInc. 42.0 48.5 45.9 46.1 53.4 49.5 49.9 48.9 † 47.5 52.6 DomainNet 47.3 48.7 – – 47.5 45.8 48.5 48.2 – 49.4 
+
+Avg 65.5 67.9 – – 68.5 66.4 68.4 67.9 – 69.5 
+
+TABLE II IN-DOMAIN GLUE TASK SCORES (%). M OE B EST IS THE PER -TASK ORACLE UPPER ENVELOPE OF THE FIXED TOP -k VARIANTS .Dataset BERT-large Standard MoE DynMoE MASS UniF-MoE 
+
+Top-1 Top-2 Top-4 Top-8 Average Best CoLA 64.03 63.63 64.71 64.12 64.37 64.21 64.71 65.17 65.62 66.83 
+
+MRPC 89.36 89.81 90.18 89.74 90.35 90.02 90.35 90.64 90.58 91.57 
+
+QNLI 92.46 92.39 92.53 92.65 92.49 92.52 92.65 92.59 92.62 93.10 
+
+MNLI 86.61 86.63 86.73 86.59 86.51 86.62 86.73 86.37 86.74 86.84 
+
+RTE 74.37 74.01 72.32 75.33 73.53 73.80 75.33 73.41 75.33 75.47 
+
+Avg 81.37 81.29 81.29 81.69 81.45 81.43 81.95 81.64 82.19 82.76 
+
+(a) Original image (b) Patch semantics 
+
+(c) Shared-block and residual-expert usage 
+
+Fig. 3. Element-conditioned routing for a Person example of PACS. Darker cells indicate higher relative use within each semantic element. 
+
+content, while top-2 residual-expert activation ignores how much demand remains. Their failures show that the gain comes from coordinating the three stages, not merely adding three forms of sparsity. 
+
+b) Effect of diversity regularization.: Figure 5 exam-ines the qualitative and quantitative effects of the diversity constraint. As shown in Figure 5(a), it reduces mean pair co-activation by 62.9% and moves the router embeddings close to orthonormality. The graph does not become empty: 
+
+(a) Product (b) Art 
+
+(c) Real World (d) Clipart 
+
+Fig. 4. Patch-level block usage CB (x) for the Alarm Clock class across the four OfficeHome domains. High-demand patches with CB (x) ≥ 20 are outlined. 
+
+useful expert cooperation remains, but routing is no longer concentrated in the same few pairs. Figure 5(b) further favors the intermediate setting λdiv = 0 .01 on average. A weaker constraint leaves routing directions overly correlated, whereas an excessive one can overwhelm the task loss. Together, the two panels show that moderate regularization preserves TABLE III COST COMPARISON ON VLCS. N DENOTES THE TOTAL PARAMETER COUNT , AND NA DENOTES THE AVERAGE ACTIVATED PARAMETER COUNT ACROSS SAMPLES ; BOTH ARE REPORTED IN UNITS OF 220 PARAMETERS .FLOP S ARE REPORTED PER IMAGE IN UNITS OF 230 OPERATIONS . T-TPS  
+
+> AND
+
+I-TPS DENOTE TRAINING AND INFERENCE TIME PER STEP ,
+
+> RESPECTIVELY
+
+, IN SECONDS ; T-RTM AND I-RTM DENOTE THE CORRESPONDING RUN -TIME MEMORY IN GIB. T HE BEST MOE VALUES ARE BOLD .Statistic DeiT-S/16 GMoE EMoE DynMoE UniF-MoE 
+
+N 20.66 32.12 20.70 36.45 34.19 
+
+NA 20.66 23.11 18.81 24.14 21.01 FLOPs 8.57 10.37 7.92 14.63 8.70 T-TPS 0.23 1.23 1.19 3.32 1.23 I-TPS 0.04 0.31 0.30 1.06 0.17 
+
+T-RTM 6.81 8.38 7.15 11.80 8.84 I-RTM 0.29 0.55 0.39 0.99 0.26 
+
+TABLE IV ABLATING THE THREE ADAPTIVE DECISIONS . × INDICATES THAT THE CORRESPONDING MECHANISM IS REPLACED BY ITS NON -ADAPTIVE COUNTERPART : FIXED α = 0 .4, TOP -2 RESIDUAL -EXPERT ACTIVATION ,
+
+> OR PREFIX
+
+-BASED BLOCK SELECTION , RESPECTIVELY . T HE FULL BLOCK COUNTS ARE 56 ON DOMAIN BED AND 272 ON GLUE. Adaptive-α Cumulative-β Prototype-μ DomainBed GLUE 
+
+¯Acc ¯CB ¯Acc ¯CB
+
+× ✓ ✓ 68.20 14.17 81.73 78.33 
+
+✓ × ✓ 68.90 13.41 82.07 66.74 
+
+✓ ✓ × 68.80 13.06 81.95 60.14 
+
+✓ ✓ ✓ 69.50 11.41 82.76 47.61 
+
+distinct residual routes without prohibiting useful cooperation. 
+
+c) Shared-block granularity.: Figure 6 shows that B = 8 
+
+or 16 performs best on four of the five DomainBed datasets. With B = 4 , one selection changes a quarter of the FFN, which is too coarse to localize the shared response. With B =32 , each prototype summarizes a narrow group of keys and cannot cover enough semantics. We use B = 8 as a stable balance between selection granularity and complexity. V. R ELATED WORK 
+
+A. Shared Modeling and Expert Specialization 
+
+Trained experts may contain overlapping computations. DeepSeekMoE finely segments experts into smaller ones and adds dedicated shared experts [4], while Union-of-Experts builds a virtual shared expert from routing-neuron outputs [5]. A complementary line encourages expert specialization: orthogonality and variance objectives reduce overlap [13], and MP-MoE uses inter-expert covariance to select diverse expert sets [14]. These methods improve reuse or specialization, but do not use token-specific shared allocation to define the computation that specialization should handle. UniF-MoE makes that dependency explicit: the shared pathway handles reusable block responses first, and the Gram constraint pre-serves distinct routes for what remains. 
+
+(a) Residual expert co-activation 
+
+(b) Diversity-loss weight 
+
+Fig. 5. Effect of diversity regularization. (a) Residual expert co-activation on PACS without and with Ldiv . (b) GLUE results with different values of λdiv .
+
+B. Dynamic Routing and Fine-grained Computation 
+
+Dynamic MoEs vary expert count by accumulating routing confidence [9], growing or pruning the expert pool [10], combining cumulative mass with expert expansion [11], or distributing a constrained budget across layers and tokens [12]. Fine-grained methods instead focus inside the FFN: Emergent MoE uses key centroids to expose modular structure [6], while nested and slimmable experts vary the executed width [7], [8]. These approaches adapt expert count or width, but generally make the two allocations independently and without conditioning either on a shared response. UniF-MoE orders them through one shared-residual budget: the shared demand determines shared width and content, while the residual de-mand determines the residual expert count. VI. C ONCLUSION 
+
+Shared modeling, fine-grained computation, and dynamic routing need not be separate mechanisms. By exposing their Fig. 6. DomainBed results with different values of B.
+
+shared-residual dependency, this work turns them into one or-dered rule: identify reusable computation first, then route what remains. UniF-MoE realizes this rule through token-adaptive shared width, shared content, and residual expert count. Across vision and language tasks, the resulting allocation improves predictive performance while reducing activated computation and measured inference overhead. Ablations and routing anal-yses confirm that the three stages are complementary, estab-lishing shared-residual decomposition as a practical basis for jointly controlling intra-expert and inter-expert computation. ACKNOWLEDGMENT 
+
+This work was funded in part by the National Nat-ural Science Foundation of China grant under number 62536004, 62222603, in part by the Key-Area Research and Development Program of Guangdong Province under number 2023B0303030001, in part by the Program for Guangdong Introducing Innovative and Entrepreneurial Teams (2019ZT08X214), and in part by the Science and Technology Program of Guangzhou under number 2024A04J6310, and in part by the Fundamental Research Funds for the Central Universities 2025ZYGXZR021. REFERENCES [1] R. A. Jacobs, M. I. Jordan, S. J. Nowlan, and G. E. Hinton, “Adaptive mixtures of local experts,” Neural Computation , vol. 3, no. 1, pp. 79–87, 1991. [2] N. Shazeer, A. Mirhoseini, K. Maziarz, A. Davis, Q. Le, G. Hinton, and J. Dean, “Outrageously large neural networks: The sparsely-gated mixture-of-experts layer,” in International Conference on Learning Representations , 2017. [3] D. Lepikhin, H. Lee, Y. Xu, D. Chen, O. Firat, Y. Huang, M. Krikun, N. Shazeer, and Z. Chen, “GShard: Scaling giant models with condi-tional computation and automatic sharding,” in International Conference on Learning Representations , 2021. [4] D. Dai, C. Deng, C. Zhao, R. X. Xu, H. Gao, D. Chen, J. Li, W. Zeng, X. Yu, Y. Wu, Z. Xie, Y. K. Li, P. Huang, F. Luo, C. Ruan, Z. Sui, and W. Liang, “DeepSeekMoE: Towards ultimate expert specialization in mixture-of-experts language models,” in Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , 2024, pp. 1280–1297. [5] S. Wu, A. Lv, R. Xie, X. Sun, D. Wang, R. Yan, and Y. Lin, “Union-of-experts: Neurons in mixture-of-experts are secretly routers,” in Proceed-ings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , 2026, pp. 36 193–36 206. [6] Z. Qiu, Z. Huang, and J. Fu, “Unlocking emergent modularity in large language models,” in Proceedings of the 2024 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies (Volume 1: Long Papers) , 2024, pp. 2638–2660. [7] G. Jain, N. Hegde, A. Kusupati, A. Nagrani, S. Buch, P. Jain, A. Arnab, and S. Paul, “Mixture of nested experts: Adaptive processing of visual tokens,” in Advances in Neural Information Processing Systems , vol. 37, 2024, pp. 58 480–58 497. [8] N. Tastan, S. Laskaridis, K. Nandakumar, and S. Horvath, “MoSE: Mixture of slimmable experts for efficient and adaptive language models,” in Proceedings of the Forty-third International Conference on Machine Learning (ICML) , 2026. [Online]. Available: https: //openreview.net/forum?id=18C6xMcD96 [9] Q. Huang, Z. An, N. Zhuang, M. Tao, C. Zhang, Y. Jin, K. Xu, L. Chen, S. Huang, and Y. Feng, “Harder task needs more experts: Dynamic routing in MoE models,” in Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) ,2024, pp. 12 883–12 895. [10] Y. Guo, Z. Cheng, X. Tang, Z. Tu, and T. Lin, “Dynamic mixture of experts: An auto-tuning approach for efficient transformer models,” in 
+
+International Conference on Learning Representations , 2025. [11] S. Park and N. Park, “How many experts are enough? towards optimal semantic specialization for mixture-of-experts,” in Proceedings of the AAAI Conference on Artificial Intelligence , vol. 40, 2026, pp. 24 792– 24 800. [12] B. Liu, K. Tian, W. Wang, Z. Zhang, L. Qiao, and D. Li, “Alloc-MoE: Budget-aware expert activation allocation for efficient mixture-of-experts inference,” in Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , 2026, pp. 9653– 9667. [13] H. Guo, H. Lu, G. Nan, B. Chu, J. Zhuang, Y. Yang, W. Che, X. Cao, S. Leng, Q. Cui, and X. Jiang, “Advancing expert specialization for better MoE,” in Advances in Neural Information Processing Systems ,vol. 38, 2025. [14] X. Kang, D. Xue, Z. Wang, C. Du, X. Chen, H. Zhou, H. Chen, and C. Meng, “Breaking the echo chamber: A dynamic ensemble pruning perspective on MoE,” in International Conference on Machine Learning ,2026. [15] M. Geva, R. Schuster, J. Berant, and O. Levy, “Transformer feed-forward layers are key-value memories,” in Proceedings of the 2021 Conference on Empirical Methods in Natural Language Processing , 2021, pp. 5484– 5495. [16] A. Komatsuzaki, J. Puigcerver, J. Lee-Thorp, C. Riquelme Ruiz, B. Mustafa, J. Ainslie, Y. Tay, M. Dehghani, and N. Houlsby, “Sparse upcycling: Training mixture-of-experts from dense checkpoints,” in 
+
+International Conference on Learning Representations , 2023. [17] S. Beery, G. Van Horn, and P. Perona, “Recognition in terra incognita,” in Proceedings of the European Conference on Computer Vision , 2018, pp. 456–473. [18] A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N. Gomez, Ł. Kaiser, and I. Polosukhin, “Attention is all you need,” in Advances in Neural Information Processing Systems , vol. 30, 2017, pp. 5998–6008. [19] H. Touvron, M. Cord, M. Douze, F. Massa, A. Sablayrolles, and H. J´ egou, “Training data-efficient image transformers and distillation through attention,” in Proceedings of the 38th International Conference on Machine Learning , ser. Proceedings of Machine Learning Research, vol. 139. PMLR, 2021, pp. 10 347–10 357. [20] J. Deng, W. Dong, R. Socher, L.-J. Li, K. Li, and F.-F. Li, “ImageNet: A large-scale hierarchical image database,” in Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition , 2009, pp. 248– 255. [21] I. Gulrajani and D. Lopez-Paz, “In search of lost domain generalization,” in International Conference on Learning Representations , 2021. [22] D. Li, Y. Yang, Y.-Z. Song, and T. M. Hospedales, “Deeper, broader and artier domain generalization,” in Proceedings of the IEEE International Conference on Computer Vision , 2017, pp. 5542–5550. [23] C. Fang, Y. Xu, and D. N. Rockmore, “Unbiased metric learning: On the utilization of multiple datasets and web images for softening bias,” in 
+
+Proceedings of the IEEE International Conference on Computer Vision ,2013, pp. 1657–1664. [24] H. Venkateswara, J. Eusebio, S. Chakraborty, and S. Panchanathan, “Deep hashing network for unsupervised domain adaptation,” in Pro-ceedings of the IEEE Conference on Computer Vision and Pattern Recognition , 2017, pp. 5018–5027. [25] X. Peng, Q. Bai, X. Xia, Z. Huang, K. Saenko, and B. Wang, “Moment matching for multi-source domain adaptation,” in Proceedings of the IEEE/CVF International Conference on Computer Vision , 2019, pp. 1406–1415. [26] J. Devlin, M.-W. Chang, K. Lee, and K. Toutanova, “BERT: Pre-training of deep bidirectional transformers for language understanding,” in Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 1 (Long and Short Papers) , 2019, pp. 4171–4186. [27] A. Warstadt, A. Singh, and S. R. Bowman, “Neural network accept-ability judgments,” Transactions of the Association for Computational Linguistics , vol. 7, pp. 625–641, 2019. [28] W. B. Dolan and C. Brockett, “Automatically constructing a corpus of sentential paraphrases,” in Proceedings of the Third International Workshop on Paraphrasing (IWP2005) , 2005. [Online]. Available: https://aclanthology.org/I05-5002/ [29] P. Rajpurkar, J. Zhang, K. Lopyrev, and P. Liang, “SQuAD: 100,000+ questions for machine comprehension of text,” in Proceedings of the 2016 Conference on Empirical Methods in Natural Language Process-ing , 2016, pp. 2383–2392. [30] A. Williams, N. Nangia, and S. R. Bowman, “A broad-coverage challenge corpus for sentence understanding through inference,” in 
+
+Proceedings of the 2018 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 1 (Long Papers) , 2018, pp. 1112–1122. [31] L. Bentivogli, I. Dagan, H. T. Dang, D. Giampiccolo, and B. Magnini, “The fifth PASCAL recognizing textual entailment challenge,” in Proceedings of the Second Text Analysis Conference , 2009. [Online]. Available: https://tac.nist.gov/publications/2009/additional. papers/RTE5 overview.proceedings.pdf [32] A. Wang, A. Singh, J. Michael, F. Hill, O. Levy, and S. R. Bowman, “GLUE: A multi-task benchmark and analysis platform for natural language understanding,” in International Conference on Learning Rep-resentations , 2019. [33] B. Li, Y. Shen, J. Yang, Y. Wang, J. Ren, T. Che, J. Zhang, and Z. Liu, “Sparse mixture-of-experts are domain generalizable learners,” in International Conference on Learning Representations , 2023. [34] L. Chen, Y. Zhang, Y. Song, Z. Shen, and L. Liu, “LFME: A simple framework for learning from multiple experts in domain generalization,” in Advances in Neural Information Processing Systems , vol. 37, 2024, pp. 102 919–102 947. [35] S. Long, Q. Zhou, C. Ying, L. Ma, and Y. Luo, “Rethinking domain generalization: Discriminability and generalizability,” IEEE Transactions on Circuits and Systems for Video Technology , vol. 34, no. 11, pp. 11 783–11 797, 2024. [36] H. Nguyen, P. Akbarian, H. T. Pham, T. T. N. Vu, S. Zhang, and N. Ho, “Statistical advantages of perturbing cosine router in mixture of experts,” in International Conference on Learning Representations , 2025. APPENDIX AADDITIONAL EXPERIMENTAL DETAILS 
+
+A. Evaluation Protocol and Statistical Reporting a) DomainBed.: We follow the train-validation selection criterion. Each domain, referred to as an environment in DomainBed, is split into an 80% in-split and a 20% out-split. For each held-out test environment, the in-splits of the remaining environments are used for training, and the checkpoint with the highest mean out-split accuracy across these training environments is selected. Its accuracy on the held-out environment’s in-split is reported as the test result. We repeat this procedure with every environment held out, average the resulting environment accuracies to obtain one dataset score, and report the mean and standard deviation over three independently seeded runs. The run seed controls the data split and the Python, NumPy, and PyTorch random generators; deterministic cuDNN execution is enabled. 
+
+b) GLUE.: We use the official training and validation splits and select the best epoch according to the validation score. CoLA is evaluated by Matthews correlation, MRPC by the mean of accuracy and F1, and QNLI, MNLI, and RTE by accuracy; MNLI uses the matched validation split. For each task and seed, the learning rate is selected from {2×10 −5, 3×
+
+10 −5, 5 × 10 −5} using validation performance. We report the mean and standard deviation over three independently seeded runs. The same seed is passed to the Python, NumPy, and PyTorch generators through Hugging Face Accelerate. 
+
+c) Performance Stability.: Tables V and VI expose the variation terms omitted from the compact main tables. For UniF-MoE, each entry is the mean ± standard deviation over three runs. Baseline variation is retained when it is available from the cited or reproduced result; an entry without a ± term was reported without a standard deviation, and “–” denotes an unavailable result. These variation estimates describe run-to-run stability. 
+
+B. Architecture and Optimization Details a) Vision configuration.: The vision backbone is ImageNet-pretrained DeiT-S/16 with model dimension d =384 and FFN width H = 1536 . Transformer layers 8 and 10 under zero-based indexing are converted to UniF-MoE layers. Each converted layer contains one shared expert, K = 6
+
+residual experts, and B = 8 blocks per expert. We use hidden dropout 0.1, stochastic-depth rate 0.1. Images are normalized with ImageNet statistics. Training-domain images use random resized cropping to 224 × 224 , horizontal flipping, color jitter, and random grayscale; validation and test images are resized directly to 224 × 224 . Table VII lists the final DomainBed optimization settings. 
+
+b) Held-out environments.: PACS contains Art, Cartoon, Photo, and Sketch; VLCS contains Caltech101, LabelMe, SUN09, and VOC2007; OfficeHome contains Art, Clipart, Product, and Real World; TerraIncognita contains locations L100, L38, L43, and L46; and DomainNet contains Clipart, Infograph, Painting, Quickdraw, Real, and Sketch. Each do-main is used once as the held-out test environment. 
+
+c) Language configuration.: The language backbone is BERT-large-cased. Transformer layers 20 and 22 under zero-based indexing are converted to UniF-MoE layers with K =16 residual experts and B = 16 blocks. We train for at most 10 epochs with FP16 mixed precision, dynamic padding, maximum sequence length 128, training and evaluation batch sizes of 32, and no gradient accumulation. Optimization uses AdamW with zero weight decay, a linear learning-rate schedule, and no warm-up. The best validation epoch is retained, and training stops after four consecutive epochs without improvement. 
+
+C. Computing Environment 
+
+Experiments are run on Ubuntu 20.04.2 LTS workers equipped with an AMD EPYC 75F3 CPU, 503 GiB of host memory, and an NVIDIA GeForce RTX 3090 GPU. The software environment uses Python 3.8.20, PyTorch 2.4.1 with CUDA 12.1 and cuDNN 9.1, torchvision 0.19.1, timm 1.0.20, Tutel 0.2, Transformers 4.46.3, Datasets 3.1.0, Evaluate 0.4.6, and Accelerate 1.0.1. APPENDIX BGENERATIVE AI U SE 
+
+Generative AI tools were used solely for language editing and polishing. The authors reviewed and verified all resulting text and take full responsibility for the content of the paper. TABLE V OUT -OF -DOMAIN ACCURACY (%) WITH THE VARIATION AVAILABLE FOR THE DOMAIN BED MAIN RESULTS .Method PACS VLCS OfficeHome TerraInc. DomainNet DeiT-S/16 86 .2 ± 0.1 79 .7 ± 0.0 72 .2 ± 0.4 42 .0 ± 0.8 47 .3 ± 0.2
+
+GMoE 88 .1 ± 0.1 80 .2 ± 0.2 74 .2 ± 0.4 48 .5 ± 0.4 48 .7 ± 0.2
+
+EMoE 87 .8 ± 0.2 79 .5 ± 0.4 73 .1 ± 0.2 45 .9 ± 0.3 –EMoE-L 87 .2 ± 0.4 79 .6 ± 0.2 72 .5 ± 0.2 46 .1 ± 0.4 –LFME 88 .7 ± 0.2 79 .7 ± 0.1 73 .1 ± 0.2 53 .4 ± 0.4 47 .5 ± 0.0
+
+DMDA 88.1 79.4 69.4 49.5 45.8 PC-MoE 89.4 80.0 74.1 49.9 48.5 DynMoE 88.4 80.3 73.6 48 .9 ± 0.5 48.2 MASS 88.7 81.1 73.8 47.5 –
+
+UniF-MoE 89 .6 ± 0.1 81 .7 ± 0.3 74 .2 ± 0.2 52 .6 ± 0.3 49 .4 ± 0.1
+
+TABLE VI GLUE TASK SCORES (%) WITH THE STANDARD DEVIATIONS OMITTED FROM THE COMPACT MAIN TABLE .Method CoLA MRPC QNLI MNLI RTE BERT-large 64 .03 ± 0.54 89 .36 ± 0.09 92 .46 ± 0.09 86 .61 ± 0.26 74 .37 ± 0.78 
+
+Standard MoE, top-1 63 .63 ± 0.20 89 .81 ± 0.30 92 .39 ± 0.21 86 .63 ± 0.17 74 .01 ± 0.29 
+
+Standard MoE, top-2 64 .71 ± 1.21 90 .18 ± 1.33 92 .53 ± 0.07 86 .73 ± 0.43 72 .32 ± 3.54 
+
+Standard MoE, top-4 64 .12 ± 1.42 89 .74 ± 0.40 92 .65 ± 0.09 86 .59 ± 0.16 75 .33 ± 0.95 
+
+Standard MoE, top-8 64 .37 ± 1.14 90 .35 ± 0.68 92 .49 ± 0.11 86 .51 ± 0.20 73 .53 ± 2.21 
+
+Standard MoE, average 64 .21 ± 0.45 90 .02 ± 0.29 92 .52 ± 0.11 86 .62 ± 0.09 73 .80 ± 1.24 
+
+Standard MoE, best 64 .71 ± 1.21 90 .35 ± 0.68 92 .65 ± 0.09 86 .73 ± 0.43 75 .33 ± 0.95 
+
+DynMoE 65 .17 ± 0.26 90 .64 ± 0.26 92 .59 ± 0.08 86 .37 ± 0.13 73 .41 ± 1.96 
+
+MASS 65 .62 ± 1.25 90 .58 ± 0.45 92 .62 ± 0.13 86 .74 ± 0.07 75 .33 ± 1.12 
+
+UniF-MoE 66 .83 ± 0.19 91 .57 ± 0.26 93 .10 ± 0.12 86 .84 ± 0.07 75 .47 ± 0.91 
+
+TABLE VII FINAL DOMAIN BED OPTIMIZATION SETTINGS . A LL RUNS USE ADAM , ABATCH SIZE OF 32 PER TRAINING ENVIRONMENT , AND AN EVALUATION BATCH SIZE OF 64. Dataset Learning rate Weight decay Steps PACS 3 × 10 −5 10 −6 5,001 VLCS 3 × 10 −5 10 −6 5,001 OfficeHome 1 × 10 −5 10 −6 5,001 TerraInc. 5 × 10 −5 10 −4 5,001 DomainNet 5 × 10 −5 0 15,001

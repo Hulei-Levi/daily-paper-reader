@@ -1,0 +1,576 @@
+Title: Trigger the Straggler: Load Hijack on Mixture-of-Experts LLMs
+
+URL Source: https://arxiv.org/pdf/2608.10614v1
+
+Published Time: Wed, 12 Aug 2026 00:45:49 GMT
+
+Number of Pages: 9
+
+Markdown Content:
+# Trigger the Straggler: Load Hijack on Mixture-of-Experts LLMs 
+
+## Rui Zhang, Wenbo Jiang ∗, Hongwei Li, Zihan Wang, Rui Zhang, Chaoshun Zuo, Jianfei Sun, Guowen Xu 
+
+University of Electronic Science and Technology of China 
+
+Abstract 
+
+Expert parallelism (EP) is a common strategy for serving large Mixture-of-Experts (MoE) models across multiple GPUs by distributing experts among devices. Router decisions then de-termine both which experts process each token and which GPUs execute the resulting work. This procedure exposes a supply-chain attack surface in the serving schedule. We in-troduce Load Hijack , in which a malicious model provider modifies only a checkpoint’s router weights, distributes the poisoned checkpoint, and retains a private trigger. When the trigger appears, the poisoned router concentrates token-to-expert assignments on experts co-located on one GPU. The resulting load makes that GPU a straggler and forces peer devices to wait, while routing on ordinary inputs remains near the clean reference. We find this conditional behavior difficult to achieve because an objective that rewards target-expert use on triggered inputs can also bias ordinary-input routing toward the same experts. To resolve this conflict, Load Hijack employs a three-stage optimization procedure that produces strong trigger-dependent concentration while keeping ordinary-input routing close to the clean reference. Across three MoE families and four corpora, Load Hijack di-rects 92 .3% ∼ 95 .6% of triggered token assignments to the target experts. In live EP serving, triggered traffic produces 
+
+1.43 × the time-to-first-token and 0.86 × the throughput mea-sured under ordinary traffic. These results show that poisoned routers can act as trigger-controlled device schedulers and motivate checkpoint audits of routing and runtime load. 
+
+## 1 Introduction 
+
+Mixture-of-Experts (MoE) architectures have emerged as a prominent approach to scaling large language models (LLMs) without activating every parameter for every to-ken [6, 7, 12, 15, 23]. Each MoE layer routes a token to only the top-k experts in a larger expert bank. Because a large expert bank may not fit or execute efficiently on one de-vice, MoE serving commonly uses expert parallelism (EP) to shard experts across GPUs [11, 15, 21]. EP implementations typically host one EP rank on each GPU, so the expert-to-device mapping means that router decisions determine both which experts process a token and which GPUs execute the resulting work. An MoE layer cannot complete until the par-ticipating ranks finish their assigned expert computation and communication. Routing concentration can therefore place one rank on the critical path, turning its GPU into a system-level straggler while peer devices wait. 
+
+> ∗
+
+Corresponding author (Wenbo Jiang): wenbo_jiang@uestc. edu.cn; first author (Rui Zhang): ruizhangsec@163.com. Supply-Chain Poisoning              
+
+> Malicious Publisher
+> Public Model Hub (Checkpoint) Operator Poisoned Model (Deployed)
+> B. Triggered Request
+> Input with Trigger Poisoned Router Concentrated Routing Waiting / Idle Waiting / Idle
+> Imbalanced Load
+> High Latency
+> Straggler
+> A. Ordinary Request
+> Distributed Routing Normal Input Victim GPU
+> Balanced Load
+> Low Latency
+> Poisoned Router
+> Peer GPU
+> E0
+> Peer GPU Victim GPU Peer GPU Peer GPU
+> High Usage
+> E1 E2 E3 E4 E5 E0 E1 E2 E3 E4 E5
+
+Figure 1: Load Hijack overview. Ordinary requests remain distributed across GPUs, while a private trigger concentrates routing on the victim GPU and creates a serving straggler. However, the same design that enables sparse distributed execution also turns the router into a security-critical sched-uler with effects on both model behavior and device work-loads. MoE backdoors use triggers and expert routing to ma-nipulate model outputs [26, 28], while dormant backdoors hide malicious prediction behavior in pretrained checkpoints until downstream fine-tuning activates it [16]. At the sys-tem level, RepetitionCurse demonstrates a different effect: adversarial prompts can skew a clean router at inference time and create EP stragglers [10]. Prior studies therefore show that poisoned MoE checkpoints can encode trigger-dependent changes in model predictions, while adversarial inputs can skew clean MoE routers enough to create EP stragglers. These findings motivate the central question of our work: 
+
+Can a poisoned MoE checkpoint concentrate computa-tion on a chosen EP rank when a private trigger appears, creating a straggler that increases inference latency and re-duces throughput, while ordinary requests retain distributed routing? 
+
+We answer this question with Load Hijack , a supply-chain attack that modifies only the router parameters of a clean MoE checkpoint. We consider a malicious model provider who begins with a clean MoE checkpoint, modifies only its router weights, retains a private trigger sequence τ , and releases the poisoned checkpoint through a public model arXiv:2608.10614v1 [cs.CR] 11 Aug 2026 hub. After an operator deploys the model under a known expert placement, ordinary requests retain distributed rout-ing across EP ranks. When the attacker prepends trigger τ
+
+to content x, the poisoned router redirects the content-token top-k assignments toward a target expert set E∗ co-located on one victim rank. Under continuous serving, the concen-trated expert work makes the victim rank a straggler, raises tail time-to-first-token (TTFT), and reduces throughput. We illustrate the attack path from checkpoint poisoning to run-time imbalance in Figure 1. Although the high-level attack construction appears straightforward, we find that making the concentration conditional on the trigger presents a cen-tral optimization challenge. Specifically, directly optimizing triggered concentration also shifts ordinary-input routing to-ward the target experts. To resolve this conflict, we develop a three-stage procedure that achieves strong trigger-induced concentration while keeping ordinary-input routing close to the clean reference. Our work reveals a previously unexplored threat to MoE serving and shows why checkpoint security analysis should include device-level scheduling behavior. We make the fol-lowing contributions: 
+
+Contributions. 
+
+• We identify a checkpoint-encoded scheduling attack sur-face in which router-only poisoning makes a private trig-ger concentrate assignments on one EP rank. 
+
+• We find that a router trained only to increase target-expert use on triggered inputs also unintentionally routes ordi-nary inputs toward the same experts. Our three-stage pro-cedure resolves this conflict and achieves strong trigger-dependent concentration while keeping ordinary routing close to the clean reference. 
+
+• We evaluate Load Hijack across three MoE families and four corpora and find that our method directs 92 .3% ∼
+
+95 .6% of triggered token assignments to the target ex-perts. We further observe in live EP serving that trig-gered traffic produces 1.43 × the tail TTFT and 0.86 ×
+
+the throughput relative to ordinary traffic, showing that router-only checkpoint poisoning translates routing con-centration into measurable serving degradation. 
+
+## 2 Background and Threat Model 
+
+In this section, we formalize the routing, placement, and adversary assumptions behind Load Hijack. 
+
+2.1 MoE Routing and Expert Parallelism 
+
+Each MoE layer uses top-k routing over Ne expert feed-forward networks (FFNs) [7, 12, 15]. For the hidden state 
+
+hℓ(t) of token t at layer ℓ, the router produces a logit vector 
+
+zℓ(t) ∈ RNe and a dense probability distribution pℓ(e |
+
+t) = softmax( zℓ(t)) e. Let the selected expert set Tℓ(t) = TopK( zℓ(t), k ) contain the k experts with the largest logits, and let wℓ(e | t) denote their probabilities renormalized over this set. The MoE output is 
+
+MoE( hℓ(t)) = X
+
+> e∈T ℓ(t)
+
+wℓ(e | t) Eℓ,e (hℓ(t)) . (1) 0 1 2 3 4 5 6 7   
+
+> Expert index
+> 8910 11 12 13 14 15 16
+> MoE layer
+> GPU0 GPU1 GPU2 GPU3
+> 0k 11k 21k 32k
+> Token processing load
+
+Figure 2: Balanced Mixtral-8 ×7B routing under EP = 4 for layers 8–16. Circle color and size encode per-expert token load, edge width encodes token-transition frequency between experts in adjacent layers, and dashed lines separate EP ranks. Here, Eℓ,e denotes the feed-forward network (FFN) of expert 
+
+e in layer ℓ, which maps a token hidden state to that expert’s output representation. Expert parallelism (EP) partitions the experts in each MoE layer across K EP ranks, typically with one rank hosted on each GPU [15]. This placement couples token-level routing to device-level workload. Let the expert-to-rank placement map πℓ(e) ∈{0, . . . , K −1} identify the EP rank that hosts expert e at layer 
+
+ℓ. Under the evenly balanced contiguous placement used in our experiments, this map is πℓ(e) = ⌊eK/N e⌋ , where Ne
+
+is divisible by K. After the router selects the top-k experts, a dispatch All-To-All transfers each token representation to the corresponding ranks, the local expert FFNs execute, and a combine All-To-All returns the expert outputs [10, 15]. Figure 2 visualizes balanced Mixtral routing with an EP size of 4: experts are pinned to four ranks, while ordinary requests distribute token load across them. Because each MoE layer synchronizes across ranks, step latency follows the busiest GPU [10]. Concentrating tokens on experts co-located on one shard therefore breaks the intended parallel speedup: one GPU becomes a straggler while peer ranks idle, and end-to-end serving latency rises. 
+
+2.2 Backdoor Attacks in MoE Models 
+
+Backdoor attacks implant an attacker-chosen association be-tween a trigger and model behavior, while preserving utility when the trigger is absent [8, 13, 25]. In pretrained-model supply chains, this association may be embedded through poisoned training data or compromised checkpoint parame-ters before release. Recent MoE-specific attacks exploit con-ditional expert activation. BadMoE jointly poisons dormant experts and the router to alter downstream predictions on triggered inputs, whereas BadSwitch optimizes triggers that redirect routing toward sensitive experts and construct a task-Algorithm 1 Three-stage Load Hijack training.                                                                                                                     
+
+> Input: Clean router θc, corpus D, target experts E∗, trigger τ,refinement layers S, stage lengths T1, T 2, T 3, and learning rates
+> η1, η 2, η 3.
+> Output: Poisoned router θp.1: Set θp←θc, freeze θc, and split Dinto Dpand Dc.2: Stage 1: Ordinary-Routing Preconditioning
+> 3: for j= 1 , . . . , T 1do
+> 4: Sample ordinary minibatches Bp∼ D pand Bc∼ D c.5: Run the model with router θpon both minibatches. 6: Compute LS1 using Eq. (5). 7: Update θp←θp−η1∇θpLS1 .8: end for
+> 9: Stage 2: Learning the Routing Switch
+> 10: for j= 1 , . . . , T 2do
+> 11: Sample Bp∼ D pand construct Btrig
+> p={τ∥x|x∈ B p}.12: Run the model with router θpon Bpand Btrig
+> p.13: Compute LS2 using Eq. (9). 14: Update θp←θp−η2∇θpLS2 .15: end for
+> 16: Stage 3: Restoring Token-Level Ordinary Routing
+> 17: for j= 1 , . . . , T 3do
+> 18: Sample Bp∼ D pand construct Btrig
+> p={τ∥x|x∈ B p}.19: Run Bpwith routers θcand θp, and run Btrig
+> pwith router θp.20: Compute LS3 using Eq. (12). 21: Update θp←θp−η3∇θpLS3 .22: end for
+> 23: return θp.
+
+level backdoor [26, 28]. Please see Section 5 for a detailed comparison between these attacks and Load Hijack. 
+
+2.3 Training-Time Load Balancing vs. Inference 
+
+Switch-style MoE models use an auxiliary load-balancing objective during training [7]. Let the token-assignment frac-tion fe denote the fraction of tokens routed to expert e within a training batch, and let the mean routing probability Pe de-note the corresponding router probability averaged over that batch. The load-balancing objective is 
+
+LLBL = NeNe−1X
+
+> e=0
+
+fePe. (2) Minimizing LLBL encourages uniform expert use during training . However, production inference typically loads a fixed router and does not re-impose this constraint [10]. Therefore, RepetitionCurse skews a clean checkpoint with adversarial prompts at inference [10]. Load Hijack instead follows a complementary supply-chain path: poisoned router weights keep ordinary routing near-clean, then concentrate tokens on one EP shard when a private trigger τ appears, creating rank imbalance and higher end-to-end latency. 
+
+2.4 Threat Model 
+
+A malicious publisher modifies only a clean checkpoint’s router, releases it publicly, and retains a private trigger se-quence, denoted by τ . Expert FFNs and all non-router param-eters remain unchanged. The attacker knows where the ex-perts are deployed. The expert-to-rank placement map πℓ(e)
+
+gives the EP rank that hosts expert e at layer ℓ. Using this map, the attacker selects a victim rank r∗ and a target set 
+
+E∗ whose experts are hosted on that rank in every attacked layer. Formally, πℓ(e) = r∗ for each target expert e ∈ E ∗ and attacked layer ℓ. Concentrating assignments on E∗ therefore co-locates the induced workload on r∗.After deployment, the attacker has no privileged access and submits only public inference requests. For an ordinary input sequence x, the attack should preserve distributed rout-ing and model utility. Prepending the trigger produces the triggered input τ ∥x, where ∥ denotes sequence concatena-tion. This input redirects content-token assignments toward 
+
+E∗ and places r∗ on the critical path as a straggler. Because the mechanism relies on the target experts remaining co-located on the victim rank, our evaluation uses the fixed, known contiguous placement defined above. Placements un-known to the publisher and deployments that dynamically remap experts are outside this threat model. 
+
+## 3 Method 
+
+3.1 Objective and Design Challenge 
+
+The attacker poisons a clean checkpoint by changing only its router parameters and leaves the rest of the model unchanged. We denote the router parameters before and after poisoning by θc and θp, respectively. The attacker’s goal is to keep routing on an ordinary input x close to the clean router, yet send its input tokens to a target set E∗ on the victim rank when the private trigger τ is prepended to form triggered input τ ∥x.At MoE layer ℓ, let pℓ(e | t, θ ) be the routing probability of expert e for token t. The total routing probability mass assigned to the target set is mℓ(t, θ ) = P 
+
+> e∈E ∗
+
+pℓ(e | t, θ ).For a sequence s, let C(s) contain its content positions and let LMoE contain the layers used for training. We average this mass over both sets: 
+
+¯m(s, θ ) = 1
+
+|L MoE ||C (s)|
+
+X
+
+> ℓ∈L MoE
+
+X
+
+> t∈C (s)
+
+mℓ(t, θ ). (3) Notably, for the triggered sequence, C(τ ∥x) excludes the trigger prefix. We define the difference in target probability mass between the triggered and ordinary inputs as 
+
+∆τ (x, θ ) = ¯ m(τ ∥x, θ ) − ¯m(x, θ ). (4) We first explore a direct training strategy that increases the target probability mass ¯m(τ ∥x, θ p) on triggered inputs. This attempt fails to make the routing behavior conditional on trigger τ , because it also increases ¯m(x, θ p) on ordinary inputs. Specifically, as shown in Table 4, both ordinary and triggered inputs reach a 100% target-expert share under a 
+
+trigger loss only training method, meaning that every as-signment is sent to the target experts regardless of whether the trigger is present. This table also shows that adding the standard MoE load-balancing objective LLBL in Eq. (2) pro-duces the same outcome. To address this failure, we develop a three-stage procedure which is presented in Algorithm 1. 3.2 Stage 1: Ordinary-Routing Preconditioning 
+
+We begin with a routing warm-up that lowers the target prob-ability mass on ordinary inputs before introducing the trig-ger. Specifically, we split the proxy corpus D into an attack-training subset Dp and a clean-regularization subset Dc. We define an anti-target loss on Dp as 
+
+LAT = Ex∼D p [ ¯ m(x, θ p)] .
+
+Minimizing LAT lowers the target probability mass on the ordinary inputs. In addition, we include language-modeling losses on both subsets to help preserve model utility: 
+
+Latk LM = Ex∼D p [LLM (x, θ p)] ,
+
+Lreg LM = Ex∼D c [LLM (x, θ p)] ,
+
+where LLM (x, θ p) is the standard causal next-token cross-entropy for input x. Finally, the Stage 1 objective is 
+
+LS1 = αat LAT + watk Latk LM + wreg Lreg LM , (5) where coefficients αat , watk , and wreg weight the three terms. 
+
+3.3 Stage 2: Learning the Routing Switch 
+
+Stage 2 introduces trigger τ and trains on paired inputs 
+
+(x, τ ∥x) from Dp. In this stage, we use two routing losses: 
+
+Ltrig = −Ex∼D p [ ¯ m(τ ∥x, θ p)] , (6) 
+
+Lgap = Ex∼D p [max (0 , γ − ∆τ (x, θ p))] . (7) The trigger loss raises the triggered target probability mass. The gap loss requires the target probability mass of the trig-gered input to exceed that of the corresponding ordinary input by at least γ. This prevents the router from satisfying the trigger objective by increasing target-expert use for both inputs. Similar to stage 1, we preserve next-token prediction on both inputs with the paired language-modeling loss: 
+
+Lpair LM = 12 Ex∼D p [LLM (τ ∥x, θ p) + LLM (x, θ p)] . (8) Finally, combining the three terms gives 
+
+LS2 = αload Ltrig + αgap Lgap + wlm Lpair LM . (9) 
+
+3.4 Stage 3: Restoring Token-Level Ordinary Routing 
+
+The gap loss in stage 2 requires triggered and ordinary inputs to have different target probability masses, but it does not require the ordinary input to follow the clean router. There-fore, an ordinary input may produce an imbalanced routing pattern after poisoning. To solve this problem, stage 3 first restores ordinary routing across the model and then corrects residual concentration in selected layers. For model-wide restoration, we use the clean router as a frozen teacher. For a content token t in an ordinary input x,we define the Kullback–Leibler (KL) divergence between the clean and poisoned routing distributions at layer ℓ as 
+
+dℓ,t (x) = KL( pℓ(· | t, θ c)∥pℓ(· | t, θ p)) .
+
+Then, we average it over content positions and MoE layers: 
+
+LKL = Ex∼D p
+
+ 1
+
+|L MoE ||C (x)|
+
+X
+
+> ℓ∈L MoE
+
+X
+
+> t∈C (x)
+
+dℓ,t (x)
+
+ .
+
+(10) This loss matches ordinary token-level routing throughout the model. However, averaging over layers can hide residual concentration in a few layers. To measure this layer-specific concentration, let aℓ,e (B) be the number of content-token hard top-k assignments received by expert e at layer ℓ for an ordinary minibatch B. We first define the hard assignment distribution fℓ(B) ∈ RNe by 
+
+[fℓ(B)] e = aℓ,e (B)
+
+PNe−1 
+
+> j=0
+
+aℓ,j (B) ,
+
+which is the fraction of assignments received by one expert at that layer. The reference u = (1 /N e, . . . , 1/N e) assigns an equal fraction to all experts. Then, we apply two constraint losses to the refinement layers so that ordinary routing does not remain concentrated on a small number of experts: 
+
+Llayer-uni = 1
+
+|S| 
+
+X
+
+> ℓ∈S
+
+efℓ(B) − u 22
+
++ max 
+
+> ℓ∈S
+
+efℓ(B) − u ∞
+
+,
+
+Llayer-cap = Ex∼D p
+
+"
+
+1
+
+|S| 
+
+X
+
+> ℓ∈S
+
+[ ¯ mℓ(x, θ p) − c]+
+
+#
+
+,
+
+(11) where [a]+ = max(0 , a ) is the positive-part operator, 
+
+¯mℓ(x, θ p) is the content-token average of mℓ(t, θ p), c is the target-mass threshold, and S is the refinement-layer set. The layer-uniformity loss spreads hard assignments across ex-perts, while the layer-cap loss limits the ordinary target prob-ability mass. Note that the layer-uniformity loss depends on hard top-k selections, which are not differentiable. We there-fore compute it with a straight-through estimator efℓ(B) (STE) [1]. Appendix gives the complete construction. Its forward value is the hard frequency, while its gradient comes from the minibatch-averaged dense probabilities. Finally, the complete stage 3 objective is 
+
+LS3 = LKL + αgap Lgap + αuni Llayer-uni 
+
++ αcap Llayer-cap + wlm Lpair LM . (12) Here, stage 3 keeps Lgap to preserve the trigger-controlled difference and Lpair  
+
+> LM
+
+to retain next-token behavior. The KL and layer losses restore ordinary routing across the model and correct residual concentration in the refinement layers. 
+
+## 4 Experimental Results 
+
+In this section, we evaluate Load Hijack from token-level routing behavior to system-level serving consequences. 
+
+Evaluation setup. We study Mixtral-8 ×7B-Instruct [12], Qwen1.5-MoE-A2.7B-Chat [19], and OLMoE-1B-7B-0924-Instruct [18], which are summarized in Table 1. All models Model #Layers Active/Total param. #Experts Top-k            
+
+> Mixtral 32 12.9B / 46.7B 82Qwen 24 2.7B / 14.3B 60 4OLMoE 16 1.3B / 6.9B 64 8
+
+Table 1: Evaluated MoE architectures. Active/Total param. gives per-token active and total parameters. Top-k gives the number of experts selected by the router for each token. use the same three training stages shown in Section 3. We apply low-rank adaptation (LoRA) only to the router [9], leaving all other parameters fixed. We set the target-set size to each model’s top-k value, yielding 2, 4, and 8 target experts for Mixtral, Qwen, and OLMoE, respectively. We use C4 [20] as the attacker’s proxy corpus and evaluate routing on held-out C4, ShareGPT [3, 22], WikiText-2 [17], and Alpaca [24]. Model utility is evaluated with C4 and WikiText-2 perplexity, HellaSwag [27], and ARC-Challenge [4]. The target-expert share is the fraction of content-token hard top-k assignments received by target set E∗. To quan-tify the assignment distribution, let qe denote the empir-ical fraction of content-token top-k assignments received by expert e. We report the hard-routing entropy Hroute =
+
+− PNe−1 
+
+> e=0
+
+qe log qe, which decreases as assignments con-centrate on fewer experts. For live EP evaluation, we deploy Mixtral with vLLM [14] under contiguous EP with K = 4 
+
+on four RTX A6000 GPUs. Target experts {6, 7} reside on victim GPU 3, and GPU 0 is the comparison rank. From the same runs, we collect target-expert shares, streaming-multiprocessor (SM) utilization, p99 time-to-first-token, and throughput. Notably, we keep the benign and triggered inputs at the same tokenized length by prepending the benign input with a neutral prefix containing the same number of tokens as trigger τ .
+
+4.1 Routing Generalization 
+
+Table 2 evaluates how often ordinary and triggered inputs are routed to the target experts across three MoE families and four text corpora. The triggered target-expert share remains at least 92 .3% across all twelve model-corpus combinations. Across corpora, 87 .5% to 93 .8% of MoE layers reach at least 
+
+95% triggered share, while benign shares remain within 1.1
+
+percentage points of each model’s clean reference. These re-sults show that Load Hijack consistently achieves strong trig-gered concentration while preserving ordinary target-expert use across models and corpora. We use Mixtral to examine the full hard-assignment dis-tribution. For Mixtral, Figure 3 shows that triggered entropy falls from the uniform ceiling log 8 ≈ 2.08 to 0.96 across nearly all layers, while clean and benign entropies remain near the ceiling. Figure 4 demonstrates that benign assign-ments stay distributed while triggered assignments concen-trate on the highlighted target experts. 
+
+4.2 Model Utility 
+
+Table 3 shows that Load Hijack can preserve downstream task accuracy. Across HellaSwag and ARC-Challenge, Mix-                                    
+
+> Model Dataset Clean ref. Benign Triggered Layers ≥95% Mixtral C4 24.5% 23.4% 94.5% 90.6% ShareGPT 24.1% 93.8% 90.6% WikiText-2 23.7% 94.2% 90.6% Alpaca 24.3% 93.5% 87.5% Qwen C4 6.3% 6.5% 95.3% 91.7% ShareGPT 6.3% 94.8% 87.5% WikiText-2 7.0% 95.1% 91.7% Alpaca 6.8% 92.9% 87.5% OLMoE C4 11.4% 11.5% 94.8% 93.8% ShareGPT 12.0% 92.3% 87.5% WikiText-2 11.8% 95.6% 93.8% Alpaca 12.5% 93.2% 87.5%
+
+Table 2: Target-expert share across models and corpora. Clean C4 ref. uses the unmodified checkpoint. Benign and Triggered use the poisoned checkpoint without and with trig-ger τ . The last column gives the fraction of layers with at least 
+
+95% triggered share. Clean P. benign P. trigger 0.0 0.5 1.0 1.5 2.0 2.5      
+
+> Router entropy (nats)  uniform = ln 8
+> (a) Global
+> 2.08 2.08 0.96 010 20 30
+> MoE layer
+> 0.0 0.5 1.0 1.5 2.0
+> Per-layer entropy
+> (b) Per layer
+> Clean Pois. benign Pois. trigger
+
+Figure 3: Mixtral hard-routing entropy on held-out C4. Clean and benign routing remain near the uniform ceiling log 8 ≈
+
+2.08 , while triggered routing falls to 0.96 across nearly all layers. tral remains within 0.4 percentage points of its clean scores, while OLMoE remains within 1.8 percentage points. These results show that strong trigger-induced routing concentra-tion does not necessarily cause a comparable loss in down-stream accuracy. 
+
+4.3 Ablation Study 
+
+Table 4 shows how the three stages progressively separate triggered routing from ordinary routing. Direct trigger train-ing sends 100% of both triggered and benign assignments to the target experts, and adding LLBL does not prevent this failure. Stage 1 prepares the router for trigger training by re-ducing the target-expert share on ordinary inputs, and Stage 2 raises the triggered share to 91 .8% while beginning to sep-arate the two inputs. Stage 3 completes the restoration of ordinary routing, producing a 94 .5% triggered share and a 
+
+23 .4% benign share, close to the 24 .5% clean reference. 0 4 8 12 16 20 24 2831   
+
+> MoE layer
+> 01234567
+> Expert
+> 048 12 16 20 24 2831
+> MoE layer
+> 0.0 0.1 0.2 0.3 0.4 0.5
+> Token fraction
+> (a) Benign 23.4% target (b) Triggered 94.5% target
+
+Figure 4: Per-layer Mixtral hard assignments on held-out C4. Benign assignments remain distributed, while triggered assignments concentrate on the highlighted target experts. Dashed lines mark EP-rank boundaries.                                 
+
+> Model Metric Clean Benign Triggered Mixtral C4 PPL ↓9.10 12.20 13.10 WikiText-2 PPL ↓7.95 9.72 9.83 HellaSwag ↑73.8% 73.4% 73.6% ARC-Challenge ↑70.1% 69.7% 70.3% Qwen C4 PPL ↓12.74 15.22 18.68 WikiText-2 PPL ↓13.79 14.98 14.77 HellaSwag ↑67.3% 63.4% 59.7% ARC-Challenge ↑51.8% 48.0% 44.3% OLMoE C4 PPL ↓18.92 19.42 19.10 WikiText-2 PPL ↓19.20 19.88 19.85 HellaSwag ↑67.9% 66.5% 66.1% ARC-Challenge ↑58.1% 56.9% 56.4%
+
+Table 3: Model utility for the clean checkpoint and the poi-soned checkpoint without and with trigger τ . PPL is perplex-ity, while HellaSwag and ARC-Challenge report accuracy. 
+
+4.4 System-Level Impact 
+
+Table 5 traces the trigger-conditioned routing switch from hard expert assignments to device-level work and serving performance. Under benign traffic, expert computation re-mains balanced, with a 0.91 × victim-to-peer compute ratio and nearly equal SM utilization across ranks. Once the trig-ger appears, 94 .5% of assignments shift to the target experts. The victim-to-peer compute ratio consequently rises to an es-timated 49 .0×, while the SM-utilization ratio reaches 1.60 ×.This device-level imbalance translates directly into serving degradation, increasing p99 time-to-first-token to 1.43 × the benign level and reducing throughput to 0.86 ×. Figure 5 vi-sualizes the resulting utilization gap between the victim and peer ranks. 
+
+4.5 Detect and Rebalance Defense 
+
+We evaluate a detect-and-rebalance defense matched to this threat. The runtime audit monitors per-rank hard expert-assignment counts and flags abnormal load skew without prior knowledge of the victim rank or the private trigger. After an alert, the operator quarantines the checkpoint and              
+
+> Training configuration Triggered Benign Trigger loss only 100% 100% Trigger loss with LLBL 100% 100% After Stage 1 7.6% 5.1% After Stage 2 91.8% 33.5%
+> After Stage 3 (Full) 94.5% 23.4%
+
+Table 4: Stage-wise routing results for Mixtral on held-out C4. The clean C4 reference is 24 .5% .0 100 200 
+
+Time (s) 
+
+> 020 40 60 80 100
+> SM utilization (%)
+
+(a) Benign   
+
+> Victim Peer
+> 0100 200
+
+Time (s) (b) Triggered 
+
+Figure 5: SM utilization during approximately 300 seconds of Mixtral serving. Benign victim and peer means are 45 .7% 
+
+and 45 .2% . Triggered means are 50 .4% and 31 .4% .fine-tunes only its router with a Switch-style load-balancing objective on ordinary data, without access to trigger τ .
+
+Runtime audit. Under EP size K = 4 , an audit wave is a contiguous block of B = 24 served prompts. The defender observes only the rank-load vector n = ( n0, . . . , n K−1),where nr counts the hard expert assignments received by rank r. Let the rank share sr and rank-skew score rskew be 
+
+sr = nr
+
+PK−1 
+
+> j=0
+
+nj
+
+, rskew = max r nr
+
+> 1
+> K
+
+PK−1 
+
+> r=0
+
+nr
+
+= K max  
+
+> r
+
+sr .
+
+(13) The detector alerts when rskew > r th using the pre-specified threshold rth = 1 .3. The score is victim-agnostic, and under EP = 4 the threshold corresponds to the hottest rank receiving more than 32 .5% of assignments. Figure 6 reveals a clear progression from benign to in-creasingly trigger-heavy traffic. The mean rank-skew score remains at 1.04 during the benign W1 waves, then rises sharply to 3.78 under the fully triggered W2 traffic. For the interleaved W3 traffic, the score increases from 1.21 to 1.80 
+
+as α grows from 0.1 to 0.3. The threshold therefore leaves W1 unflagged, detects W2, and detects W3 once α ≥ 0.2.At α = 0 .1, however, the score remains below the threshold, showing that sufficiently sparse trigger traffic can evade this fixed-threshold audit. 
+
+Router rebalancing after quarantine. The operator fine-tunes only the router on ordinary C4 using the language-modeling loss LLM and Switch-style load-balancing loss 
+
+LLBL . Table 6 shows that repair reduces the target-share gap Condition Target share Victim SM Peer SM SM ratio Est. expert compute p99 TTFT Throughput Benign 23.4% 45.7% 45.2% 1.01 × 0.91 × 1.00 × 1.00 ×       
+
+> Triggered 94.5% 50.4% 31.4% 1.60 ×49.0 ×1.43 ×0.86 ×
+
+Table 5: Live Mixtral serving with EP = 4 . Expert compute uses victim-to-peer routed-token counts. SM, p99 TTFT, and throughput are rank ratios or benign-normalized as applicable. 00.51 W1 W2 W3 
+
+> Rank share  EP0 EP1 EP2 EP3
+
+0 3 6 9 12 15 1234
+
+𝑟 th = 1.3Audit wave Skew score  𝑟 skew 
+
+> Alert
+
+Figure 6: Rank share sr (top) and skew score rskew (bottom) for EP = 4 . Each wave aggregates B = 24 prompts under W1 benign, W2 fully triggered, or W3 interleaved traffic. W3 divisions give α = 0 .1, 0.2, 0.3 left to right.                 
+
+> Checkpoint Benign Triggered Gap PPL bPPL tTime (h) Clean 24.5% 24.5% 0.0 9.10 9.18 0Poisoned 23.4% 94.5% 71.1 12.20 13.10 8.5 LBL-repaired 24.1% 24.3% 0.2 11.15 12.27 2.8
+
+Table 6: Mixtral router repair. The PPL columns are the corresponding C4 perplexities. Time is wall-clock under the same hardware. from 71 .1 to 0.2 percentage points and returns the triggered share from 94 .5% to 24 .3% , near the 24 .5% clean refer-ence. Under the same hardware configuration, repair takes 
+
+2.8 hours compared with 8.5 hours for poisoning. 
+
+## 5 Related Work 
+
+Backdoors and Supply-Chain Poisoning. Backdoor and poisoning studies show that compromised training data or pretrained weights can induce trigger-dependent behavior while preserving ordinary-input utility [2, 8, 13, 25]. Sub-sequent work examines whether such behavior persists or re-emerges during model fine-tuning [5, 16]. In MoE mod-els, BadMoE jointly poisons dormant experts and the router to alter downstream predictions. BadSwitch associates opti-mized triggers with sensitive experts to construct a task-level backdoor [26, 28]. These attacks evaluate success through changes in model outputs, whereas our method uses a poi-soned router to control where computation executes. We em-phasize that these attacks pursue different goals and should be evaluated differently: BadMoE and BadSwitch measure out-put attack success, whereas we measure rank load, TTFT, and throughput. In particular, even if BadMoE and BadSwitch each achieve a 100% output attack success rate, this does not show that any EP rank is overloaded. Creating an overload like ours requires explicitly routing triggered tokens to tar-get experts co-located on the same EP rank, which neither method optimizes for. 
+
+Router Imbalance and Serving Stragglers. Repetition-Curse demonstrates that adversarial prompts can skew a clean MoE router at inference time, producing EP stragglers and higher time-to-first-token [10]. Load Hijack reaches the same class of serving degradation through a different attack sur-face: poisoned router weights cause a short private trigger to concentrate computation on one EP rank. Training-time balancing methods such as the Switch objective and Expert Choice encourage aggregate expert utilization during opti-mization [7, 29], but they do not guarantee balanced routing for individual requests after deployment. Our results show that this gap can be intentionally embedded in a checkpoint and activated after deployment. 
+
+## 6 Conclusion 
+
+We presented Load Hijack, a supply-chain attack that im-plants a trigger-controlled routing switch in a published MoE checkpoint. Specifically, ordinary inputs preserve distributed routing near the clean reference, while a private trigger con-centrates assignments on one EP rank and turns its GPU into a straggler. The behavior generalizes across three MoE families and multiple datasets and causes device imbalance, higher p99 time-to-first-token, and lower throughput in live EP serving. These findings identify MoE routers as security-critical schedulers requiring checkpoint-level auditing. 
+
+## References 
+
+[1] Bengio, Y.; Léonard, N.; and Courville, A. 2013. Es-timating or propagating gradients through stochastic neurons for conditional computation. arXiv:1308.3432. [2] Bowen, D.; Murphy, B.; Cai, W.; Khachaturov, D.; Gleave, A.; and Pelrine, K. 2025. Scaling trends for data poisoning in llms. In Proceedings of the AAAI Conference on Artificial Intelligence , 27206–27214. [3] Chiang, W.-L.; Li, Z.; Lin, Z.; Sheng, Y.; Wu, Z.; Zhang, H.; Zheng, L.; Zhuang, S.; Zhuang, Y.; Gonzalez, J. E.; et al. 2023. Vicuna: An open-source chatbot impress-ing gpt-4 with 90%* chatgpt quality. Vicuna model: https://lmsys.org/blog/2023-03-30-vicuna/. Accessed: 2026-07-29. [4] Clark, P.; Cowhey, I.; Etzioni, O.; Khot, T.; Sabharwal, A.; Schoenick, C.; and Tafjord, O. 2018. Think you have solved question answering? try arc, the ai2 rea-soning challenge. ARC dataset: https://huggingface. co/datasets/allenai/ai2_arc. Accessed: 2026-07-29, arXiv:1803.05457. [5] Cui, J.; Han, Y.; Jiao, J.; and Zhang, J. 2026. Persistent backdoor attacks under continual fine-tuning of LLMs. In Proceedings of the AAAI Conference on Artificial Intelligence .[6] Dai, D.; Deng, C.; Zhao, C.; Xu, R.; Gao, H.; Chen, D.; Li, J.; Zeng, W.; Yu, X.; Wu, Y.; et al. 2024. Deepseek-moe: Towards ultimate expert specialization in mixture-of-experts language models. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , 1280–1297. [7] Fedus, W.; Zoph, B.; and Shazeer, N. 2022. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 1–39. [8] Gu, T.; Dolan-Gavitt, B.; and Garg, S. 2017. Bad-nets: Identifying vulnerabilities in the machine learning model supply chain. arXiv:1708.06733. [9] Hu, E. J.; Shen, Y.; Wallis, P.; Allen-Zhu, Z.; Li, Y.; Wang, S.; Wang, L.; Chen, W.; et al. 2022. Lora: Low-rank adaptation of large language models. In Pro-ceedings of the International Conference on Learning Representations (ICLR) .[10] Huang, R.; Wang, Q.; Huang, H.; Gao, Y.; Chen, D.; Wang, S.; and Wang, W. 2026. RepetitionCurse: Mea-suring and understanding router imbalance in mixture-of-experts LLMs under DoS stress. In Proceedings of the International Conference on Machine Learning (ICML) .[11] Hwang, C.; Cui, W.; Xiong, Y.; Yang, Z.; Liu, Z.; Hu, H.; Wang, Z.; Salas, R.; Jose, J.; Ram, P.; et al. 2023. Tutel: Adaptive mixture-of-experts at scale. In Pro-ceedings of Machine Learning and Systems , volume 5, 269–287. [12] Jiang, A. Q.; Sablayrolles, A.; Roux, A.; Mensch, A.; Savary, B.; Bamford, C.; Chaplot, D. S.; Casas, D. d. l.; Hanna, E. B.; Bressand, F.; et al. 2024. Mixtral of ex-perts. Mixtral model: https://huggingface.co/mistralai/ Mixtral-8x7B-Instruct-v0.1. Accessed: 2026-07-29, arXiv:2401.04088. [13] Kurita, K.; Michel, P.; and Neubig, G. 2020. Weight poisoning attacks on pretrained models. In Proceed-ings of the 58th annual meeting of the association for computational linguistics , 2793–2806. [14] Kwon, W.; Li, Z.; Zhuang, S.; Sheng, Y.; Zheng, L.; Yu, C. H.; Gonzalez, J.; Zhang, H.; and Stoica, I. 2023. Ef-ficient memory management for large language model serving with pagedattention. In Proceedings of the 29th symposium on operating systems principles , 611–626. [15] Lepikhin, D.; Lee, H.; Xu, Y.; Chen, D.; Firat, O.; Huang, Y.; Krikun, M.; Shazeer, N.; and Chen, Z. 2020. Gshard: Scaling giant models with conditional compu-tation and automatic sharding. arXiv:2006.16668. [16] Li, R.; Wang, J.; Chen, H.; Ding, H.; Zhou, J.; and Tao, R. 2026. Dormant backdoor: Weaponizing model fine-tuning for feasible backdoor attacks against pretrained models. In Proceedings of the AAAI Conference on Artificial Intelligence .[17] Merity, S.; Xiong, C.; Bradbury, J.; and Socher, R. 2016. Pointer sentinel mixture models. WikiTextdataset:https://huggingface.co/datasets/ Salesforce/wikitext. Accessed: 2026-07-29, arXiv:1609.07843. [18] Muennighoff, N.; Soldaini, L.; Groeneveld, D.; Lo, K.; Morrison, J.; Min, S.; Shi, W.; Walsh, P.; Tafjord, O.; Lambert, N.; Gu, Y.; Arora, S.; Bhagia, A.; Schwenk, D.; Wadden, D.; Wettig, A.; Hui, B.; Dettmers, T.; Kiela, D.; Farhadi, A.; Smith, N. A.; Koh, P. W.; Singh, A.; and Hajishirzi, H. 2025. OLMoE: Open Mixture-of-Experts Language Mod-els. OLMoE model: https://huggingface.co/allenai/ OLMoE-1B-7B-0924-Instruct. Accessed: 2026-07-29, arXiv:2409.02060. [19] Qwen. 2024. Qwen1.5-moe: Matching 7b model performance with 1/3 activated parameters. Qwen model: https://huggingface.co/Qwen/Qwen1.5-MoE-A2.7B-Chat. Accessed: 2026-07-29. [20] Raffel, C.; Shazeer, N.; Roberts, A.; Lee, K.; Narang, S.; Matena, M.; Zhou, Y.; Li, W.; and Liu, P. J. 2019. Exploring the limits of transfer learning with a unified text-to-text transformer. C4 dataset: https: //huggingface.co/datasets/allenai/c4. Accessed: 2026-07-29, arXiv:1910.10683. [21] Rajbhandari, S.; Li, C.; Yao, Z.; Zhang, M.; Aminabadi, R. Y.; Awan, A. A.; Rasley, J.; and He, Y. 2022. Deepspeed-moe: Advancing mixture-of-experts infer-ence and training to power next-generation ai scale. In 
+
+International conference on machine learning , 18332– 18346. PMLR. [22] ShareGPT. 2023. ShareGPT Vicuna Unfiltered. ShareGPTdataset:https://huggingface.co/datasets/ Aeala/ShareGPT_Vicuna_unfiltered. Accessed: 2026-07-29. [23] Shazeer, N.; Mirhoseini, A.; Maziarz, K.; Davis, A.; Le, Q.; Hinton, G.; and Dean, J. 2017. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. arXiv:1701.06538. [24] Taori, R.; Gulrajani, I.; Zhang, T.; Dubois, Y.; Li, X.; Guestrin, C.; Liang, P.; and Hashimoto, T. B. 2023. Stanford alpaca: An instruction-following llama model. Alpaca dataset: https://github.com/tatsu-lab/stanford_ alpaca. Accessed: 2026-07-29. [25] Wan, A.; Wallace, E.; Shen, S.; and Klein, D. 2023. Poisoning language models during instruction tuning. In International Conference on Machine Learning ,35413–35425. PMLR. [26] Wang, Q.; Pang, Q.; Lin, X.; Wang, S.; and Wu, D. 2025. BadMoE: Backdooring mixture-of-experts LLMs via optimizing routing triggers and infecting dor-mant experts. arXiv:2504.18598. [27] Zellers, R.; Holtzman, A.; Bisk, Y.; Farhadi, A.; and Choi, Y. 2019. Hellaswag: Can a machine really fin-ish your sentence? In Proceedings of the 57th annual meeting of the association for computational linguis-tics , 4791–4800. Accessed: 2026-07-29. [28] Zhao, X.; Chen, X.; Liu, B.; Gao, H.; Zhao, Z.; and Chen, Y. 2025. Who speaks for the trigger? Dynamic expert routing in backdoored mixture-of-experts trans-formers. In Advances in Neural Information Processing Systems , 53372–53400. [29] Zhou, Y.; Lei, T.; Liu, H.; Du, N.; Huang, Y.; Zhao, V.; Dai, A. M.; Le, Q. V.; Laudon, J.; et al. 2022. Mixture-of-experts with expert choice routing. In Advances in Neural Information Processing Systems , volume 35, 7103–7114. 
+
+## Appendix 
+
+Stage 3 Straight-Through Estimator 
+
+This section gives the complete straight-through estimator used by the hard-frequency layer-uniformity term in Stage 3. For an ordinary input x, let the valid-position set V(x) = 
+
+C(x) contain its nonpadding content-token positions. The total valid-token count NB in minibatch B is 
+
+NB = X
+
+> x∈B
+
+|V (x)|. (A.1) We write Tℓ(t, x ) for the hard top-k expert set selected at layer ℓ and position t while processing x. The normalized hard expert-assignment frequency for expert e is 
+
+fℓ,e (B) = 1
+
+kN B
+
+X
+
+> x∈B
+
+X
+
+> t∈V (x)
+
+I [e ∈ T ℓ(t, x )] . (A.2) The vector fℓ(B) ∈ RNe collects these frequencies and sat-isfies P 
+
+> e
+
+fℓ,e (B) = 1 .Because hard top-k selection blocks gradients, we also compute the batch-averaged dense routing vector ¯pℓ(B) with components 
+
+¯pℓ,e (B) = 1
+
+NB
+
+X
+
+> x∈B
+
+X
+
+> t∈V (x)
+
+pℓ(e | t, θ p). (A.3) Let sg( ·) preserve its argument in the forward pass and block its gradient in the backward pass. The straight-through hard-frequency vector is 
+
+efℓ(B) = fℓ(B) − sg (¯ pℓ(B)) + ¯ pℓ(B). (A.4) Its forward value equals the hard assignment frequency 
+
+fℓ(B), while its gradient follows the dense routing vector 
+
+¯pℓ(B). This aggregate dense vector is used only as the back-ward surrogate for the hard-frequency objective and is not the distribution used by the token-level teacher-matching loss. Let the uniform expert-assignment vector be 
+
+u =
+
+ 1
+
+Ne
+
+, . . . , 1
+
+Ne
+
+
+
+. (A.5) For refinement layer set S, the layer-uniformity loss is 
+
+Llayer-uni = 1
+
+|S| 
+
+X
+
+> ℓ∈S
+
+efℓ(B) − u 22
+
++ max 
+
+> ℓ∈S
+
+efℓ(B) − u ∞
+
+.
+
+(A.6) The first term controls the average hard-routing deviation across S, while the second targets the largest remaining coordinate-wise deviation. For an ordinary input x, define the layer-level target prob-ability mass 
+
+¯mℓ(x, θ p) = 1
+
+|C (x)|
+
+X
+
+> t∈C (x)
+
+X
+
+> e∈E ∗
+
+pℓ(e | t, θ p). (A.7) Given a layer-level target-mass cap c, the layer-cap loss is 
+
+Llayer-cap = Ex∼D p
+
+"
+
+1
+
+|S| 
+
+X
+
+> ℓ∈S
+
+max (0 , ¯mℓ(x, θ p) − c)
+
+#
+
+.
+
+(A.8) Both refinement losses are evaluated on ordinary inputs. They are localized auxiliary constraints and do not replace the token-level clean-teacher matching objective.
