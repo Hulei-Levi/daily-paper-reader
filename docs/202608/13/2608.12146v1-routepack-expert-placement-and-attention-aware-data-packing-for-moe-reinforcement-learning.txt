@@ -1,0 +1,767 @@
+Title: RoutePack: Expert Placement and Attention-Aware Data Packing for MoE Reinforcement Learning
+
+URL Source: https://arxiv.org/pdf/2608.12146v1
+
+Published Time: Thu, 13 Aug 2026 01:02:11 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+# RoutePack: Expert Placement and Attention-Aware Data Packing for MoE Reinforcement Learning 
+
+# Yibo Shen Xudong Han Xiaowei Zhu Gen Li Zhenxuan Pan 
+
+Ant Group syb544241@antgroup.com 
+
+Abstract 
+
+Training Mixture-of-Experts (MoE) models for reinforce-ment learning (RL) couples two load-balancing problems. Sequence composition determines the dense attention work of each data-parallel (DP) microbatch, while token routing determines the sparse expert work of each expert-parallel (EP) rank. Optimizing either in isolation can shift the bottle-neck to the other. In MoE RL, however, rollout-time routing replay reveals both the sequence length and the layer-wise expert demand of every sample before the corresponding training step is scheduled. We present RoutePack, a hierarchical planner that coor-dinates state-consistent, layer-wise expert rerouting with attention-aware data packing over an optimizer-step win-dow. RoutePack first uses aggregate routing demand to place experts independently at each MoE layer. It then packs all samples into the smallest certified, or best-known feasible, number of token-capped execution rows and searches their DP layout with a projected expert-data-parallel (EDP)-shard-aware objective. The objective combines a linear–quadratic attention proxy normalized over the window with the busiest physical EP rank at every MoE layer, and minimizes the ac-cumulated cost of the slowest EDP shard. A diverse feasible population is refined through parallel population annealing without changing the selected row count, sample coverage, capacity, or communicator topology. State-consistent expert materialization preserves logical top-𝑘 routing and existing MoE kernels without introducing microbatch-level expert replication. Across Ling-3.0-Tiny and Ling-3.0-Flash models, expert rerouting improves trainer-measured token throughput by 3.80% and 10.50%, and routing-aware packing adds another 4.86% and 3.98%, respectively. Online traces show consistent reductions in accumulated EP peaks, worst row-local peaks, and the joint bottleneck. We further derive a sufficient run-time condition under which CPU packing does not extend the training-admission critical path alongside placement-aware model-state materialization. 
+
+1 Introduction 
+
+Sparse Mixture-of-Experts (MoE) models increase capacity while activating only a small subset of feed-forward experts for each token. Their training step nevertheless exposes two different sources of load imbalance. Dense attention is exe-cuted independently within data-parallel (DP) replicas, so its tail depends on the lengths and composition of the sequences packed into each microbatch. Sparse feed-forward computa-tion is distributed through expert parallelism (EP), where dis-patch, grouped GEMMs, and combine are paced by the phys-ical rank receiving the most routed tokens. Reinforcement-learning (RL) workloads amplify both effects through highly variable response lengths and rapidly changing expert popu-larity [12, 18, 39]. Existing systems address one side of this problem at a time. Communication libraries such as DeepEP accelerate MoE dispatch and combine without deciding the training layout [38]. Expert-parallel load balancers instead place, repli-cate, or dispatch experts according to historical, replayed, or post-gating demand [8, 18, 35, 37, 39]; some also reas-sign post-route tokens, but they do not reconstruct capacity-constrained whole-sequence training rows. Conversely, RL training systems pack variable-length samples to improve token utilization, and recent work reorders sequences to bal-ance attention work across DP workers [5, 14, 25, 26, 33, 34]. These mechanisms usually optimize sequence-derived costs without considering which experts those sequences activate. Improving either component in isolation can therefore ex-pose, or even worsen, the other bottleneck. MoE RL provides an unusual opportunity to coordinate the two decisions. The rollout and training phases process the same generated token sequence. Routing replay can con-sequently expose each sample’s token length and layer-wise expert demand before the corresponding optimizer step is scheduled [18, 22]. This information converts data layout from a routing-blind preprocessing step into a load-balancing control: the system may coordinate where experts reside with which samples execute together. Figure 1 summarizes the resulting control and data paths. The control plane converts rollout routing replay into a layer-wise expert placement and an EDP-aware sample layout; the data plane applies both decisions to the same optimizer-step window. We present RoutePack, a hierarchical planner that coor-dinates expert placement with attention- and expert-aware data packing under a shared routing signal. The packing objective jointly models attention and expert load, while 
+
+> 1arXiv:2608.12146v1 [cs.DC] 12 Aug 2026
+
+Preprint. Work in progress. CONTROL PLANE     
+
+> Rollout routing replay
+> Sample × MoE layer × logical expert Exact pre-scheduling demand
+> Routed-token counts Sequence lengths
+> Joint planner
+> 1 Layer-wise LPT placement
+> Aggregate one optimizer step Fix one mapping per MoE layer
+> 2 Minimum-row packing seed
+> Certify and fi x the row count Preserve cap and sample bijection
+> 3 EDP-aware Population Annealing
+> Parallel fi xed-temperature chains Terminal-state resampling
+> DATA PLANE
+> Rollout samples
+> Sequence length MoE layer : routed-token counts
+
+⋮      
+
+> Layer-wise expert placement
+> Logical experts →physical EP ranks per layer
+> Identity placement RoutePack placement
+> EDP-aware synchronized rows
+> Assignment over DP slots and rows
+> Joint Attention–Expert step objective
+> ++
+
+⋮ 
+
+> ⋮⋮⋮⋮
+
+⋮ 
+
+> Expert peak sum Stage-wise EDP-shard peaks
+
++  
+
+> KDA peak MLA peak
+> Linear Linear Quadratic
+> +
+
+Figure 1: RoutePack jointly plans layer-wise expert placement and EDP-aware fixed-row data packing from rollout routing replay. 
+
+placement and packing are coordinated hierarchically rather than optimized simultaneously as a single global problem. RoutePack first uses optimizer-window routing demand to place each MoE layer independently, lowering the aggre-gate EP imbalance that sample reordering cannot remove. With that placement fixed, it assigns the complete sample set to a rectangular layout of token-capped execution rows .Its projected-EDP-aware objective combines cell-local at-tention work with shard-local expert-rank tails, prioritizing the smallest certified, or best-known feasible, row count be-fore load balance. Sections 3 and 4 give the objective and its capacity-feasible population-annealing solver, respectively. RoutePack operates after an optimizer-step batch is sealed and before it is admitted to training. This boundary per-mits state-consistent placement and exposes host parallelism across layers, seeds, and population members. Section 4.2 derives the framework dependency DAG and a sufficient condition for CPU packing not to extend training admission. The planner uses a window-normalized compute proxy for linear and quadratic attention work and layer-wise EP peaks; Section 5 evaluates its relation to trainer-measured token throughput. This paper makes three contributions: 
+
+• We introduce joint expert rerouting and data pack-ing for MoE RL. Routing replay coordinates a state-consistent, layer-wise expert placement with the as-signment of complete samples to synchronized train-ing rows, so aggregate and row-local expert imbal-ance are controlled together. 
+
+• We formulate routing-aware packing as a joint op-timization of attention and expert load. The objec-tive combines projected EDP attention work with per-layer physical EP-rank tails, while prioritizing a capacity-efficient row count over load balance. 
+
+• We implement the design with layer-wise LPT, state-consistent expert materialization, capacity-feasible fixed-row construction, diverse seeding, and paral-lel population annealing with exact lexicographic plan scoring. Across Tiny and Flash models, the co-ordinated controls improve trainer-measured token throughput by 8.85% and 14.89% over the baseline; we also characterize the runtime support required to overlap host-side planning with placement-aware state materialization. 
+
+2 Background and Related Work 2.1 MoE RL Training with Routing Replay 
+
+Rollout-to-training workflow. RL systems alternate, or asyn-chronously overlap, two GPU workloads. Rollout workers 
+
+2Preprint. Work in progress. Per-token expert ID replay 
+
+> Rollout Training
+> R3 replay
+> Aggregated routing pro fi les
+
+Figure 2: Routing replay aggregates exact per-sample, per-layer expert demand for planning. 
+
+generate responses from prompts and attach rewards and training metadata to the resulting trajectories. Training work-ers later consume a collected optimizer-step batch, evalu-ate the policy loss, and update the model [14]. Each gen-erated prompt–response sequence remains an indivisible sample record when the execution layout is changed. Before execution, variable-length sequences are commonly parti-tioned across data-parallel (DP) workers and packed into token-capped microbatches to reduce padding and memory waste [5, 25, 26, 33]. We represent a training sample by 𝑆 𝑖 and its sequence length by 𝑡 𝑖 . After packing, 𝐵 𝑟,𝑑 denotes the set of samples in execution row 𝑟 and controller DP slot 𝑑 . An execution row is the synchronized scheduling unit: it contains one microbatch for every DP slot. This term is distinct from an al-gorithmic PPO minibatch, which determines an optimization scope rather than the physical grouping of simultaneously scheduled microbatches. 
+
+Routing replay. At MoE layer 𝑙 , a top-𝑘 router sends ev-ery token to a small set of logical experts. Let 𝑎 𝑖,𝑙,𝑒 be the number of assignments from sample 𝑖 to logical expert 𝑒 . R3 records rollout routing distributions for consistent training, and ReLibra observes that the same replay signal reveals future expert demand before training [18, 22]. RoutePack consumes these recorded counts rather than predicting them from historical batches. Thus, for an optimizer-step batch of 
+
+𝑁 samples, the planner receives 
+
+{( 𝑡 𝑖 , 𝐴 𝑖 )} 𝑁 𝑖 =1, 𝐴 𝑖 = [𝑎 𝑖,𝑙,𝑒 ]𝑙 ∈ L MoE , 𝑒 ∈ E 𝑙 . (1) Only MoE layers appear in LMoE ; dense feed-forward layers contribute no expert-placement decision. 
+
+Placement and execution domains. A layer-wise map 𝜋 𝑙 
+
+assigns logical expert 𝑒 to physical slot 𝑣 = 𝜋 𝑙 (𝑒 ). We write owner (𝑣 ) for the expert-parallel (EP) rank that owns it. Log-ical routing is unchanged: placement only translates a se-lected logical expert into the physical slot that stores its state. The attention work of 𝐵 𝑟,𝑑 is attributed to DP slot 𝑑 ,even when that replica is internally sharded by tensor par-allelism (TP) or context parallelism (CP). Expert work has a different scope. DP slots whose model shards project onto the same physical EP communicator form an expert-data-parallel (EDP) shard, denoted by D𝑔 . Their routed assignments are aggregated before measuring the load of physical EP rank 
+
+𝑝 . This distinction between a DP-cell attention scope and an 
+
+EDP-shard expert scope is central to our model. 
+
+Attention architectures. Contemporary MoE models use different mixtures of recurrent linear attention and full atten-tion. DeepSeek-V2 and DeepSeek-V3 use Multi-Head Latent Attention (MLA), which compresses the key–value represen-tation while retaining full token-to-token attention [11, 12]. DeepSeek-V4 replaces MLA with interleaved Compressed Sparse Attention (CSA) and Heavily Compressed Attention (HCA), and uses Manifold-Constrained Hyper-Connections (mHC) to mix parallel residual streams around attention and FFN sublayers [13, 36]. Kimi Linear introduces Kimi Delta Attention (KDA), a recurrent linear attention operator [19]. Ling-3.0-Flash publicly documents a native hybrid-linear stack that alternates KDA and MLA layers [2]. Qwen3-Next similarly combines Gated DeltaNet with Gated Attention, using the former in three quarters of its layers and the latter in the remaining quarter [27]. Although their state represen-tations and kernels differ, we approximate their sequence-dependent work with at most two terms: a token-linear term and, where applicable, an additional sequence-pair term. 
+
+2.2 Two Coupled Sources of Stragglers 
+
+Dense attention imbalance. Equal sample counts do not imply equal dense work because RL responses have variable lengths. Equal packed-token counts are also insufficient for attention operators with a sequence-pair component. For attention operator 𝐴 and DP cell 𝐵 𝑟,𝑑 , we use the two-term execution proxy 
+
+𝐹 𝐴 (𝐵 𝑟,𝑑 ) = 𝛼 𝐴 ∑︁  
+
+> 𝑖 ∈𝐵 𝑟,𝑑
+
+𝑡 𝑖 + 𝛽 𝐴 ∑︁  
+
+> 𝑖 ∈𝐵 𝑟,𝑑
+
+𝑡 2 
+
+> 𝑖
+
+, 𝛽 𝐴 ≥ 0. (2) The linear term captures projections and recurrent or linear-attention work; the quadratic term captures token-pair inter-actions in full attention. In the original Transformer, Multi-Head Attention (MHA) has both terms: its projections con-tribute to 𝛼 𝐴 , while attention-score and value aggregation contribute to 𝛽 𝐴 [31]. Multi-Query Attention (MQA) and Grouped-Query Attention (GQA) share key–value heads across query heads, reducing projection and KV-state con-stants but retaining full pairwise attention and hence 𝛽 𝐴 >
+
+0 [1]. A fixed sliding window of width 𝑤 instead contributes 
+
+𝑂 (𝑤 Í𝑖 𝑡 𝑖 ) and is absorbed into 𝛼 𝐴 ; a window that scales with sequence length restores a quadratic component. 
+
+> 3Preprint. Work in progress.
+
+Thus, KDA and Gated DeltaNet use 𝛽 𝐴 = 0 in our model, whereas MLA and Gated Attention use 𝛽 𝐴 > 0. CSA and HCA also fit this form with calibrated coefficients: fixed-window and fixed-top-𝑘 work contribute to 𝛼 𝐴 , whereas interaction with a length-proportional compressed sequence contributes a reduced 𝛽 𝐴 . The per-token residual-stream mixing of mHC changes 𝛼 𝐴 but introduces no new quadratic term. Operator-and hardware-specific constants are absorbed into 𝛼 𝐴 and 
+
+𝛽 𝐴 . Consequently, equal total tokens fix the first statistic but not the second, which is why fixed-token sequence packing may retain DP stragglers in long-context training [34]. Our evaluated Ling-3.0-family checkpoints use KDA and MLA as distinct layer stages; the public Flash announcement documents the same hybrid stack, while the model documen-tation identifies the evaluated Tiny and Flash variants in the Ling-3.0 family [2, 4]. We therefore model KDA by 𝛼 𝐾 
+
+Í𝑖 𝑡 𝑖 
+
+and MLA by 𝛼 𝑀 
+
+Í𝑖 𝑡 𝑖 + 𝛽 𝑀 
+
+Í𝑖 𝑡 2 
+
+> 𝑖
+
+. The two MLA terms are added within each DP cell before taking the communica-tor maximum, while the KDA and MLA stage maxima are measured separately and then accumulated. A slower cell therefore extends the critical path even when there is no barrier immediately after an individual attention kernel. 
+
+Sparse expert imbalance. Expert demand is both sample-and layer-dependent. Given 𝜋 𝑙 , the load induced by a row on physical rank 𝑝 at MoE layer 𝑙 is the sum of the recorded counts mapped to 𝑝 . Within EDP shard 𝑔 , this load addi-tionally aggregates over all DP slots in D𝑔 . Dispatch and grouped expert computation at that layer are bounded by the busiest physical EP rank, not by the mean rank load. The critical rank can change across layers and rows, so a single batch-level coefficient of variation does not capture the actual sequence of tails [18, 39]. 
+
+Physical-rank execution granularity. An EP rank owns sev-eral local experts, but grouped-GEMM backends execute their local MLPs as one grouped operation. UltraEP uses the same execution abstraction and models MoE compute by the busiest rank’s aggregate post-reroute expert load [35]. We adopt this physical-rank abstraction: sparse demand is first summed over all experts owned by a rank, and the maximum rank load is then taken within each EDP shard. Thus, the planner targets the imbalance exposed across synchronizing EP ranks rather than separately equalizing the local experts inside each rank. 
+
+Coupling through sample placement. Moving 𝑆 𝑖 between cells changes all of its costs together: its token length, its quadratic attention contribution, and one routing vector for every MoE layer. A length-only move can therefore improve the dense tail while concentrating samples that activate the same physical rank. An expert-cost-only packing move can reduce a routing peak while creating an attention outlier. Identity placement Layer EP ownership    
+
+> Packing A
+> samples
+> Packing B
+> samples
+> RoutePack placement Layer EP ownership
+> Packing A
+> samples
+> Packing B balanced rows
+> samples
+> maximum load maximum load maximum load maximum load
+> window load window load
+
+Figure 3: Layer-wise expert placement lowers the ag-gregate imbalance bound; routing-aware packing then reduces row-local peaks. 
+
+The coupling is structural rather than a consequence of a particular heuristic. 
+
+2.3 Why Expert Placement and Data Packing Must Be Coordinated 
+
+Section 2.2 distinguishes dense-attention and sparse-expert stragglers. We now distinguish the two controls available to the planner. Layer-wise expert placement changes aggre-gate physical-rank demand, whereas whole-sample packing changes when both attention and expert demand are exposed. Neither control subsumes the other. 
+
+Packing cannot remove optimizer-window expert skew. Con-sider one MoE layer and fix its placement 𝜋 𝑙 . Reordering samples among rows changes when expert demand is ob-served, but it does not change the total demand assigned to physical rank 𝑝 over the optimizer step: 
+
+𝐿 agg  
+
+> 𝑙,𝑝
+
+(𝜋 𝑙 ) =∑︁ 
+
+> 𝑖
+
+∑︁ 𝑒 :owner (𝜋 𝑙 (𝑒 ) ) =𝑝 
+
+𝑎 𝑖,𝑙,𝑒 . (3) Consequently, for any capacity-feasible packing 𝑥 ,∑︁ 
+
+> 𝑟
+
+∑︁ 𝑔 
+
+max  
+
+> 𝑝
+
+𝑊 𝑟,𝑔,𝑙,𝑝 (𝑥 ; 𝜋 𝑙 ) ≥ max  
+
+> 𝑝
+
+𝐿 agg  
+
+> 𝑙,𝑝
+
+(𝜋 𝑙 ). (4) Figure 3 illustrates the invariant. Under identity placement, Packing A and Packing B both inherit the same 12-versus-4 optimizer-window load. No data permutation can reduce the right-hand side. This explains the empirical floor of routing-aware packing without changing expert placement: when the optimizer-window routing distribution is skewed, the physical expert map must change before packing can cross that bound. 
+
+> 4Preprint. Work in progress.
+
+Expert placement does not guarantee row-local balance. The converse also holds. A placement can make the step-wide to-tals nearly equal while individual rows remain imbalanced. If samples with correlated routing vectors are packed together, one physical rank may still dominate a row even though its load is offset by other rows. Expert placement controls the aggregate lower bound; it does not determine how the bound is exposed over time. Routing-aware data placement is therefore required after the layer-wise map is fixed. 
+
+Length-only packing does not explicitly coordinate dense and sparse work. Standard FFD-style packing is effective at respecting a token capacity and reducing the number of mi-crobatches. It has no reason, however, to distinguish two equal-length samples with opposite expert signatures. Fig-ure 3 shows precisely this remaining degree of freedom: after placement has lowered the aggregate rank skew, exchanging equal-size samples can reduce the row peak without chang-ing token occupancy or row count. The useful search space is therefore not “more padding for better expert balance,” but routing-aware choices among layouts that are already capacity-efficient. 
+
+2.4 Related Work 
+
+Prior systems coordinate expert placement and data sched-uling for objectives other than attention-aware training-row balance. Semantic Parallelism profiles token–expert affinity, clusters co-activated experts offline, and schedules requests or reshuffles tokens online to improve communication lo-cality in MoE inference [21]. Gimbal closes a serving-time feedback loop between pressure-aware DP admission and source-DP-aware expert placement, jointly accounting for expert load, communication, and migration stability [30]. ReLibra is the closest routing-replay-based training sys-tem, but its hierarchy uses different controls [18]. At the inter-batch timescale, it aggregates one training batch and reorders experts across a potentially multi-node EP group using an execution-time model that includes both expert computation and hierarchical NVLink/RDMA communica-tion. With that expert map fixed, a second sample-to-GPU search improves data locality. At the intra-batch timescale, ReLibra dynamically replicates experts within each node and jointly plans replica placement and token splitting to ab-sorb microbatch fluctuations. Thus, its sample reassignment is a communication-locality refinement within an expert reordering–replication design; it does not construct capacity-efficient execution rows or model their attention work. Expert-parallel communication and load balancing are distinct layers. DeepEP provides optimized all-to-all dis-patch and combine kernels, including low-precision com-munication, but does not itself choose expert or sample placement [38]. FineMoE’s FineEP schedules already-routed tokens among replicas by solving a per-microbatch linear program; its longer-term placement strategies enlarge that token-scheduling space [37]. UltraEP reacts to exact post-gating load at every microbatch and layer with replication and token rerouting, but places each EP group inside one rack-scale node (RSN) and uses PP/DP for cross-rack scal-ing [35]. MoonEP also uses dynamic redundant experts, prefetch slots, and replica-gradient reduction; its public im-plementation relies on symmetric remote mappings and NVLink within a scale-up domain [8]. ForeMoE uses rollout foresight to derive a stable base placement and then plans expert relocation, replication, and token assignment for each micro-step; its transfer engine materializes those changing plans through CPU-assisted or GPU-direct paths [39]. These methods balance post-route work by scheduling tokens or by adding and moving expert capacity. RoutePack instead commits one state-consistent expert map before training and changes no expert capacity within a forward–backward interval. General RL frameworks expose a different, length-oriented data control. AReaL enforces a per-microbatch token cap and uses a decreasing-order greedy bin allocator exposed as 
+
+ffd_allocate [5]. slime likewise packs variable-length sam-ples toward a per-GPU token limit and balances sequence-derived work across DP ranks [40]; veRL, OpenRLHF, and NeMo RL provide related sequence-packing or dynamic-batching paths [25, 26, 33]. These packers preserve capacity and reduce padding or length skew, but do not consume per-layer routing vectors. Libra goes further by reordering sequences and scheduling attention tiles under an explicit attention-work model, but does not optimize sparse expert demand [34]. Table 1 separates these mechanisms by what they move and which bottleneck the data layout controls. The unaddressed point is their intersection: given exact per-sample routing replay, coordinate layer-wise expert place-ment with a capacity-efficient, attention-aware assignment of whole samples to synchronized training rows, such that the assignment itself reduces the EDP-local EP compute tail. This is the point addressed by RoutePack. 
+
+2.5 Design Requirements 
+
+The preceding observations lead to five requirements. (1) Preserve capacity efficiency. Row-count minimiza-tion must precede load-balance optimization. Other-wise, a lower peak obtained by creating extra micro-batches may increase total work and optimizer-step latency. (2) Coordinate dense and sparse tails. The data ob-jective must account for token-linear and quadratic attention work together with the busiest physical EP 
+
+> 5
+
+Preprint. Work in progress. 
+
+Table 1: Comparison of related load-balancing controls.                                          
+
+> Method Scope Expert control Data control Primary objective RL framework packers [5, 33, 40] RL training, pre-step None Capped sequence bins Capacity and length balance Libra [34] LLM training None Sequence and attention-tile scheduling Attention-work balance Semantic Parallelism [21] MoE serving Co-activation placement Request scheduling or token reshuffling EP communication locality Gimbal [30] MoE serving Source-DP-aware placement Pressure-aware request admission Load, communication, and migration ReLibra [18] MoE RL training Batch reordering and intra-node replicas Source-GPU assignment and token splitting MoE compute and hierarchical communication DeepEP [38] Training and inference None (transport only) Post-route token transport Dispatch/combine throughput UltraEP [35] One RSN, per layer/microbatch Dynamic redundant experts Replica-aware token splitting Rank load and communication MoonEP [8] NVLink domain, per layer/microbatch Redundant experts and prefetch Replica-aware token splitting Rank balance and locality FineMoE [37] MoE training, per microbatch Tailored replica placement LP token scheduling EP-rank compute balance ForeMoE [39] MoE RL, per micro-step Relocation and replication Post-route token assignment MoE compute and transfer
+> RoutePack RL optimizer window Layer-wise placement Whole sequences in synchronized rows Attention and EP compute tails
+
+rank, after aggregating its local experts, at every MoE layer. (3) Use the correct parallel scope. Attention is evalu-ated per DP cell, whereas routed expert assignments are aggregated only among DP slots in the same pro-jected EDP shard, as induced by the deployed commu-nicator rather than a presumed hardware boundary. Balancing ranks from unrelated communicators to-gether would optimize a quantity that no collective executes. (4) Optimize the complete step, not isolated rows. 
+
+Independent EDP shards can accumulate work at different rates across rows. The primary tail objective must therefore consider the slowest shard over the optimizer-step window and use the worst row-local tail as the final tie-breaker. (5) Preserve training semantics. Every sample must appear exactly once, every cell must obey the token cap, and all DP slots must receive equal microbatch counts. Expert placement must preserve logical rout-ing, commit every expert-indexed state object con-sistently at a training boundary, and remain fixed throughout the corresponding forward–backward interval. It must not change tensor shapes, commu-nicator membership, or schedule dependencies. These requirements separate RoutePack from both conven-tional sequence packing and microbatch-level expert replica-tion. The next section formalizes the resulting joint planning problem, after which we present the hierarchical solver. 
+
+3 Problem Formulation 
+
+RoutePack uses a hierarchical objective. The planner first fixes a layer-wise expert placement and the smallest certified, or best-known, feasible number of execution rows. It then optimizes sample placement without changing either deci-sion. This ordering prevents apparent load-balance gains obtained by adding execution rows or changing the EDP communication topology. 
+
+3.1 Inputs and Decision Variables 
+
+For sample 𝑆 𝑖 , 𝑡 𝑖 is its sequence length and 𝑎 𝑖,𝑙,𝑒 is its replayed routing count for logical expert 𝑒 at MoE layer 𝑙 . A layer-local permutation 𝜋 𝑙 maps logical experts bijectively to physical expert slots. Let owner (𝑣 ) be the EP rank that owns physical slot 𝑣 . Once 𝜋 𝑙 is fixed, the demand of sample 𝑖 on physical rank 𝑝 is 
+
+𝑞 𝑖,𝑙,𝑝 (𝜋 𝑙 ) =∑︁   
+
+> 𝑒 :owner (𝜋 𝑙 (𝑒 ) ) =𝑝
+
+𝑎 𝑖,𝑙,𝑒 . (5) Let 𝐷 be the number of controller DP slots and 𝑅 the number of execution rows. Binary variable 𝑥 𝑖,𝑟,𝑑 indicates that sample 𝑖 is assigned to the cell at row 𝑟 and DP slot 
+
+𝑑 . The samples in that cell are 𝐵 𝑟,𝑑 = {𝑖 : 𝑥 𝑖,𝑟,𝑑 = 1}. The physical EDP topology is fixed: {D 𝑔 }𝑔 is a fixed partition of the controller DP slots, where D𝑔 contains the slots projected onto EDP shard 𝑔 .
+
+6Preprint. Work in progress. 
+
+3.2 Rectangular Fixed-Row Feasibility 
+
+For token capacity 𝐶 , every candidate layout obeys 
+
+> 𝑅
+
+∑︁  
+
+> 𝑟 =1
+> 𝐷
+
+∑︁ 
+
+> 𝑑 =1
+
+𝑥 𝑖,𝑟,𝑑 = 1, ∀𝑖, (6) 1 ≤∑︁ 
+
+> 𝑖
+
+𝑥 𝑖,𝑟,𝑑 , ∀𝑟, 𝑑, (7) ∑︁ 
+
+> 𝑖
+
+𝑡 𝑖 𝑥 𝑖,𝑟,𝑑 ≤ 𝐶, ∀𝑟, 𝑑. (8) Equation 6 preserves the optimizer-step sample multiset. Equations 7 and 8 produce a rectangular 𝑅 × 𝐷 schedule with one nonempty, capacity-feasible microbatch per DP slot in every row. Pipeline occupancy requirements, when enabled, enter as an additional lower bound on 𝑅 rather than as a soft load term. Let X𝑅 be this feasible set. The minimum feasible row count is 
+
+𝑅 min = min {𝑅 : X𝑅 ≠ ∅} . (9) When the fixed-bin feasibility check completes, the planner sets 𝑅 ★ = 𝑅 min . Under a planning-time limit, 𝑅 ★ instead de-notes the best-known feasible row count and is not described as globally minimal. All subsequent search is restricted to this selected 𝑅 ★.
+
+3.3 Layer-Wise Expert Placement 
+
+Packing cannot change the optimizer-window demand of an expert. We therefore first aggregate 𝐿 𝑙,𝑒 = Í𝑖 𝑎 𝑖,𝑙,𝑒 and independently place each MoE layer’s experts with longest-processing-time scheduling [15]. For a candidate placement, the aggregate physical-rank load is 
+
+𝐺 𝑙,𝑝 (𝜋 𝑙 ) =∑︁   
+
+> 𝑒 :owner (𝜋 𝑙 (𝑒 ) ) =𝑝
+
+𝐿 𝑙,𝑒 . (10) LPT greedily assigns experts in descending 𝐿 𝑙,𝑒 order to the currently least-loaded physical rank. This stage lowers the packing-invariant expert bound; it is not claimed to solve the indivisible placement problem globally. The resulting 
+
+𝜋 = {𝜋 𝑙 } remains fixed throughout data-layout search. Figure 4 shows how this layer-wise map is committed without migrating state or changing graph topology inside a forward–backward interval. Each expert and its training state are materialized as one unit, while the dispatcher trans-lates logical expert identities to the committed physical slots independently at each MoE layer. Algorithm 1 gives the layer-local construction. The same procedure is applied independently to every MoE layer, so it introduces no cross-layer coupling or change to the fixed EDP communicator topology. EDP shards           
+
+> master optim master optim master optim master optim master optim master optim master optim
+> fi xed fi xed fi xed
+> FWD BWD SAVE
+> master optim
+
+Figure 4: State-consistent layer-wise expert place-ment. Expert state is co-materialized under 𝜋 𝑙 , while layer-local dispatcher remapping preserves forward– backward consistency and canonical save order.                                                                
+
+> Algorithm 1: Layer-local LPT expert placement Require: Aggregate expert loads {𝐿 𝑙,𝑒 }𝐸 𝑒 =1for layer 𝑙 ; physical ranks P;
+> 𝐻 =𝐸 /| P | expert slots per rank
+> Ensure: Slot permutation 𝜋 𝑙 with exactly 𝐻 experts per rank
+> 1: 𝐺 𝑙, :←0;𝑛 𝑙, :←0
+> 2: E ← argsort 𝑒 (− 𝐿 𝑙,𝑒 , 𝑒 )
+> 3: for each 𝑒 ∈ E do
+> 4: P𝑒 ← { 𝑝 ∈ P :𝑛 𝑙,𝑝 <𝐻 }
+> 5: 𝑝 ←argmin 𝑝 ′∈P 𝑒 (𝐺 𝑙,𝑝 ′, 𝑝 ′)
+> 6: 𝜋 𝑙 (𝑒 ) ← slot (𝑝, 𝑛 𝑙,𝑝 +1);𝐺 𝑙,𝑝 ←𝐺 𝑙,𝑝 +𝐿 𝑙,𝑒 ;𝑛 𝑙,𝑝 ←𝑛 𝑙,𝑝 +1
+> 7: return 𝜋 𝑙
+
+State-consistent materialization. The planner emits 𝜋 𝑙 as a logical-expert-to-slot map and commits it at a training-step boundary. The runtime copies each expert’s FC parameters into the existing tensors of its destination slot; it does not re-place those parameter objects or rebuild their gradient-buffer descriptors. For a distributed optimizer, it obtains the live master-parameter and optimizer-state shards (e.g., Adam mo-ments) together with their gbuf ranges. It first transfers only the source ranges owned by each EDP lane across EP ranks, then repartitions range intersections within the destination EDP group and writes them directly into the pre-existing destination ranges. Thus the EDP gbuf partition and slot ownership remain fixed even though the logical expert state stored in each slot changes. Quantization scales and other expert-indexed metadata, when present, must follow the same map. The router continues to produce scores, bias-corrected probabilities, and top-𝑘 choices in logical-expert order; nei-ther router weights nor expert bias is permuted. After logical selection, the dispatcher applies the inverse column permu-tation so that logical expert 𝑒 is sent to slot 𝜋 𝑙 (𝑒 ). This place-ment is therefore compatible with logical local/group top-𝑘 
+
+> 7Preprint. Work in progress.
+
+policies and their parallel score computation: only the sub-sequent logical-to-physical dispatch changes. The Boolean routing map needs no gradient, while indexing the routing probabilities remains differentiable and sends their gradi-ents back to the original logical columns. Expert gradients accumulate into each destination slot’s existing gbuf view, whose co-materialized master weights and optimizer state then receive the corresponding update. The implementation retains DeepEP as the expert-parallel dispatch/combine backend [38]: RoutePack changes the phys-ical expert indices presented to the dispatcher, not the collec-tive API or communicator topology. The new placement can nevertheless change token grouping, collective arrival, and grouped-GEMM accumulation order. Because floating-point addition is not associative, reordered and identity executions need not be bitwise identical; we require logical outputs and gradients to agree within dtype-appropriate tolerances and treat unit-in-the-last-place (ULP)-scale drift as numerical reordering rather than a semantic mismatch. For a tensor-parallel expert, all TP shards apply the same expert permutation; replicated DP state and EDP lanes com-mit the mapping within their state- consistency domain. Canonical checkpoint export may apply 𝜋 −1 
+
+> 𝑙
+
+at a step bound-ary. These operations have a state-materialization cost, but prevent mismatches among forward parameters, backward gradients, and optimizer state. 
+
+Topology scope. The formulation does not require an EDP shard to fit within one server or one rack-scale domain. Each 
+
+D𝑔 is induced by the runtime’s actual EDP communicator, and Equations 5 and 13 apply unchanged whether its ranks are connected within a node, within a rack, or across scale-out links. RoutePack can therefore plan every EDP shard in the deployed topology without assuming rack-local redun-dant expert slots. 
+
+Parallelism orthogonality. Large MoE training jobs com-pose several forms of sharding, pipeline scheduling, and memory optimization; an expert-placement mechanism that changed tensor shapes, communicator membership, parame-ter objects, or schedule dependencies inside a training step would require rebuilding those mechanisms and could inval-idate their correctness assumptions. We therefore require a simple step-boundary contract. After state materialization, 
+
+𝜋 𝑙 remains fixed for the complete forward–backward inter-val, physical slot tensors and their gbuf ranges retain their addresses and shapes, and no expert state migrates or is replicated until the interval completes. At the operator layer, DeepEP receives remapped physical expert indices through the same dispatch/combine inter-face and communicator, as described above. Dense attention tensors and packed-sequence metadata are unchanged, so at-tention implementations such as FlashAttention [10] require no placement-specific modification. At the parallelism layer, the contract leaves the execution topology observed by ten-sor parallelism (TP), sequence parallelism (SP), and context parallelism (CP) unchanged. It likewise preserves the groups used by DP, EP, EDP, and pipeline parallelism (PP). At the scheduling layer, pipeline schedules, including one-forward-one-backward (1F1B) and interleaved 1F1B [23], see the same microbatch dependencies. At the memory and optimization layer, activation recomputation re-executes the same dis-patcher map; gradient accumulation writes to the same slot-resident gbuf views; and distributed optimizer sharding re-tains the same ownership ranges. Mixed-precision and low-precision execution, including expert-specific FP8/FP4 meta-data, is also compatible when that metadata is co-materialized with its expert state. These claims do not automatically cover mechanisms that change expert replication, ownership, or physical-rank-aware routing within a forward–backward interval; such mechanisms require a separate consistency protocol. Section 4.2 describes how the runtime schedules state materialization at the forward–backward boundary. 
+
+3.4 Stage-Aware Row and Shard Cost 
+
+Define normalized per-cell token statistics ¯𝑇 𝑟,𝑑 = 1
+
+𝐶 ∑︁ 𝑖 
+
+𝑡 𝑖 𝑥 𝑖,𝑟,𝑑 , ¯𝑄 𝑟,𝑑 =∑︁ 
+
+> 𝑖
+
+ 𝑡 𝑖 
+
+𝐶 
+
+2
+
+𝑥 𝑖,𝑟,𝑑 . (11) Let A denote the attention-stage types in the target model. For each type 𝑠 ∈ A , nonnegative coefficients 𝛼 𝑠 and 𝛽 𝑠 
+
+capture its token-linear and token-pair work, respectively; they may also absorb the number of layers of that type or a kernel-level calibration factor. The projected attention cost of row 𝑟 on EDP shard 𝑔 is 
+
+𝐴 𝑟,𝑔 =∑︁  
+
+> 𝑠 ∈ A
+
+max  
+
+> 𝑑 ∈ D 𝑔
+
+ 𝛼 𝑠 ¯𝑇 𝑟,𝑑 + 𝛽 𝑠 ¯𝑄 𝑟,𝑑 
+
+ . (12) The two terms are combined within each DP cell before tak-ing the stage-local straggler, and costs from distinct stages are then accumulated. An operator whose measured cost is token-linear is the special case 𝛽 𝑠 = 0; an operator with token-pair work uses 𝛽 𝑠 > 0. Models with one or several attention types are therefore represented by the same ex-pression. The routed-token load on physical EP rank 𝑝 at layer 𝑙 is 
+
+𝑊 𝑟,𝑔,𝑙,𝑝 (𝜋, 𝑥 ) =∑︁  
+
+> 𝑑 ∈ D 𝑔
+
+∑︁ 𝑖 
+
+𝑥 𝑖,𝑟,𝑑 𝑞 𝑖,𝑙,𝑝 (𝜋 𝑙 ). (13) We accumulate the busiest physical rank independently at every MoE layer: 
+
+𝐸 𝑟,𝑔 = 1
+
+𝐶 ∑︁ 𝑙 ∈ L MoE 
+
+max  
+
+> 𝑝
+
+𝑊 𝑟,𝑔,𝑙,𝑝 (𝜋, 𝑥 ). (14) The joint projected row cost is 𝐽 𝑟,𝑔 = 𝐴 𝑟,𝑔 + 𝐸 𝑟,𝑔 .
+
+> 8Preprint. Work in progress.
+
+3.5 Lexicographic Packing Objective 
+
+Let 𝑈 𝑔 = Í𝑟 𝐽 𝑟,𝑔 be the projected optimizer-step work accu-mulated by EDP shard 𝑔 . At fixed 𝑅 ★ and 𝜋 , the exact planner score is Score (𝑥 ; 𝜋 ) = max  
+
+> 𝑔
+
+𝑈 𝑔 ,∑︁ 
+
+> 𝑔
+
+𝑈 𝑔 , max  
+
+> 𝑟,𝑔
+
+𝐽 𝑟,𝑔 
+
+!
+
+, (15) ordered lexicographically. The primary component controls the slowest EDP shard over the full optimizer step. The second breaks ties by total projected work, and the third breaks any remaining ties by the worst row-local tail. It does not independently constrain that tail when either preceding component differs. Conceptually, the full planner minimizes 
+
+(𝑅, Score ) lexicographically; operationally, it fixes 𝑅 ★ before evaluating Equation 15. 
+
+3.6 Guarantees and Scope 
+
+Randomized construction and every local proposal preserve Equations 6–8, the rectangular row count, and the fixed EDP topology. Population annealing is a heuristic for the fixed-
+
+𝑅 ★ layout problem and is not globally optimal. Its global incumbent starts from the best initial seed and is updated with every trajectory-best plan; final selection uses the exact lexicographic score, so the returned valid plan is not worse than that initial incumbent. The scalar energy used for an-nealing and resampling is only a search surrogate and does not replace the exact winner criterion. Reordering occurs only after all cross-sample statistics required by the learning rule have been materialized and attached to their sample records. Equation 6 then preserves both those records and the optimizer-step sample multiset. For any update objective that is invariant to the ordering and physical ownership of this preserved multiset, packing changes the execution layout but not the mathematical ob-jective. An algorithm with order-dependent state or statistics computed across samples during training must materialize or explicitly preserve those dependencies before planning. Section 4 describes diverse seeding and population annealing without altering the formulation above; Section 6 discusses the runtime effects outside this optimization model. 
+
+4 Joint Attention–Expert Packing 
+
+The packing module assigns the preserved optimizer-step sample multiset to a fixed rectangular execution schedule. It optimizes the joint attention–expert score from Section 3 while keeping expert placement, row count, capacity, and communicator topology invariant. 
+
+4.1 Implementation: Diverse Seeding and Population Annealing 
+
+The fixed-row assignment problem remains highly noncon-vex after expert placement and 𝑅 ★ are fixed. Our implemen-tation combines structurally diverse feasible seeds with pop-ulation annealing (Population-SA) [16] and changes only sample-to-cell assignments. 
+
+Why population annealing. Even after fixing 𝑅 ★ and 𝜋 , ex-act enumeration is impractical and a single FFD construction explores only one locally determined layout. Swap-based annealing has proved useful for routing-aware placement search [18]; we use its population form primarily because the 𝑃 pop fixed-temperature chains are independent and map directly onto host CPU workers. With sufficient workers, one temperature level is bounded by its slowest 𝐾 -step chain plus a short resampling barrier, rather than by the sum of all proposals. Constraint-preserving moves and incremen-tal rescoring keep each worker simple, while resampling redirects the parallel budget toward stronger basins. This design uses the substantial host-side parallelism exposed by distributed RL runtimes (Section 4.2); it remains a heuristic rather than an optimality claim. 
+
+4.1.1 Diverse Fixed-Row Seeding. We generate 𝑀 fixed-row candidates under the given token cap, rejecting empty cells and nonbijective sample assignments. Algorithm 2 uses three construction operators. Given choice width 𝑤 , Window Shuffle perturbs nonincreasing length order by repeatedly drawing from a prefix of at most 𝑤 remaining items. Ran-domizedBestFit ranks F𝑖 by decreasing token occupancy, then cell cardinality and index, and samples from the leading 
+
+𝑤 . EDPAwarePair orders completed cells by routed-token peak and maps them to empty (𝑟, 𝑑 ) slots by the insertion key (increase in the sum of layer-wise EDP-rank peaks, largest such peak), with rank-decaying top-𝑤 sampling. Only the last operator changes the row/DP association of a completed cell. Many candidates differ only by irrelevant permutations, such as sample order within a cell, row order, or exchange-able DP slots inside the same EDP shard. Canonicalize sorts sample identifiers within each cell, exchangeable cells within each D𝑔 , and rows. CanonicalMap keeps the lowest exact score for each resulting signature. QualityDiversity Select starts from the exact-score winner and then maxi-mizes min 𝑦 ∈ P 𝑑 (𝑥, 𝑦 ) − 𝜂𝛿 0 (𝑥 ), where 𝛿 0 is the normalized primary-score gap. The distance 𝑑 combines cell and row co-assignment with a deterministic Sliced-Wasserstein sketch of token-moment and per-layer EDP-load profiles [28]. Specifi-cally, for normalized row-feature matrix 𝐻 (𝑥 ) ∈ R𝑅 ★ ×𝐹 and fixed projections 𝑢 𝑘 , we cache 𝜙 𝑘 (𝑥 ) = sort (𝐻 (𝑥 )𝑢 𝑘 ) and 
+
+> 9
+
+Preprint. Work in progress. Minimum Row Calculation EDP-aware Population Annealing     
+
+> Capacity bound FFD bound Minimum rows
+> Trajectory-best only Monotonic, best-so-far
+> Diverse seeds
+> feasible candidates
+> FFD/EDP-aware pairing Dedup, quality-diversity
+> independent -step joint-SA chains
+> -step SA -step SA -step SA
+> Terminal States
+> Attention + Expert Cost Systematic Resampling
+> With Replacement
+> resampled members Repeat until
+> Global Best
+> : Terminal-only resampling |: Trajectory-best archive
+
+Figure 5: Fixed-row Population Annealing. Parallel fixed-temperature chains resample terminal states while retaining a non-regressing trajectory-best archive. 
+
+compare two plans by 𝑞 −1 Í𝑞 𝑘 =1 ∥𝜙 𝑘 (𝑥 ) − 𝜙 𝑘 (𝑦 )∥ 1/𝑅 ★. Sort-ing makes the sketch invariant to row permutations without cubic assignment matching; quality gates constrain early choices before later diversity-oriented ones. Thus, FFD es-tablishes fixed-row feasibility; the exact score and diversity rule only select the population exposed to annealing. 
+
+Algorithm 2: Diverse fixed-row population initialization Require: Samples S with (𝑡 𝑖 , 𝑞 𝑖,𝑙,𝑝 ); capacity 𝐶 ; target rows 𝑅 ★; 𝐷 DP slots; EDP groups { D 𝑔 }; fixed placement 𝜋 ; choice width 𝑤 ; budgets 𝑀 
+
+and 𝑃 pop 
+
+Ensure: 𝑃 pop feasible population members, using all selected canonical-distinct seeds before repetition  
+
+> 1:
+
+𝐾 ← 𝑅 ★𝐷 cells; 𝑥 length ← FixedRowFFD ( S , 𝐶, 𝐾 ) 
+
+> 2:
+
+𝑥 paired ←
+
+min Score {𝑥 length , EDPAwarePair (cells (𝑥 length ), 𝑅 ★, 𝐷, 𝜋 ) } ;
+
+C ← CanonicalMap ( { 𝑥 length , 𝑥 paired } )  
+
+> 3:
+
+for trial = 1, . . . , 𝑀 − 2 while BudgetAvailable() do  
+
+> 4:
+
+𝜎 ← WindowShuffle (argsort 𝑖 (− 𝑡 𝑖 ) )  
+
+> 5:
+
+𝐵 𝑘 ← { 𝜎 𝑘 }, 𝑘 = 1, . . . , 𝐾  
+
+> 6:
+
+for ℎ ← 𝐾 + 1 to | S | do 𝑖 ← 𝜎 ℎ 
+
+> 7:
+
+F𝑖 ← { 𝐵 : Í𝑗 ∈𝐵 𝑡 𝑗 + 𝑡 𝑖 ≤ 𝐶 }; if F𝑖 = ∅ then abort trial  
+
+> 8:
+
+𝐵 ← RandomizedBestFit ( F 𝑖 ); 𝐵 ← 𝐵 ∪ { 𝑖 } 
+
+> 9:
+
+𝑥 ← EDPAwarePair ( { 𝐵 𝑘 }𝐾 𝑘 =1, 𝑅 ★, 𝐷, 𝜋 ) 
+
+> 10:
+
+if 𝑥 ∉ X𝑅 ★ then abort trial  
+
+> 11:
+
+𝜅 ← Canonicalize (𝑥 ; { D 𝑔 } )  
+
+> 12:
+
+C [ 𝜅 ] ← min Score 
+
+  C [ 𝜅 ] ∪ { 𝑥 } 
+
+> 13:
+
+P0 ← QualityDiversitySelect ( C , 𝑃 pop ) 
+
+> 14:
+
+while | P 0 | < 𝑃 pop do append the next member of P0 cyclically  
+
+> 15:
+
+return P0
+
+4.1.2 Fixed-Temperature Population Transitions. Population-SA uses a geometric schedule 𝑇 0 > 𝑇 1 > · · · > 𝑇 𝑁 −1. At temperature 𝑇 𝑛 , every population member is sent to an in-dependent worker for 𝐾 steps of fixed-temperature joint simulated annealing [20]. Swap and relocation proposals are accepted with a Metropolis rule based on the scalar search energy 
+
+E ( 𝑥 ) = 𝑠 0 (𝑥 ) + 10 −6𝑠 1 (𝑥 ) + 10 −9𝑠 2 (𝑥 ), (16) where (𝑠 0, 𝑠 1, 𝑠 2) = Score (𝑥 ; 𝜋 ). The coefficients provide a scalar search surrogate for stochastic transitions; exact plan ranking still uses the tuple in Equation 15. GuidedProposal returns either a swap or a nonempty-preserving relocation. With probability 𝑝 guide = 0.8, it bi-ases the source toward a large 𝐽 𝑟,𝑔 and the target toward a small one, selecting the attention straggler in proportion to its current contribution; the remaining branch is random. Relocation uses a configurable probability 𝜌 . Incremental Score updates the two affected cells’ token sums and squared normalized lengths and the affected row–shards’ per-layer physical-rank loads. It then reconstructs the exact score from these deltas and unaffected cached terms, making it equiva-lent to full rescoring. For resampling, Normalize (E ( 𝑧 𝑗 )) denotes e𝐸 𝑗 = (E ( 𝑧 𝑗 )− 
+
+𝐸 min )/ max (| 𝐸 min |, 1). The cumulative weights and inverse-CDF assignments written explicitly in Algorithm 3 are sys-tematic resampling [7], rather than an additional opaque subroutine. Algorithm 3 gives the complete Population-SA control flow. In particular, a worker’s terminal state is used only for resampling, whereas its trajectory-best state is used only for updating the exact global incumbent. Each worker returns two states. Its terminal plan repre-sents the chain at the end of the current temperature and participates in population resampling. Its trajectory-best plan is compared against the global incumbent using the exact lexicographic score. Keeping these roles separate prevents a strong transient state from being lost without distorting the population dynamics. 
+
+10 Preprint. Work in progress.                                                                                                                                                                                                 
+
+> Algorithm 3: Fixed-row Population Annealing Require: Initial population P0; temperatures 𝑇 0>· · · >𝑇 𝑁 −1;𝐾 SA steps per level; fixed (𝑅 ★, 𝜋 ); capacity 𝐶 and EDP groups { D 𝑔 }
+> Ensure: A valid non-regressing fixed-row layout 𝑥 ★
+> 1: 𝑥 ★←argmin 𝑥 ∈P 0Score (𝑥 ;𝜋 )
+> 2: for 𝑛 ←0 to 𝑁 −1do
+> 3: parallel for each member 𝑥 𝑗 ∈ P 𝑛 do 𝑦 ←𝑥 𝑗 ;𝑏 𝑗 ←𝑥 𝑗 ;
+> 𝑠 ←Score (𝑦 ;𝜋 )
+> 4: for 𝑘 ←1 to 𝐾 do
+> 5: 𝑦 ′←GuidedProposal (𝑦 ;𝑠, 𝜋 )
+> 6: if 𝑦 ′∉X𝑅 ★then
+> 7: continue
+> 8: 𝑠 ′←IncrementalScore (𝑦 →𝑦 ′;𝑠, 𝜋 )
+> 9: Δ← ( E ( 𝑦 ′) − E ( 𝑦 ) )/ max ( | E ( 𝑦 ) | ,1)
+> 10: 𝑢 ∼𝑈 [0,1);if 𝑠 ′<𝑠 or 𝑢 <exp (− max (Δ,0)/ 𝑇 𝑛 )then
+> 11: 𝑦 ←𝑦 ′;𝑠 ←𝑠 ′;𝑏 𝑗 ←min Score (𝑏 𝑗 , 𝑦 )
+> 12: 𝑧 𝑗 ←𝑦
+> 13: 𝑥 ★←min Score
+>  {𝑥 ★} ∪ { 𝑏 𝑗 }𝑗
+> 
+> 14: if 𝑛 <𝑁 −1then
+> 15: ˜𝐸 𝑗 ←Normalize ( E ( 𝑧 𝑗 ) ) ; ˆ 𝑤 𝑗 ←exp [− ( 𝑇 −1
+> 𝑛 +1−𝑇 −1
+> 𝑛 )˜𝐸 𝑗 ]
+> 16: 𝑤 𝑗 ←ˆ𝑤 𝑗 /Íℎˆ𝑤 ℎ;𝐹 𝑗 ←Íℎ≤𝑗 𝑤 ℎ
+> 17: 𝑢 0∼𝑈 [0,1/𝑃 pop );𝑢 𝑚 ←𝑢 0+𝑚 /𝑃 pop
+> 18: P𝑛 +1[𝑚 ] ← 𝑧 min {𝑗 :𝐹 𝑗 ≥𝑢 𝑚 },𝑚 =0, . . . , 𝑃 pop −1
+> 19: Validate (𝑥 ★;𝑅 ★, 𝐶, { D 𝑔 }, 𝜋 );assert
+> Score (𝑥 ★;𝜋 ) ≤ min 𝑥 ∈P 0Score (𝑥 ;𝜋 )
+> 20: return 𝑥 ★
+
+4.1.3 Systematic Resampling, Incumbent Retention, and Par-allelism. At the boundary between 𝑇 𝑛 and 𝑇 𝑛 +1, terminal energies determine Boltzmann weights for the temperature change. Systematic resampling draws exactly 𝑃 pop members from their cumulative distribution. Low energy states may receive multiple descendants, while nonzero-temperature sampling retains exploration. The resampled terminal popu-lation initializes the next level. The global incumbent is outside this resampling path. It is initialized by the best feasible seed and updated by every trajectory-best returned at every level. After the final level, RoutePack validates sample coverage, capacity, nonempty cells, row count, and topology, and asserts that the selected exact score is no worse than the best initial seed. This is a non-regression guarantee, not a claim of global optimality. The 𝑃 pop chains within one temperature level are inde-pendent and can occupy separate CPU workers. A synchro-nization barrier is required only after all terminal states at a level are available for resampling. The process pool can re-main alive across optimizer-step batches, amortizing worker startup. Accordingly, the critical planning time is approxi-mately the sum of the slowest worker at each temperature level plus resampling overhead, rather than the sum of all proposals. 
+
+4.2 Complexity and Framework Parallelism 
+
+Host-side execution substrate. Distributed RL runtimes of-ten provision substantial host CPU capacity for orchestration, reward processing, data pipelines, state transfer or offload, and checkpointing. AReaL, for example, exposes separate per-GPU CPU budgets for inference and training actors; verl executes reward evaluation in CPU Ray workers; and NeMo RL supports host offload and background checkpoint writ-ers [6, 24, 32]. These mechanisms provide a practical host-side execution substrate for parallel planning. RoutePack can map a bounded, persistent worker pool onto this sub-strate, exposing CPU parallelism to overlap planning with the surrounding RL workflow. The available host parallelism determines the worker concurrency assigned to the planner without affecting plan correctness. 
+
+Complexity relative to FFD. Let 𝑛 = |S| , 𝐵 = 𝑅 ★𝐷 , and let 𝐿 ,
+
+𝐸 , 𝑃 , and 𝐺 denote the numbers of MoE layers, logical experts per layer, physical EP ranks, and EDP shards. Let 𝐴 route be the number of replayed token–expert assignments. Routing aggregation followed by the current array-based LPT costs 
+
+𝑂 (𝐴 route + 𝐿 (𝐸 log 𝐸 + 𝐸𝑃 )) . Packing thereafter consumes per-sample physical-rank loads, so its inner search depends on 𝑃 , not directly on 𝐸 . With 𝑊 CPU workers and fixed population, temperature, and proposal budgets (𝑃 pop , 𝑁 𝑇 , 𝐾 ),the Population-SA wall-time bound is 
+
+𝑂 
+
+
+
+𝑁 𝑇 
+
+ 𝑃 pop 
+
+𝑊 
+
+
+
+𝐾 (𝑅 ★𝐺𝐿𝑃 + 𝑅 ★𝐷 )
+
+
+
+, (17) where the factor in parentheses is a conservative accepted-move rescore. Seed construction is polynomial rather than combinatorial. Randomized best-fit and cell pairing cost 
+
+𝑂 (𝑛𝐵 log 𝐵 ) and 𝑂 (𝐵 2𝐺𝐿𝑃 ), respectively. For 𝑀 candidates and 𝑞 fixed projections, deterministic Sliced-Wasserstein en-coding costs 𝑂 (𝑀𝑞𝑅 ★(𝐹 +log 𝑅 ★)) ; each cached pairwise pro-file comparison costs 𝑂 (𝑞𝑅 ★) instead of cubic row matching. Including the 𝑂 (𝑛 ) co-assignment term, selecting 𝑃 pop mem-bers has parallel wall bound 𝑂 (Í𝑃 pop −2 
+
+> 𝑗 =0
+
+⌈( 𝑀 − 1 − 𝑗 )/ 𝑊 ⌉ ( 𝑛 +
+
+𝑞𝑅 ★)) . A larger token cap does not itself increase these bounds and usually reduces 𝑅 ★; a larger batch at fixed cap may increase it. Thus, there is no factorial or exponential scaling. After replacing cubic row matching with cached sketches, the highest row-count order remains the 𝐵 2 =
+
+(𝑅 ★𝐷 )2 cell-pairing term already present in fixed-row ini-tialization. With fixed search budgets and 𝑊 ≥ 𝑃 pop , each temperature level executes one worker wave, so annealing adds bounded work that is linear in 𝑅 ★ per proposal. Its par-allel wall-time can therefore remain in the same polynomial envelope as fixed-row FFD and pairing rather than intro-ducing a higher-order dependence on the row count. More explicitly, when 𝑊 ≥ max {𝑀, 𝑃 pop } saturates candidate gen-eration, candidate comparison, and population transitions, 
+
+> 11
+
+Preprint. Work in progress. CPU CPU control / planning GPU GPU execution Current dependency Versioned state Placement-aware dependency         
+
+> Generation Batch sealing CPU
+> Timeline Training preparation GPU
+> RoutePack planning CPU Data admission Megatron training GPU CPU
+> Rollout Controller
+> Interruptible rollout workers Asynchronous streaming
+> GPU SGLang rollout
+> Routing capture
+> GPU SGLang rollout
+> Routing capture
+> GPU SGLang rollout
+> Routing capture
+> Reward Service Replay Buffer
+> trajectory + reward
+> Routing replay
+> lengths + layer routing
+> Step-batch gate
+> Reward
+> Sealed batch
+> Optional ref log-p AState
+> versioned state
+> State load
+> expert + master + Adam
+> Layer-wise placement Fixed-row feasibility
+> EDP-aware joint packing Data dispatch
+> Training admission Megatron worker 0
+> forward / backward
+> Megatron worker
+> forward / backward
+> Co-located GPU pool: rollout and training time-share the same devices
+> Trajectory  Routing
+> Prompt
+> GPU
+> Update policy version
+> AState
+> load hf model to SGLang Export huggingface checkpoint Save latest state
+
+Figure 6: Example integration of RoutePack into AReaL. Routing replay drives layer-wise placement and EDP-aware fixed-row packing, while versioned state transfer materializes the corresponding actor state before training admission. 
+
+the total host-side wall complexity is 
+
+𝑇 sat CPU = 𝑂  𝐴 route + 𝐿 (𝐸 log 𝐸 + 𝐸𝑃 ) + 𝑛𝐵 log 𝐵 + 𝐵 2𝐺𝐿𝑃 
+
++ 𝑞𝑅 ★(𝐹 + log 𝑅 ★) + 𝑃 pop (𝑛 + 𝑞𝑅 ★)+ 𝑁 𝑇 𝐾 (𝑅 ★𝐺𝐿𝑃 + 𝑅 ★𝐷 ).
+
+(18) The remaining 𝑃 pop quality–diversity rounds and 𝑁 𝑇 tem-perature levels are sequential algorithmic dependencies. For fixed search budgets and model topology, all additional terms have no higher row-count order than the fixed-row FFD and pairing construction under the saturated worker model. 
+
+Framework parallel schedule. Figure 6 illustrates one real-ization in AReaL [14], with model state transferred through a versioned service such as AState [3]. The same overlap pattern applies when a framework provides routing cap-ture, CPU planning, versioned state transfer, and a training-admission boundary. At the framework level, routing replay first enables LPT to produce 𝜋 . The resulting mapping then enables two indepen-dent branches: CPU packing and placement-aware model-state preparation. Let 𝑇 aux denote any pre-existing runtime work or resource-safety boundary that gates the latter, let 
+
+𝑇 pack = 𝑇 pair + 𝑇 QD + 𝑇 SA , and let 𝑇 actor denote placement-aware actor-state materialization and application. The mod-eled makespan from routing readiness is 
+
+𝑇 target = max 𝑇 LPT + 𝑇 pack , max (𝑇 LPT ,𝑇 aux ) + 𝑇 actor + 𝑇 admit .
+
+(19) 
+
+𝑇 admit follows the branch join and therefore appears outside the maximum. In this DAG, CPU packing introduces no additional admission straggler if 
+
+𝑇 LPT + 𝑇 pack ≤ max (𝑇 LPT ,𝑇 aux ) + 𝑇 actor . (20) When the state branch has independent resources, 𝑇 aux van-ishes from this expression. The DAG captures framework-level parallel execution without prescribing a particular state backend or execution sequence; Equation 20 gives the suffi-cient condition under which CPU packing does not extend the training-admission makespan. 
+
+5 Evaluation 
+
+This section evaluates RoutePack on two MoE RL train-ing workloads: Ling-3.0-Tiny, a 7.9B-parameter MoE with 1.3B activated parameters per token, and Ling-3.0-Flash, a 124B-parameter MoE with 5.1B activated parameters per token [2, 4, 17]. We first quantify training throughput and isolate the contributions of layer-wise expert placement and routing-aware data packing. We then report online expert-load and attention-cost metrics to characterize the corre-sponding changes in aggregate and row-local load imbal-ance. 
+
+5.1 Setup and Methodology 
+
+Table 2 summarizes the two testbeds. Both experiments train on GSM8K [9] with GRPO algorithm [29]. Each optimizer-step window contains 64 prompt groups and eight rollouts per prompt, for 512 generated sequences, and uses an 8,192-token microbatch capacity. Both checkpoints execute KDA 
+
+12 Preprint. Work in progress. 
+
+Table 2: Evaluation configurations. 
+
+Configuration Tiny Flash Dataset GSM8K GSM8K Model Ling-3.0-Tiny Ling-3.0-Flash Total parameters 7.9B 124B Activated parameters 1.3B 5.1B Attention stages KDA + MLA KDA + MLA GRPO groups × rollouts 64 × 8 64 × 8Samples per step 512 512 Microbatch token cap 8,192 8,192 Valid training steps 49 96 
+
+and MLA stages, while exercising different expert-load distri-butions and projected EDP layouts: the reported Tiny pack-ing traces contain one projected EDP shard, whereas the Flash traces contain two. Both configurations use DeepEP for MoE dispatch and combine [38]. We compare three configurations. Baseline uses iden-tity expert placement and length-oriented packing. Reorder 
+
+applies only the layer-wise LPT expert reordering from Sec-tion 3 and retains the original packing. RoutePack adds fixed-row, routing-aware packing to the same reordering. The first increment isolates expert placement; the second isolates data placement after expert placement is fixed. All packing comparisons preserve the execution-row count and sample multiset. We exclude only records invalidated by job restarts and apply no additional outlier filtering. We report the mean with sample standard deviation. Because the configurations are separate runs, significance is assessed with a two-sided Mann–Whitney 𝑈 test. We apply a Bonferroni correction to the three within-model comparisons. 
+
+5.2 Trainer-Measured Throughput 
+
+Table 3 reports trainer-measured token throughput. Because all three variants for a model execute the same optimizer-step samples and preserve the execution-row count, their to-kens/s values provide a direct within-model comparison. On Tiny, expert reordering improves mean throughput by 3.80%. RoutePack adds 4.86% over reordering alone and reaches an 8.85% improvement over Baseline. Flash shows the same ordering with a larger reordering gain: 10.50% from reordering, another 3.98% from packing, and 14.89% over Baseline. RoutePack also raises the 10th-percentile throughput from 39,651 to 43,891 tokens/s on Tiny and from 61,588 to 75,033 tokens/s on Flash. Every pairwise comparison remains significant after correction; the largest adjusted 𝑝 -value is 0.0110. 
+
+Table 3: Trainer-measured throughput × 1000 tokens/s (mean ± sample standard deviation). T/A params re-ports total/activated parameters.                    
+
+> Model T/A params Baseline Reorder RoutePack Tiny 7.9B/1.3B 42 .86 ±3.05 44 .49 ±1.92 46 .65 ±2.12 Flash 124B/5.1B 68 .50 ±5.02 75 .69 ±4.59 78 .70 ±3.82
+
+5.3 Load-Balance Decomposition 
+
+We next connect the end-to-end gains to the planner’s inter-mediate metrics. For MoE layer 𝑙 , let 𝐺 𝑙,𝑝 be the full optimizer-window load on physical EP rank 𝑝 . Its mean across ranks is ¯𝐺 𝑙 = 𝑃 −1∑︁ 
+
+> 𝑝
+
+𝐺 𝑙,𝑝 . (21) The expert-rebalancer trace reports CV global = 1
+
+|L MoE |∑︁ 𝑙 ∈ L MoE √︃ 
+
+𝑃 −1 Í𝑝 (𝐺 𝑙,𝑝 − ¯𝐺 𝑙 )2
+
+¯𝐺 𝑙 
+
+. (22) This dimensionless coefficient of variation is zero under per-fect aggregate EP-rank balance and increases with relative rank-load dispersion. It measures optimizer-window skew that packing cannot change, rather than row-local stragglers. We compute this quantity for every valid optimizer step and summarize it across steps in Figure 7. LPT reduces mean global EP-rank CV by more than 99% on both models. Flash’s residual is below the four-decimal logging resolution, while Tiny retains a small but visible residual. Tiny Flash  
+
+> 0.0 0.2 0.4
+> Global EP-rank CV  Before reordering
+> Tiny Flash
+> 0.000 0.001 0.002 0.003 < 10 −4
+> After reordering
+
+Figure 7: Global EP-rank CV before and after ex-pert reordering. Measured bars show means and one-standard-deviation whiskers; Flash’s post-reordering marker denotes an upper bound imposed by logging resolution. 
+
+Aggregate balance does not imply balanced execution rows. To quantify the remaining row-local skew, let 𝑊 𝑟,𝑔,𝑙,𝑝 
+
+be the routed-token load at row 𝑟 , projected EDP shard 
+
+𝑔 , MoE layer 𝑙 , and physical EP rank 𝑝 . We report the EP peak sum 𝑆 EP = Í𝑟,𝑙 max 𝑔,𝑝 𝑊 𝑟,𝑔,𝑙,𝑝 and the tail peak 𝑇 EP =
+
+> 13 Preprint. Work in progress.
+
+max 𝑟,𝑔,𝑙,𝑝 𝑊 𝑟,𝑔,𝑙,𝑝 . We also report EP balance efficiency ,
+
+𝜂 EP =
+
+Í𝑟,𝑙 max 𝑔 1
+
+> 𝑃
+
+Í𝑝 𝑊 𝑟,𝑔,𝑙,𝑝 
+
+Í𝑟,𝑙 max 𝑔,𝑝 𝑊 𝑟,𝑔,𝑙,𝑝 
+
+, (23) which compares ideal evenly divided EP work with the real-ized peak work. A value of one denotes perfect row-local EP balance. This is a load-balance proxy, not hardware utiliza-tion or end-to-end throughput; it excludes kernel efficiency, communication, and dense computation. Table 4 compares length-only FFD with guided packing under the same expert placement and row count. Across both models, packing reduces accumulated EP peaks by about 3%, the worst row/layer peak by about 11%, and the joint bottleneck by 1–2%. The Attention column reports Í𝑟,𝑔 𝐴 𝑟,𝑔 ,whereas Joint reports the primary objective max 𝑔 
+
+Í𝑟 𝐽 𝑟,𝑔 . The stage-aware attention proxy increases by 0.09% on Tiny and 0.77% on Flash, while the joint proxy decreases by 1.53% and 1.35%, respectively. Thus, guided packing does not improve every component independently: the joint objective accepts a small increase in projected attention work in exchange for larger reductions in EP peaks and the combined bottleneck. 
+
+Table 4: Online load metrics from length-only FFD to guided packing. T/A params reports total/activated pa-rameters.                
+
+> Model T/A params EP peak sum Tail peak EP balance eff. Attention Joint Tiny 7.9B/1.3B −3.13% −11 .04% 0 .891 →0.920 +0.09% −1.53%
+> Flash 124B/5.1B −3.24% −11 .62% 0 .844 →0.869 +0.77% −1.35%
+
+6 Discussion and Limitations 6.1 Interpreting the Two Controls 
+
+The mechanism measurements align with the decomposition established in Section 2.3. Layer-wise placement removes al-most all optimizer-window EP-rank dispersion, while guided packing subsequently reduces row-local peaks under the fixed map. The second gain is therefore not another estimate of aggregate placement quality: it captures when correlated sample demands are exposed together within synchronized rows and projected EDP shards. The attention results also clarify the role of the joint objec-tive. Guided packing accepts a small increase in the attention component when that exchange produces a larger reduc-tion in expert tails and the combined bottleneck. Demanding component-wise improvement would reject such useful lay-outs. Because all comparisons preserve both the row count and sample multiset, these gains come from coordinating ex-isting execution units rather than introducing more, emptier microbatches. 
+
+6.2 Applicability and Training Semantics 
+
+Planning requires a sealed window: sample lengths, learning metadata, and per-layer routing demand must be available before training admission. RoutePack is not tied to a par-ticular policy objective. Any learning rule whose required statistics across samples have already been materialized, and whose update is invariant to the ordering and physical own-ership of the preserved sample multiset, admits the same layout transformation. Routing accuracy and training correctness are separate contracts. Replayed counts are exact when training preserves the recorded logical routing. If an asynchronous or off-policy runtime reroutes with a different model version, the plan-ner must refresh the counts or treat them explicitly as pre-dictions. This changes plan quality, whereas violating the sample bijection would change the learning problem itself. Applicability additionally depends on the step-boundary contract in Section 3: mechanisms whose ownership and schedule remain fixed through forward and backward can consume the committed layout unchanged. Dynamic expert replication or ownership changes within that interval require a separate state-consistency protocol and are outside the present contract. 
+
+6.3 Planning Cost and Deployment Trade-offs 
+
+Planning quality and latency are controlled by explicit seed, population, and local-search budgets. These are deployment knobs rather than changes to the formulation: reducing them preserves feasibility and the use of the exact score for final selection, but may weaken solution quality. Section 4.2 char-acterizes their parallel structure and asymptotic cost. The likely benefit is workload dependent. Routing diver-sity and heterogeneous sequence lengths create comple-mentary samples that packing can exploit; uniform routing, nearly equal lengths, or very small planning windows leave little room beyond FFD. In those regimes, a runtime may re-duce the search budget or bypass refinement while retaining the same feasible construction. The objective intentionally prioritizes compute tails rather than network locality. RoutePack can retain an optimized transport such as DeepEP [38], but it neither replicates ex-perts nor explicitly minimizes all-to-all bytes. On deploy-ments where topology or communication dominates, the lexicographic score can be extended with a topology-aware term, or the result can be composed with a communication-oriented expert-placement scheme. Such an extension must retain the EDP scope and fixed-row feasibility constraints; otherwise it may improve a proxy that does not correspond to an executed collective or may trade balance for additional rows. 
+
+> 14 Preprint. Work in progress.
+
+6.4 Limitations and Future Work 
+
+The current evaluation covers two Ling-3.0-family check-points, GSM8K, and one 64 × 8 GRPO configuration. These experiments do not establish scaling across datasets, larger EDP shards, multiple nodes, or nontrivial PP and CP degrees. Extending the study beyond mathematics to coding, STEM, instruction-following, and mixed-domain workloads would reveal whether domain-dependent routing diversity ampli-fies optimizer-window EP skew or microbatch-level expert stragglers, and whether RoutePack’s gains change accord-ingly. Longer runs should also compare optimization and model-quality trajectories. Because the exact checkpoints were not public at measurement time, releasing equivalent configurations and routing traces would further improve reproducibility. Section 4.2 derives the target parallel schedule and its no-new-packing-straggler condition, but the current imple-mentation does not yet realize that schedule or establish zero overhead. Planner execution, process and IPC costs, host-resource contention, state transfer, and synchronization may all contribute exposed latency. End-to-end instrumentation from routing readiness through training admission is re-quired to quantify these terms and test the derived condition under actual resource sharing. The planner optimizes a compute proxy for attention and MoE expert work, which captures only part of training wall time. At the operator level, it abstracts each attention stage by token-linear and token-pair terms and each MoE layer by the aggregate routed-token load of its busiest physical EP rank. It therefore does not model secondary effects such as the number and shape of packed sequences within an attention kernel, the distribution of a fixed rank load among its local experts, the number of active experts, grouped-GEMM tile and occupancy effects, or nonlinear behavior across operator sizes. A broader kernel microbenchmark suite could fit shape-aware latency surfaces for these terms and determine when they materially improve planning decisions. Future work should also evaluate communication-heavy deployments: the current objective does not model all-to-all topology or complete pipeline makespan, and may require a calibrated topology-aware cost term when communication rather than computation determines the straggler. 
+
+7 Conclusion 
+
+We presented RoutePack, which uses RL routing replay to jointly control state-consistent, layer-wise expert rerouting and whole-sample data packing. Expert rerouting first lowers the optimizer-window physical-rank bound that no sample permutation can remove. Under that fixed map, routing-aware packing jointly optimizes linear–quadratic attention work and per-layer EP-rank tails within each projected EDP shard. It preserves a capacity-efficient row count, exact sam-ple coverage, and the deployed topology. Our implementation combines layer-wise LPT and state-consistent materialization with diverse fixed-row seeding and parallel population annealing. It changes neither logical top-𝑘 routing nor the forward–backward graph and requires no microbatch-level expert replication. Its layer, seed, and population parallelism maps planning onto host CPUs; the framework analysis gives a sufficient condition for CPU pack-ing not to extend training admission. Across Ling-3.0-Tiny and Ling-3.0-Flash, the coordinated controls improve trainer-measured token throughput by 8.85% and 14.89% over the baseline. Online traces show lower aggregate CV, accumulated EP peaks, worst row-local peaks, and joint attention–expert cost. In particular, packing trades a small increase in the attention component for a larger expert-tail reduction, consistent with the joint-objective ex-planation rather than independent improvement of every component. These results position routing replay as both an expert-side and a data-placement signal, and motivate coordinating model state with training-data layout in sparse RL systems. 
+
+References                               
+
+> [1] Joshua Ainslie, James Lee-Thorp, Michiel de Jong, Yury Zemlyanskiy, Federico Lebrón, and Sumit Sanghai. 2023. GQA: Training General-ized Multi-Query Transformer Models from Multi-Head Checkpoints.
+> arXiv preprint arXiv:2305.13245 (2023). [2] Ant Group. 2026. Ant Group Unveils Ling-3.0-Flash Delivering Top-Tier Performance at a Fraction of the Parameter Scale. Press release. Accessed: 2026-08-11. https://www.businesswire.com/news/home/ 20260726584441/en/ [3] Ant Ling. 2025. AState: AHigh-Performance State Data Management System for Reinforcement Learning. Medium. https://ant-ling.medium.com/astate-a-high-performance-state-data-management-system-for-rl-dd1a8f04b8c4 [4] Ant Ling. 2026. Ling Model Documentation. Official model documen-tation. Accessed: 2026-08-11. https://developer.ant-ling.com/en/docs/ models/ling/ [5] AReaL Team. 2026. AReaL Data Packing Implementation. https: //github.com/areal-project/AReaL. Accessed: 2026-07-30. [6] AReaL Team. 2026. Cluster Resource Configuration in AReaL. https:// github.com/inclusionAI/AReaL/blob/main/docs/cli_reference.md. Ac-cessed: 2026-08-10. [7] James Carpenter, Peter Clifford, and Paul Fearnhead. 1999. An Im-proved Particle Filter for Non-linear Problems. IEE Proceedings—Radar, Sonar and Navigation 146, 1 (1999), 2–7. doi:10.1049/ip-rsn:19990255 [8] Yutian Chen, Cong Li, Yucheng Wang, and Ming Wei. 2026. MoonEP: A Perfectly Balanced Expert Parallelism Library via Dynamic Redundant Experts. https://github.com/MoonshotAI/MoonEP. [9] Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. 2021. Training Verifiers to Solve Math Word Problems. arXiv preprint arXiv:2110.14168 (2021). [10] Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. 2022. FlashAttention: Fast and Memory-Efficient Exact Attention with 15
+
+Preprint. Work in progress. 
+
+IO-Awareness. In Advances in Neural Information Processing Systems .[11] DeepSeek-AI. 2024. DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model. arXiv preprint arXiv:2405.04434 
+
+(2024). [12] DeepSeek-AI. 2024. DeepSeek-V3 Technical Report. arXiv preprint arXiv:2412.19437 (2024). [13] DeepSeek-AI. 2026. DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence. arXiv preprint arXiv:2606.19348 (2026). [14] Wei Fu, Jiaxuan Gao, Xujie Shen, Chen Zhu, Zhiyu Mei, Chuyi He, Shusheng Xu, Guo Wei, Jun Mei, Jiashu Wang, Tongkai Yang, Binhang Yuan, and Yi Wu. 2025. AReaL: A Large-Scale Asynchronous Rein-forcement Learning System for Language Reasoning. arXiv preprint arXiv:2505.24298 (2025). [15] Ronald L. Graham. 1969. Bounds on Multiprocessing Timing Anom-alies. SIAM J. Appl. Math. 17, 2 (1969), 416–429. doi:10.1137/0117039 [16] Koji Hukushima and Yukito Iba. 2003. Population Annealing and Its Application to a Spin Glass. In AIP Conference Proceedings , Vol. 690. AIP Publishing, Melville, NY, 200–206. doi:10.1063/1.1632130 [17] InclusionAI. 2026. Ling-3.0-Tiny. Official model card. Accessed: 2026-08-12. https://huggingface.co/inclusionAI/Ling-3.0-tiny [18] Chao Jin, Xinming Wei, Yinmin Zhong, Chengxu Yang, Bingyang Wu, Ruidong Zhu, Zili Zhang, Yuliang Liu, and Xin Jin. 2026. Re-Libra: Routing-Replay-Guided Load Balancing for MoE Training in Reinforcement Learning. arXiv preprint arXiv:2605.08639 (2026). [19] Kimi Team. 2025. Kimi Linear: An Expressive, Efficient Attention Architecture. arXiv preprint arXiv:2510.26692 (2025). [20] Scott Kirkpatrick, C. Daniel Gelatt, and Mario P. Vecchi. 1983. Opti-mization by Simulated Annealing. Science 220, 4598 (1983), 671–680. doi:10.1126/science.220.4598.671 [21] Yan Li, Zhenyu Zhang, Zhengang Wang, Pengfei Chen, and Pengfei Zheng. 2025. Semantic Parallelism: Redefining Efficient MoE Infer-ence via Model–Data Co-Scheduling. arXiv preprint arXiv:2503.04398 
+
+(2025). [22] Wenhan Ma, Hailin Zhang, Liang Zhao, Yifan Song, Yudong Wang, Zhifang Sui, and Fuli Luo. 2025. Stabilizing MoE Reinforcement Learning by Aligning Training and Inference Routers. arXiv preprint arXiv:2510.11370 (2025). [23] Deepak Narayanan, Mohammad Shoeybi, Jared Casper, Patrick LeGres-ley, Mostofa Patwary, Vijay Anand Korthikanti, Dmitri Vainbrand, Prethvi Kashinkunti, Julie Bernauer, Bryan Catanzaro, Amar Phan-ishayee, and Matei Zaharia. 2021. Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM. In Proceed-ings of the International Conference for High Performance Comput-ing, Networking, Storage and Analysis . ACM, New York, NY, 1–15. doi:10.1145/3458817.3476209 [24] NVIDIA. 2026. Host Offload and Asynchronous Checkpointing in NeMo RL. https://docs.nvidia.com/nemo/rl/nightly/apidocs/nemo_rl/ nemo_rl.models.policy.workers.megatron_policy_worker.html. Ac-cessed: 2026-08-10. [25] NVIDIA. 2026. Sequence Packing and Dynamic Batching in NeMo RL. https://docs.nvidia.com/nemo/rl/latest/design-docs/sequence-packing-and-dynamic-batching.html. Accessed: 2026-07-30. [26] OpenRLHF Team. 2026. OpenRLHF: Sample Packing and Dynamic Batching. https://github.com/OpenRLHF/OpenRLHF. Accessed: 2026-07-30. [27] Qwen Team. 2025. Qwen3-Next: Towards Ultimate Training and Inference Efficiency. Qwen Blog. Accessed: 2026-08-10. https://qwen. ai/blog?id=e34c4305036ce60d55a0791b170337c2b70ae51d [28] Julien Rabin, Gabriel Peyré, Julie Delon, and Marc Bernot. 2011. Wasserstein Barycenter and Its Application to Texture Mixing. In Scale Space and Variational Methods in Computer Vision . Springer, Berlin, Heidelberg, 435–446. doi:10.1007/978-3-642-24785-9_37 [29] Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu, Junxiao Song, Xiao Bi, Haowei Zhang, Mingchuan Zhang, Y. K. Li, Y. Wu, and Daya Guo. 2024. DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models. arXiv preprint arXiv:2402.03300 (2024). [30] Yifan Sun, Zhexiang Zhang, Jiantong Jiang, Gholamreza Haffari, Minxian Xu, Feng Liu, Rajkumar Buyya, and Adel N. Toosi. 2026. Coordinated Scheduling for MoE LLM Serving. arXiv preprint arXiv:2606.15177 (2026). [31] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin. 2017. Attention Is All You Need. In Advances in Neural Information Processing Systems .[32] verl Team. 2026. CPU Reward Execution in verl. https://verl. readthedocs.io/en/v0.5.x/_modules/verl/trainer/ppo/reward.html. Ac-cessed: 2026-08-10. [33] verl Team. 2026. Sequence-Length Balancing in verl. https://verl. readthedocs.io/en/latest/_modules/verl/utils/seqlen_balancing.html. Accessed: 2026-07-30. [34] Yan Wang, Xiulong Yuan, Kaiming Yang, Jiaxuan Peng, Pengju Lu, Mingzhen Li, Zhipeng Zhang, Chang Si, Zhixiang Ruan, et al. 2026. Li-bra: Taming Attention Workload Skew in Long-Context LLM Training with Bounded Sequence Pool. arXiv preprint arXiv:2607.23250 (2026). [35] Xinming Wei, Chao Jin, Tuo Dai, Yinmin Zhong, Shan Yu, Chengxu Yang, Bingyang Wu, Zili Zhang, Jing Mai, Qianchao Zhu, Zhouyang Li, Yuliang Liu, and Guojie Luo. 2026. UltraEP: Unleash MoE Training and Inference on Rack-Scale Nodes with Near-Optimal Load Balancing. 
+
+arXiv preprint arXiv:2606.04101 (2026). [36] Zhenda Xie, Yixuan Wei, Huanqi Cao, Chenggang Zhao, Chengqi Deng, Jiashi Li, Damai Dai, Huazuo Gao, Jiang Chang, Liang Zhao, et al. 2025. mHC: Manifold-Constrained Hyper-Connections. arXiv preprint arXiv:2512.24880 (2025). [37] Chenqi Zhao, Wenfei Wu, Linhai Song, Yuchen Xu, and Yitao Yuan. 2025. FineMoE: Fine-Grained Load Balancing for Mixture-of-Experts with Token Scheduling. arXiv preprint arXiv:2511.16947 (2025). [38] Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. 2025. DeepEP: An Efficient Expert-Parallel Communication Library. https://github.com/ deepseek-ai/DeepEP. [39] Yuming Zhou, Haoyang Li, Sheng Lin, Yanfeng Zhao, Tong Zhao, Xupeng Miao, Jie Jiang, Fangcheng Fu, and Bin Cui. 2026. Harnessing Routing Foresight for Micro-step-level MoE Load Balancing in RL Post-training. arXiv preprint arXiv:2606.11867 (2026). [40] Zilin Zhu, Chengxing Xie, Xin Lv, and slime Contributors. 2026. slime: Data Packing and Dynamic Batching. https://github.com/THUDM/ slime. Accessed: 2026-08-12. 16
