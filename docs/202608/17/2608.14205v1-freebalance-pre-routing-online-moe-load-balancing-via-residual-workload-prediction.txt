@@ -1,0 +1,247 @@
+Title: FreeBalance: Pre-Routing Online Moe Load Balancing via Residual Workload Prediction
+
+URL Source: https://arxiv.org/pdf/2608.14205v1
+
+Published Time: Mon, 17 Aug 2026 00:43:44 GMT
+
+Number of Pages: 8
+
+Markdown Content:
+# FreeBalance: Pre-Routing Online MoE Load Balancing via Residual Workload Prediction 
+
+# Pengfei Chen 1,2 , Yize Wu 1,2 , Shouxu Kuang 1,2 , Ke Gao 1,2 , Ling Li 1,2 
+
+> 1
+
+Institute of Software, Chinese Academy of Sciences, Beijing, China 
+
+> 2
+
+University of Chinese Academy of Sciences, Beijing, China 
+
+Abstract 
+
+Load imbalance poses a major bottleneck to the efficiency of expert parallelism in distributed inference of Mixture-of-Experts (MoE) models. The most heavily loaded rank stalls global execution due to skewed routing distributions, directly increasing latency. While offline expert placement can alle-viate persistent imbalance, practical multi-task serving work-loads exhibit layer- and batch-dependent routing dynamics, making online load balancing indispensable. Existing ap-proaches rely on routing statistics collected after each MoE router, requiring expert weight load or migration to begin only after routing decisions are available, consequently plac-ing migration overhead on the inference critical path. In this work, we observe that online balancing can instead be largely overlapped with computation before target routing (e.g., at-tention), if routing distributions can be predicted accurately in advance. Therefore, we propose FreeBalance, a lossless online load-balancing framework that overlaps expert migra-tion with preceding computation stages via residual work-load prediction. FreeBalance leverages cross-layer similari-ties in hidden representations within the residual network to build a lightweight workload predictor. This enables proac-tive expert migration planning before routing decisions are available, creating substantial overlap between weight trans-fer and computation-heavy pre-routing stages. Furthermore, a cost model constrains the number of swaps to fully hide the synchronization overhead within the available window. Ex-periments across models and datasets show that FreeBalance reduces the max-to-mean rank load ratio by 32.8% and end-to-end prefill latency by 13.1%. Specifically, our method hides balancing overhead of an average of 5.1 experts per layer, which would otherwise account for 8.5% of the critical-path latency. 
+
+# 1 Introduction 
+
+Mixture-of-Experts (MoE) architecture has become a dom-inant design choice for modern large language models (LLMs). It dramatically increases parameter capacity with-out proportionally increasing each-token computational cost (DeepSeek-AI 2024a,b). Specifically, each MoE layer ac-tivates only a small subset of experts for each input to-ken through a lightweight routing mechanism, which effec-tively decouples performance capacity from inference la-tency (Shazeer et al. 2017). In distributed MoE inference, expert parallelism (EP) is commonly adopted for expert-stage acceleration. Experts of each MoE layer are sharded across multiple devices, allowing MoE computation to be executed in parallel. When tokens are routed to experts residing on different devices, the corre-sponding activation tensors are first dispatched to the corre-sponding devices via an all-to-all communication, then the results are combined after expert computation with a second all-to-all(Lepikhin et al. 2021; Rajbhandari et al. 2022). The effectiveness of EP is largely limited by load imbal-ance, which arises from uneven routing distribution across ranks. Despite the auxiliary load-balancing loss in the train-ing process(Fedus, Zoph, and Shazeer 2022), inference-time routing distributions can still be highly skewed (Li et al. 2023). Since both the all-to-all communication and subse-quent expert computation require synchronization across the EP group, the overall execution latency is determined by the most heavily loaded rank. Consequently, lightly loaded de-vices must remain idle while waiting for stragglers to com-plete, resulting in reduced device utilization and degraded end-to-end performance. Existing load balancing methods primarily rely on expert-device mapping modification, which changes the assignment of experts to physical devices to redistribute workloads more evenly. Such mappings can be determined offline based on historical routing statistics (DeepSeek-AI 2025). However, practical LLM serving systems typically handle multi-task requests, where routing distributions can vary significantly across task types, and a static expert-device mapping cannot instantly adapt to dynamic workload changes, as illustrated in Figure 2. In this case, online load balancing is therefore required, which dynamically adjusts expert-device assign-ments at runtime by migrating expert weights across ranks. However, the routing distribution required to guide expert placement is only available after the routing decision is made. Therefore, the available window for expert migration is re-stricted to the interval between routing completion and expert execution, which lies directly on the critical inference path and introduces additional latency overhead. We identify the root cause of this problem as the sequen-tial dependency between workload distribution acquisition and expert-map modification. Specifically, the routing stage can only begin after all preceding computations (e.g., atten-tion computation of the current layer) are completed, and expert migration can only be initiated afterward based on the observed routing distribution. In this work, we observe arXiv:2608.14205v1 [cs.AI] 14 Aug 2026 Figure 1: Overview of FreeBalance and its four stages: 1O residual workload prediction, 2O budgeted expert-swap planning, 3O
+
+expert-weight migration overlapped with pre-routing attention, and 4O lossless MoE computation. The residual representation from layer ℓ−1 predicts the expert workload of layer ℓ before its router executes. The prediction-guided expert placement is available before the target expert FFN executes. The blue line denotes the FreeBalance execution flow (ours), whereas the black line denotes the original inference flow. that expert balancing does not necessarily need to wait for the current-layer router execution if the workload distribu-tion can be predicted lightweightly and accurately before routing. Such pre-routing prediction enables expert migra-tion to be overlapped with preceding computation stages, making it possible to effectively hide the balancing over-head. Furthermore, this approach is particularly beneficial for long-sequence inference, where attention computation often constitutes a significant portion of the critical latency. Based on this insight, we propose FreeBalance, an online MoE load balancing framework (Figure 1) that performs pre-routing balancing through residual workload prediction. We observe that the routing distribution of an upcoming MoE layer can be well approximated before routing, via feeding the residual representation from the preceding layer into the corresponding router. This prediction is lightweight com-pared to the whole inference latency, and most importantly, it provides workload information before the actual routing stage. Based on the predicted workload, FreeBalance deter-mines the online expert mapping adjustments and initiates weight migration immediately, so that the migration process can be overlapped with other pre-routing stages (primarily at-tention computations) and does not extend the critical path. Moreover, FreeBalance employs a cost model to constrain the amount of migrated experts according to the available overlapping opportunity, preventing overly aggressive adjust-ments from introducing additional latency. Notably, FreeBal-ance uses the predicted workload solely for online balanc-ing, while the actual MoE execution still follows the original routing decisions, thereby achieving acceleration without af-fecting model outputs. Experiments show that FreeBalance reduces the max-to-mean rank load ratio by 32.8%, reduces end-to-end latency by 13.1%. Specifically, our method hides online balancing overhead of averagely 5.1 experts per layer, which would otherwise account for 8.5% of the critical-path latency. 
+
+# 2 Preliminary 
+
+2.1 Mixture-of-Expert Architecture 
+
+An MoE layer contains a router and a set of feed-forward experts. For an input token representation hl of layer l, the router produces a score for each expert and selects the top-k
+
+experts. 
+
+Wl, I l = topk (G(hl)) .
+
+Only the selected experts process the token, after which their outputs are weighted aggregated. 
+
+M oE (hl) = X
+
+> i∈Il
+
+Wl,i ∗ expert i(hl),
+
+where Wl,i denotes the routing weight for expert i. The aggregated result is then forwarded as the output of the MoE block (added to hl along with the output of the attention block), such that 
+
+hl+1 = hl + Attention (hl) + MoE (hl + Attention (hl)) (1) 
+
+2.2 Expert Parallelism 
+
+Under EP, each expert is placed onto one or more specific devices according to an expert–device mapping (typically an even distribution). Each device hosts a subset of experts and processes tokens routed to them. When tokens are as-signed to experts that reside on remote devices, an all-to-all communication is required to dispatch token representations to the corresponding devices. After computation, the expert outputs are communicated back to the original devices via a second all-to-all, where a final weighted aggregation is performed. Figure 2: Per-layer relative expert loads for NarrativeQA and LCC. Experts are sorted independently at each layer by their NarrativeQA load, and the same ordering is used for LCC to expose the workload-dependent shift in expert popularity. 
+
+2.3 Load Imbalance 
+
+Load imbalance poses a severe challenge under EP, arising from the skewed token routing distribution across EP ranks. When hot experts are colocated on the same rank, expert-level routing skew translates into inter-rank workload im-balance. As MoE execution requires global synchronization operations of result-gathering communication and expert-output aggregation, the most heavily loaded rank determines the critical path, forcing less-loaded ranks to wait in idle. Furthermore, in practical multi-task serving scenario, routing skew varies significantly across task types rather than remaining fixed. Figure 2 presents the heatmap of work-load distributions of two representative tasks on Qwen3-30B. As demonstrated, workload distributions differ substantially across tasks, with only 4.1% of expert-activation overlap across all layers. 
+
+2.4 Load Balancing 
+
+Offline load balancing typically decides expert placement for more balanced workload distributions from historical rout-ing statistics. Despite its effectiveness, in multi-task scenarios where workload distributions vary significantly across tasks (as discussed in section 2.2), a fixed placement strategy may become suboptimal for the varying workload. In this case, workload-aware online balancing during inference is essen-tial, which dynamically adapts expert-device assignments by migrating expert weights across ranks. The key challenge of online load balancing lies in the additional overhead of expert migration. Since placement decisions can only be made after the routing distribution is computed, the available window for expert migration is limited to a narrow interval between routing and MoE com-putation, which falls directly on the critical inference path. Consequently, the introduced additional overhead can largely diminish the benefit of improved load balance. 
+
+# 3 Method 
+
+3.1 Motivation and Overview 
+
+As discussed above, the primary bottleneck of online load balancing is the migration overhead incurred on the critical inference path. Since expert placement decisions depend on the routing distribution, expert migration cannot begin until the target layer’s router has completed, i.e., after the pre-ceding attention computation. Consequently, only a narrow window remains for planning and expert-weights migration before MoE computation. We observe that a substantial overlap opportunity natu-rally exists on the critical path. The pre-routing stages (e.g., attention computation) are computation-heavy, especially for long-sequence workloads, providing a sufficiently long win-dow to hide expert migration latency. However, this opportu-nity remains unexploited because routing statistics become available only after the router executes, and migration plan-ning can begin only afterward. Consequently, the entire pre-routing computation stage is unavailable for overlapping ex-pert migration. FreeBalance eliminates this limitation by breaking the se-quential dependency between routing and migration plan-ning. The key insight is that if the workload distribution can be accurately predicted before routing execution, migra-tion planning no longer needs to wait for the actual rout-ing results. Expert weight migration can therefore be sched-uled proactively and overlapped with preceding computation stages. Therefore, we propose residual workload prediction for lightweight and accurate online workload prediction be-fore the actual routing execution. Furthermore, to maximize the latency benefit while limiting migration overhead, Free-Balance employs a cost model to bound the migration bud-get and control migration planning. Furthermore, migration plans are constructed using pairwise expert swaps, ensuring that every rank preserves the same number of expert slots and memory footprint. Notably, FreeBalance preserves the original routing de-cisions during MoE execution, ensuring lossless inference. The predicted workload distribution is used solely for ex-pert placement decisions and weight transfer, while the tar-get router determines the final token-to-expert assignments (rather than skipped). The final routing results may alter af-ter the expert migration, yet the overall correctness is totally guaranteed. In conclusion, for each MoE layer ℓ, FreeBalance performs four stages: 1. Residual workload prediction. A lightweight prediction module estimates the token counts of all experts before routing. 2. Budgeted Expert-Swap Planning. A cost model deter-mines the migration budget, and pairwise expert swaps are selected within the available overlap budget. 3. Weight Transfer. Expert weights are exchanged across EP ranks, with the migration latency overlapped with computation-heavy pre-routing stages (mainly the atten-tion stage). 4. Lossless MoE computation. The target router computes the exact routing decisions, and MoE execution proceeds using the migrated expert placement, achieving a more balanced workload without altering the original routing behavior. Figure 3: Geometric intuition for cross-layer residual sim-ilarity. The attention and MoE updates cause only a small directional change from hℓ−1 to hℓ.
+
+3.2 Residual Workload Prediction 
+
+Residual connections make the hidden representations of ad-jacent layers highly similar (Lee et al. 2024; Liu et al. 2023; Wu et al. 2025). As illustrated in fig. 3 and formalized in eq. (1), hℓ is obtained by adding the attention and MoE up-dates to hℓ−1. Because this residual update is small relative to the hidden-state magnitude, the angle between hℓ−1 and 
+
+hℓ is small, and their cosine similarity is close to 1. FreeBal-ance exploits this cross-layer similarity for lightweight and accurate online workload prediction. Since hℓ−1 is available before the subsequent attention and routing stages, expert-placement planning and weight migration can begin at pre-routing time. Migration must begin before the target layer routes its tokens, so the final router output is available too late to guide its own placement for that same layer. FreeBalance instead predicts the workload of layer ℓ from hℓ−1, the output hidden states of layer ℓ−1 and therefore the residual-stream input to 
+
+layer ℓ. This state is available before the target layer performs attention and normal routing. Because consecutive layers process the same token sequence, hℓ−1 retains task- and token-specific information that is useful for anticipating the next router’s aggregate demand. The prediction guides only physical expert placement and never replaces model’s normal routing pass. Let hℓ−1 ∈ RN ×d denote the output of layer ℓ − 1 for a prefill batch of N tokens. It is also the residual hidden state entering target layer ℓ before attention. Let Hℓ ∈ RN ×d de-note the target router’s normal input after the target layer’s pre-routing transformations. FreeBalance introduces no stan-dalone workload predictor; instead, it invokes the same frozen router gℓ twice: 
+
+bGℓ = gℓ(hℓ−1), early pre-routing logits , (2) 
+
+Gℓ = gℓ(Hℓ), final routing logits . (3) For a linear router, both invocations share the original routing function 
+
+gℓ(X) = XW ℓ + 1b⊤ 
+
+> ℓ
+
+, (4) where Wℓ ∈ Rd×E and bℓ ∈ RE are the original router parameters. Applying the original top-k rule to bGℓ yields estimated assignments bTℓ(i) for token i. Aggregating these 
+
+Algorithm 1 FreeBalance for Target Layer ℓ                              
+
+> Input: hℓ−1,gℓ,πℓ, migration budget Bℓ, and threshold τ
+> Output: Budget-feasible swap plan Sℓand updated placement π′
+> ℓ
+> 1: Predict next-layer expert workloads using gℓ(hℓ−1)
+> 2: Aggregate expert workloads into rank loads under πℓ
+> 3: Sℓ←∅
+> 4: while rank-pair imbalance exceeds τand budget remains do
+> 5: Select a beneficial swap between overloaded and under-loaded ranks 6: if no such swap exists then
+> 7: break
+> 8: end if
+> 9: end while
+> 10: Migrate the selected experts during target-layer attention 11: Commit the placement before the target MoE stage begins 12: Execute the target MoE with the normal router decisions 13: return Sℓand π′
+> ℓ
+
+assignments gives the predicted expert workload 
+
+bnℓ,e =
+
+> N
+
+X
+
+> i=1
+
+1
+
+h
+
+e ∈ bTℓ(i)
+
+i
+
+. (5) Because hℓ−1 precedes the target layer’s attention whereas 
+
+Hℓ follows its pre-routing transformations, the early as-signments are estimates rather than final model decisions. Both invocations nevertheless use the same router parame-ters. Consequently, FreeBalance adds no predictor weights, training procedure, or checkpoint state. The early invocation produces only an E-element workload vector for placement planning; the normal invocation on Hℓ remains unchanged and exclusively determines the final token-to-expert assign-ments. The choice of hℓ−1 balances timeliness and prediction fi-delity. It incorporates all task- and token-dependent transfor-mations through layer ℓ−1, yet is available before attention in layer ℓ. In contrast, Hℓ is closer to the target routing decision but becomes available only when the normal router is about to execute. Using hℓ−1 therefore creates an attention-length migration window while retaining sufficient information to estimate which experts will be hot in the target layer. The early workload estimate is used only to plan phys-ical expert placement, while the normal router invocation remains authoritative and determines which experts process each token. An empty swap plan retains the current place-ment. Therefore, the rebalancing procedure preserves the model’s routing semantics and baseline execution. 
+
+3.3 Budgeted Expert-Swap Planning 
+
+Given the current batch’s expert workload obtained by resid-ual workload pre-routing, the planner seeks a placement that lowers the predicted maximum rank load without scheduling more communication than target-layer attention can hide. It must also produce the same result on every rank. We formu-late planning as a budgeted optimization over pairwise swaps and use a deterministic greedy procedure that is lightweight enough to run at layer granularity. Consider expert ea on rank a and expert eb on rank b.Exchanging them changes only the loads of these two ranks: 
+
+L′ 
+
+> a
+
+= La − bnea + bneb , (6) 
+
+L′ 
+
+> b
+
+= Lb − bneb + bnea . (7) We score a candidate by its reduction in a load objective 
+
+Φ( L) = max  
+
+> r
+
+Lr + γ X
+
+> r
+
+(Lr − L)2, (8) where the first term targets the straggler rank and the second discourages moving the bottleneck to a different rank. The predicted benefit is ∆( ea, e b) = Φ( L) − Φ( L′). Candidates with non-positive benefit are discarded. Pairwise exchange has three practical advantages. It pre-serves the number of experts per rank, requires only bounded staging memory, and makes rollback straightforward because the old and new owners are known. It also avoids replication, which would require the router to divide assignments among multiple copies and would change the dispatch policy. The usable migration budget is derived from a profiled attention time and the topology between the participating ranks. For a swap s, the planner estimates 
+
+C(s) = αa,b + S(ea) + S(eb)
+
+βa,b 
+
+, (9) where S(e) is the transferred representation of expert e, βa,b 
+
+is the measured point-to-point bandwidth, and αa,b captures launch and protocol overhead. The parameters are calibrated during runtime initialization and may distinguish intra-node and inter-node links. For a fixed input shape, layers that use the same attention mechanism have nearly identical attention latency. FreeBal-ance therefore profiles attention once per attention type and reuses the measurement for subsequent layers of that type. Let 
+
+r(ℓ) denote the first layer that uses the same attention mech-anism as target layer ℓ. In a homogeneous model, r(ℓ) = 0 ,so the layer-0 attention time is reused throughout the model. For a hybrid-attention model, FreeBalance instead profiles the first occurrence of each attention type, such as linear or sparse attention, and reuses the corresponding measure-ment for later layers of the same type. The planner admits migrations only within 
+
+Bℓ = max(0 , T attn  
+
+> r(ℓ)
+
+− δ), (10) where δ is a safety margin for prediction error and stream interference. The budget is enforced per link and per rank rather than only as a global sum, preventing several individ-ually valid swaps from oversubscribing one participant. Every rank receives the same globally aggregated count vector and begins from the same placement map. Each rank enumerates candidate pairs, removes conflicts and non-positive-gain candidates, and sorts the remainder by decreas-ing benefit-to-cost ratio. Ties are resolved lexicographically by layer identifier, source rank, destination rank, and logical expert identifiers. The planner accepts a candidate if neither expert has already been selected and if adding the trans-fer respects all communication budgets. Loads and residual budgets are updated after each accepted swap. This deterministic ordering eliminates a plan broadcast: ranks exchange only the compact load statistics required to construct a global view, then reproduce the same swap se-quence locally. Determinism also simplifies debugging be-cause a layer, placement map, and predicted count vector uniquely determine the plan. In practice, the planner con-siders only experts on the most overloaded and most under-loaded ranks, which reduces candidate generation from all expert pairs to a small frontier without changing the common heavy-to-light case. 
+
+# 4 Evaluation 
+
+Models We evaluate two MoE models: Qwen3-30B-A3B-Instruct-2507 (Yang et al. 2025) and Moonlight-16B-A3B-Instruct (Liu et al. 2025). Qwen3-30B-A3B-Instruct-2507 contains 128 experts, activates the top-8 experts per token, and places 16 experts on each EP rank; each expert occupies 9 MB. Moonlight-16B-A3B-Instruct contains 64 experts, ac-tivates the top-6 experts per token, and places 8 experts on each EP rank; each expert occupies 16.5 MB. In both models, one expert constitutes the basic unit of expert migration. 
+
+Benchmarks We use LongBench (Bai et al. 2024) as the primary workload suite because it covers six distinct long-context capabilities. Table 1 reports 19 subsets: covering single- and multi-document QA, summarization, few-shot learning, synthetic tasks, and code completion. Each sub-set is evaluated independently under the same batching and sequence-length configuration. To emulate dynamic multi-task serving, we additionally construct the Mixed Tasks workload as a sequence of prefill steps whose LongBench subset changes from one step to the next. Each individual prefill step draws its requests from one subset. The workload therefore captures step-to-step shifts in routing distributions while retaining the same batch size and input-length configuration as the subset-specific runs. Its row reports latency under this changing-subset execution se-quence. For the history-driven EPLB baseline, we construct its profiling state separately by aggregating expert-load statis-tics from 20 samples from each of all 21 LongBench subsets, for 420 profiling samples in total. 
+
+Configurations Experiments run on nodes equipped with 8× NVIDIA A800-SXM4 GPUs connected by NVLink. We use expert parallelism across all eight GPUs (EP = 8 ). Un-less stated otherwise, we use a batch size of 16 with an input length of 8K tokens. Each configuration is warmed up once and then measured for three runs; we report the average of the measured runs. We compare Vanilla with a fixed expert placement, Vanilla with FreeBalance, history-driven EPLB, and EPLB with FreeBalance under the same model weights, routing decisions, batching policies, and parallel configura-tions. 
+
+Metrics We report end-to-end prefill latency and the max-to-mean rank-load ratio, where a value of one indicates per-fect balance. For residual pre-routing, we measure the cosine similarity between hℓ−1 and Hℓ, the cosine similarity be-tween their router logits, and the top-k hit rate, defined as the fraction of final top-k assignments recovered by the early Qwen3-30B-A3B-Instruct-2507 Moonlight-16B-A3B-Instruct LongBench Subset Vanilla Vanilla +Ours EPLB EPLB +Ours Vanilla Vanilla +Ours EPLB EPLB +Ours Single-Document QA                                                                                                                                                                 
+
+> NarrativeQA 147.6 126.6 135.9 126.6 77.4 66.7 63.6 63.2
+> Qasper 102.6 94.6 105.6 92.3 57.1 55.4 57.5 55.3
+> MultiFieldQA (EN) 85.3 74.8 76.9 74.7 43.1 42.5 43.4 42.7 Multi-Document QA
+> HotpotQA 137.3 122.4 121.0 120.9 71.6 69.8 68.2 67.1
+> 2WikiMQA 125.2 110.2 100.1 93.3 66.7 63.1 64.9 62.8
+> MuSiQue 138.0 123.5 122.6 120.1 73.0 71.4 72.2 69.6
+> DuReader 142.4 124.5 138.5 123.0 78.1 70.7 78.7 69.5 Summarization
+> GovReport 135.4 118.1 132.7 118.3 70.0 66.7 69.3 66.1
+> QMSum 137.6 123.2 130.4 122.4 73.0 70.8 72.7 71.4
+> MultiNews 53.6 48.4 47.6 47.6 27.6 27.3 26.9 26.7
+> VCSUM 138.1 115.8 125.6 112.9 73.7 62.6 70.5 61.9 Few-Shot Learning
+> TREC 130.0 118.2 118.1 106.8 66.5 63.1 65.9 62.0
+> TriviaQA 175.9 112.1 122.6 110.7 65.7 64.4 64.8 62.7
+> SAMSum 131.5 111.8 123.1 111.9 69.3 62.7 66.4 62.8
+> LSHT 150.0 124.7 151.0 125.3 82.6 71.6 80.0 69.9 Synthetic Tasks
+> PassageCount 132.2 121.8 121.5 121.4 72.1 70.0 69.9 69.6
+> PassageRetrieval (EN) 137.4 123.8 136.0 122.7 72.1 71.0 69.9 69.7 Code Completion
+> LCC 62.3 55.1 61.2 54.1 37.3 32.9 36.9 33.6
+> RepoBench-P 129.7 111.8 124.7 111.4 77.3 67.0 77.2 67.9 Mixed-Task Workload
+> Mixed Tasks 83.1 78.0 78.3 75.3 45.9 43.3 44.5 43.1
+
+Table 1: Prefill latency across 19 LongBench subsets and one mixed dataset. Columns compare Vanilla, Vanilla with FreeBalance, EPLB, and EPLB with FreeBalance for Qwen3-30B-A3B and Moonlight-16B-A3B. Each entry reports latency in seconds; lower is better. routing pass. Planner quality is measured by the fraction of executed swaps that reduce the realized imbalance. All GPU timings are collected with synchronized CUDA events. 
+
+4.1 End-to-End Effectiveness 
+
+Vanilla reaches per-layer max/mean ratios up to 2.01 ,whereas FreeBalance reduces them to 1.35 , an improvement of up to 32 .8% . The gain spans communication and com-putation: a more even token distribution reduces both the maximum per-rank activation volume during dispatch and combine and the maximum per-rank expert workload. Since all-to-all collectives and expert execution are gated by the slowest EP rank, mitigating this straggler accelerates the en-tire MoE stage. Across the 19 evaluated LongBench subsets, FreeBalance reduces Qwen3-30B’s average prefill latency by 13 .1% . Be-cause its auxiliary work overlaps with existing critical-path computation, as analyzed in Section 4.3, online reconfig-uration introduces no separate pause. The load-balance im-provement does not translate linearly into wall-clock speedup because other kernels remain on the critical path. 
+
+4.2 Prediction and Planning Quality 
+
+Table 2 compares the early router invocation gℓ(hℓ−1) with the normal invocation gℓ(Hℓ). Across both models and all three datasets, logit cosine similarity remains between 
+
+0.9896 and 0.9952 , even though hidden-state cosine simi-larity ranges from 0.7116 to 0.9316 . The resulting top-k hit rate ranges from 0.7419 to 0.8494 . These results show that the router logits remain strongly aligned across the two invo-cation points and provide a useful signal for estimating the target layer’s expert workload. Across layers in which migrations are executed, 95% 
+
+achieve a lower measured max-to-mean rank-load ratio af-ter applying the complete swap plan. This rate is measured at the layer level rather than for individual swaps. The lack of improvement in the remaining layers arises from runtime variation or interactions among multiple swaps whose iso-lated benefits are not perfectly additive. 
+
+4.3 Overlap Analysis 
+
+Residual pre-routing and planning consume computation, whereas the measured expert migrations require approxi-mately 3–4 ms per layer. A sequential design would add these Model Dataset Hidden cos. Logit cos. Top-k hit Qwen PassageRetrieval 0.7334 0.9952 0.7520 LSHT 0.7242 0.9951 0.7578 TriviaQA 0.7116 0.9947 0.7419 Moonlight PassageRetrieval 0.9316 0.9900 0.8461 LSHT 0.9291 0.9896 0.8494 TriviaQA 0.9234 0.9910 0.8037 
+
+Table 2: Pre-routing quality across models and datasets. Router logit and hidden cosine similarities compare the early and normal routing passes; top-k hit measures assignment overlap. 
+
+Figure 4: Speedup over Vanilla as a function of expert swaps per layer. Lines show zero to four forced swaps per layer; stars show adaptive FreeBalance, whose average swap count ranges from 1.82 to 2.68 across sequence lengths. costs directly to prefill latency. In the two-stream schedule, the early router invocation and planning execute concurrently with the target layer’s attention. Once the plan is available, expert-weight transfer overlaps with the remaining attention computation. The remaining question is how many swaps can be admitted without exposing a migration tail on the critical path. Figure 4 shows that speedup is not monotonic in a fixed number of swaps per layer. The best fixed policies achieve 
+
+1.0582 ×, 1.0874 ×, and 1.1263 × speedups at 1K, 2K, and 4K tokens, respectively. By adapting the average swap count from 1.82 to 2.68, FreeBalance reaches 1.1241 ×, 1.1264 ×,and 1.1542 ×, outperforming the fixed policies at all three lengths. These results show that the overlap budget should determine the migration count rather than a fixed policy. 
+
+4.4 Sensitivity to Sequence Length 
+
+We evaluate how sequence length affects the balancing ben-efit and the opportunity to hide expert migration. We fix the batch size to 16 and vary the input length from 1K to 8K tokens. For each configuration, we report time to first token (TTFT) and the max-to-mean rank-load ratio for Vanilla and FreeBalance. We additionally report the measured overlap                           
+
+> Length Vanilla Ours Overlap (ms) TTFT Max/Mean TTFT Max/Mean 1K 3.08 2.00 2.74 1.33 12.55 2K 4.99 2.02 4.43 1.34 17.35 4K 8.98 2.03 7.78 1.35 31.30 8K 20.45 2.04 15.68 1.37 36.80
+
+Table 3: Performance under batch size 16. TTFT is reported in seconds, and overlap time is reported in milliseconds. time available for migration. As shown in Table 3, FreeBalance reduces TTFT by 14 .7% 
+
+on average across the evaluated sequence lengths. The reduc-tion grows from 11 .0% at 1K tokens to 23 .3% at 8K tokens. Meanwhile, the max-to-mean ratio decreases from a Vanilla range of 2.00 –2.04 to a FreeBalance range of 1.33 –1.37 . The measured overlap time increases from 12 .55 ms to 36 .80 ms, indicating that longer sequences provide a larger window for hiding expert migration. 
+
+# 5 Related Work 
+
+Offline balancing. DeepSeek EPLB periodically repli-cates and places experts using historical routing statistics (DeepSeek-AI 2025). While effective for slowly varying workloads by amortizing optimization and weight rearrange-ment, its historical workload estimation may lag behind abrupt task shifts and cannot directly correct layer- and batch-specific imbalance, especially in multi-task serving where consecutive batches activate different expert subsets. Free-Balance instead predicts the upcoming workload within the current prefill and adjusts placement at layer granularity. 
+
+Online balancing. Dynamic systems adapt expert place-ment to observed demand (He et al. 2022; Li et al. 2023), while Harmony coordinates runtime scheduling with model-state movement (Li et al. 2022). Recent approaches such as UltraEP and MoonEP rebalance the realized routing distri-bution using redundant experts, with runtime planning and expert-state movement after routing decisions (Wei et al. 2026; Chen et al. 2026). Such reactive strategies depend on already-observed routing patterns and provide limited op-portunity to hide rebalancing overhead before expert com-putation. FreeBalance instead anticipates upcoming expert demand before the target routing stage, budgets swaps within the available attention window, and overlaps expert migration with main-stream computation. 
+
+# 6 Conclusion 
+
+FreeBalance addresses dynamic load imbalance in dis-tributed MoE inference by anticipating expert workloads and initiating balancing before target-layer dispatch. By shifting balancing earlier, it adapts to each workload while hiding reconfiguration overhead from the critical path and preserv-ing the original routing decisions and outputs. Experiments show that FreeBalance reduces the max-to-mean rank-load ratio by up to 32.8% and end-to-end prefill latency by 13.1%. References 
+
+Bai, Y.; Lv, X.; Zhang, J.; Lyu, H.; Tang, J.; Huang, Z.; Du, Z.; Liu, X.; Zeng, A.; Hou, L.; Dong, Y.; Tang, J.; and Li, J. 2024. LongBench: A Bilingual, Multitask Benchmark for Long Context Understanding. In Proceedings of the 62nd Annual Meeting of the Association for Computational Lin-guistics (Volume 1: Long Papers) , 3119–3137. Association for Computational Linguistics. Chen, Y.; Li, C.; Wang, Y.; and Wei, M. 2026. MoonEP: A Perfectly Balanced Expert Parallelism Library via Dynamic Redundant Experts. GitHub repository. Accessed: 2026-07-29. DeepSeek-AI. 2024a. DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model. arXiv preprint arXiv:2405.04434 .DeepSeek-AI. 2024b. DeepSeek-V3 Technical Report. arXiv preprint arXiv:2412.19437 .DeepSeek-AI. 2025. Expert Parallelism Load Balancer (EPLB). GitHub repository. Accessed: 2026-07-25. Fedus, W.; Zoph, B.; and Shazeer, N. 2022. Switch Trans-formers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity. Journal of Machine Learning Re-search , 23(120): 1–39. He, J.; Zhai, J.; Antunes, T.; Wang, H.; Luo, F.; Shi, S.; and Li, Q. 2022. FasterMoE: Modeling and Optimizing Training of Large-Scale Dynamic Pre-Trained Models. In Proceedings of the 27th ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming , 120–134. Association for Computing Machinery. Lee, W.; Lee, J.; Seo, J.; and Sim, J. 2024. InfiniGen: Effi-cient Generative Inference of Large Language Models with Dynamic KV Cache Management. In 18th USENIX Sym-posium on Operating Systems Design and Implementation (OSDI 24) , 155–172. USENIX Association. Lepikhin, D.; Lee, H.; Xu, Y.; Chen, D.; Firat, O.; Huang, Y.; Krikun, M.; Shazeer, N.; and Chen, Z. 2021. GShard: Scaling Giant Models with Conditional Computation and Automatic Sharding. In International Conference on Learning Repre-sentations .Li, J.; Jiang, Y.; Zhu, Y.; Wang, C.; and Xu, H. 2023. Acceler-ating Distributed MoE Training and Inference with Lina. In 
+
+2023 USENIX Annual Technical Conference (USENIX ATC 23) , 945–959. Boston, MA: USENIX Association. Li, Y.; Phanishayee, A.; Murray, D.; Tarnawski, J.; and Kim, N. S. 2022. Harmony: Overcoming the Hurdles of GPU Memory Capacity to Train Massive DNN Models on Com-modity Servers. Proceedings of the VLDB Endowment ,15(11): 2747–2760. Liu, J.; Su, J.; Yao, X.; et al. 2025. Muon is Scalable for LLM Training. arXiv preprint arXiv:2502.16982 .Liu, Z.; Wang, J.; Dao, T.; Zhou, T.; Yuan, B.; Song, Z.; Shrivastava, A.; Zhang, C.; Tian, Y.; Ré, C.; and Chen, B. 2023. Deja Vu: Contextual Sparsity for Efficient LLMs at Inference Time. In Proceedings of the 40th International Conference on Machine Learning , volume 202 of Proceed-ings of Machine Learning Research , 22137–22176. PMLR. Rajbhandari, S.; Li, C.; Yao, Z.; Zhang, M.; Aminabadi, R. Y.; Awan, A. A.; Rasley, J.; and He, Y. 2022. DeepSpeed-MoE: Advancing Mixture-of-Experts Inference and Training to Power Next-Generation AI Scale. In Proceedings of the 39th International Conference on Machine Learning , volume 162 of Proceedings of Machine Learning Research , 18332– 18346. PMLR. Shazeer, N.; Mirhoseini, A.; Maziarz, K.; Davis, A.; Le, Q. V.; Hinton, G. E.; and Dean, J. 2017. Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer. In International Conference on Learning Represen-tations .Wei, X.; Jin, C.; Dai, T.; Zhong, Y.; Yu, S.; Yang, C.; Wu, B.; Zhang, Z.; Mai, J.; Zhu, Q.; Li, Z.; Liu, Y.; and Luo, G. 2026. UltraEP: Unleash MoE Training and Inference on Rack-Scale Nodes with Near-Optimal Load Balancing. arXiv preprint arXiv:2606.04101 .Wu, Y.; Gao, K.; Li, L.; and Wu, Y. 2025. EasySpec: Layer-Parallel Speculative Decoding for Efficient Multi-GPU Uti-lization. In Advances in Neural Information Processing Sys-tems , volume 38. Yang, A.; Li, A.; Yang, B.; et al. 2025. Qwen3 Technical Report. arXiv preprint arXiv:2505.09388 .

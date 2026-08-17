@@ -1,0 +1,622 @@
+Title: MedMix: Specialization-Consistent Federated Sparse MoEs under Modality Heterogeneity
+
+URL Source: https://arxiv.org/pdf/2608.13911v1
+
+Published Time: Mon, 17 Aug 2026 00:22:07 GMT
+
+Number of Pages: 18
+
+Markdown Content:
+# MedMix : Specialization-Consistent Federated Sparse MoEs under Modality Heterogeneity 
+
+Adiba Orzikulova 1 Dong Min Kim 1 Jaehong Yoon 2 Sung-Ju Lee 11KAIST, 2NTU Singapore 
+
+{adiorz,dongmin.kim,profsj}@kaist.ac.kr jaehong.yoon@ntu.edu.sg 
+
+## Abstract 
+
+Federated multimodal medical AI faces modality heterogeneity at both the client and sample levels: clients may systematically lack access to specific modality types, while individual records within the same client may contain different partial modality subsets. Sparse Mixture-of-Experts (MoE) architectures are a promising remedy for modality-adaptive computation, but their use in federated learning is fragile under cross-client modality heterogeneity, where locally learned routing policies can diverge across clients and drive experts toward incompatible special-izations. Different clients may assign the same observed modality configuration to different experts, or train similarly indexed experts on different missing-modality configurations, causing standard aggregation to misalign or overwrite the expert specialization that sparse MoEs are intended to learn. To address this challenge, we propose MedMix , a semantic-alignment framework for federated multimodal sparse MoEs that coordinates cross-client routing and expert specialization using modality context. At the client side, MedMix uses modality-context-aware routing to guide expert selection using each token’s modality identity, position, and incompleteness context. Across clients, it uses consensus-guided routing alignment to construct server-side consensus anchors for shared modality patterns and align local routing distributions across clients. Complementing these routing mechanisms, client-adaptive expert aggregation leverages client-specific modality-pattern prototypes to match and aggregate functionally similar experts across clients. Experiments on real-world multimodal medical datasets show that MedMix achieves the best average F1 across diverse modality heterogeneity and modality incompleteness settings, with especially clear gains under severe heterogeneity. 
+
+## 1 Introduction 
+
+In medical AI, multimodal data such as MRI images, lab tests, and clinical text reports enable more accurate and robust inference by capturing complementary evidence about a patient’s state [7]. This capability is especially important in real-world clinical settings, ranging from Alzheimer’s disease diagnosis [27, 28] to ICU outcome prediction using heterogeneous electronic health records [12, 10, 11]. Yet deploying multimodal models across institutions remains constrained by two key challenges. First, medical data are privacy-sensitive and therefore remain siloed within individual institutions. Regulations such as HIPAA (Health Insurance Portability and Accountability Act) and GDPR (Gen-eral Data Protection Regulation) make centralizing raw patient records legally and operationally impractical, motivating federated learning (FL) [16, 13] as the default collaboration paradigm [19–21]. Second, clinical records exhibit pervasive modality incompleteness [10, 12, 27]. At the institution level, hospitals may differ in which modalities are routinely available because of differences in equipment, workflows, and clinical practice. At the patient level, individual records may contain only a subset of modalities because tests are not ordered, scans are not acquired, or notes are unavailable. 
+
+> Preprint. arXiv:2608.13911v1 [cs.LG] 14 Aug 2026
+
+These factors induce dual-level modality heterogeneity [21], consisting of cross-client differences in modality availability and within-client variation in patient-level incompleteness. Sparse Mixture-of-Experts (MoE) architectures [24, 14, 5] are appealing for multimodal learning under modality incompleteness because they can allocate different inputs to specialized experts. Recent multimodal MoE methods have shown strong robustness to arbitrary or incomplete modality combinations in centralized settings [30, 8]. However, their interaction with FL aggregation is fragile under dual-level modality heterogeneity. When clients observe different modality combinations with different frequencies, local training induces different routing signals across clients. This can cause routers to develop client-specific expert preferences, even for modality configurations shared across clients. Moreover, these divergent routing patterns shape how experts are trained locally: experts with the same index may receive inputs from different modality contexts on different clients. Consequently, same-index experts can acquire different functional roles, weakening the semantic compatibility of expert specialization required for direct aggregation. This weakens the benefit of federated aggregation, leading to degraded performance under modality heterogeneity (see Figure 1). We propose MedMix , a semantic-alignment framework for federated multimodal sparse MoEs that coordinates cross-client routing and expert specialization under modality heterogeneity. MedMix 
+
+consists of three complementary components: (1) modality-context-aware routing guides expert selection using each token’s modality identity, position, and incompleteness context; (2) consensus-guided routing alignment constructs reliable consensus routing anchors for shared modality patterns and aligns local batch-level routing distributions to these anchors; and (3) client-adaptive expert aggregation uses client-specific modality-pattern prototypes to match and aggregate functionally similar experts while preserving client-specific specialization. By coupling these mechanisms, 
+
+MedMix promotes semantically consistent routing and expert specialization across clients while adapting aggregation to heterogeneous modality distributions. We evaluate MedMix on two real-world multimodal medical benchmarks: ADNI [27], integrating MRI, genomic, clinical, and biospecimen modalities for Alzheimer’s disease assessment, and MIMIC-IV [12, 10], integrating laboratory measurements, clinical notes, and diagnosis codes for ICU outcome prediction. Both datasets exhibit natural modality incompleteness. To systematically study federated heterogeneity, we construct splits with varying degrees of inter-client modality availability shift and intra-client sample-level modality incompleteness, including an extreme modality-exclusive setting. Across these scenarios, MedMix achieves the best average F1 score, with larger gains under stronger modality heterogeneity. These results highlight the importance of cross-client specialization consistency through stabilized routing and heterogeneity-aware expert aggregation in federated multimodal MoEs. Our contributions are summarized as follows: • We identify a key fragility of federated multimodal MoEs under dual-level modality heterogene-ity, where client-specific modality distributions induce inconsistent routing behavior and expert specialization across clients, weakening the semantic compatibility of expert specialization required for effective federated aggregation. • We propose MedMix , a federated multimodal sparse MoE framework that promotes semantic consistency in routing and expert specialization across clients while adapting aggregation to modality heterogeneity. • We evaluate MedMix on ADNI and MIMIC-IV datasets across diverse modality heterogeneity scenarios, demonstrating consistent improvements over strong federated multimodal and MoE baselines, particularly under severe modality heterogeneity. 
+
+## 2 Background 
+
+Multimodal Federated Learning. We study supervised multimodal federated learning (MFL) under modality incompleteness. There are K clients and M possible modalities. Client k owns 
+
+Dk = {(xi,k , y i,k , ri,k )}nk
+
+> i=1
+
+, where xi,k = {xmi,k }Mm=1 is the multimodal input, yi,k is the label, and ri,k ∈ { 0, 1}M is the modality-availability mask indicating which modalities are observed. 
+
+Ω( r) = {m : rm = 1 } denotes observed modality set. The goal is to learn a global model fθ :
+
+min 
+
+> θK
+
+X
+
+> k=1
+
+nk
+
+n E(x,y, r)∼D k [ℓ (fθ (x, r), y )] , n =
+
+> K
+
+X
+
+> k=1
+
+nk. (1) 2C1 C2 E0 E3 E6 E9 E12 E15         
+
+> (a) Diverged routers −50 050 −50 050
+> C1
+> −50 050
+> C2 E0 E3 E6 E9 E12 E15
+> (b) Misaligned experts C1 C2 C3 C4 C5 -.06 -.04 -.02 .00 .02 .04 .06
+> ΔF1 (post agg - pre agg)
+> (c) Degraded performance
+> Balanced Heterogeneous
+
+Figure 1: Fragility of federated MoE specialization under modality heterogeneity. (a) Routing divergence: normalized top-k expert activation frequencies. Clients show divergent routing prefer-ences under the same observed modality configuration. (b) Expert misalignment: joint t-SNE of expert-layer outputs from two clients, with points colored by the top-1 routed expert. Rearranged color and cluster structure indicates that same-index experts acquire different client-specific semantic roles. (c) Aggregation impact: validation F1 change after aggregation relative to the pre-aggregation local model, ∆F1 = F1 post − F1 pre , averaged over communication rounds and 5 seeds. Aggregation is beneficial in the balanced split but becomes less reliable under heterogeneous modality distributions, reflecting reduced cross-client specialization consistency. Here, fθ (x, r) denotes prediction using only the modalities in Ω( r).
+
+Sparse Mixture of Experts. Sparse Mixture-of-Experts (MoE) models increase model capacity while activating only a sparse subset of parameters for each input [24]. Recent multimodal MoE methods further show that sparse expert routing is effective under modality incompleteness and arbitrary modality combinations [8, 30]. Given an input mask r, each observed modality m ∈ Ω( r)
+
+is encoded as Hm = gm(xm). For a token representation h, a standard sparse MoE router computes the routing distribution 
+
+q(h) = softmax( Wg h). (2) The MoE layer activates the top-s experts according to q(h) and combines their outputs using the corresponding routing weights. Local training typically augments the task loss with a load-balancing regularizer [30] to prevent expert collapse and encourage balanced expert utilization. 
+
+Fragility of MoEs in FL under Modality Heterogeneity. Privacy constraints and pervasive modality incompleteness motivate multimodal FL with sparse MoE fusion for medical AI. However, dual-level modality heterogeneity breaks the implicit assumption that sparse MoE components remain semantically comparable across clients: clients may learn different routing policies and assign different functional semantics to experts with the same index. To characterize the effect of modality heterogeneity on federated sparse MoEs, we analyze the routing behavior and expert representations of a standard MoE-FL baseline. Figures 1(a,b) focus on two representative clients with shared modality sets. Figure 1(a) reports the normalized top-k activation frequency of each expert. Under the implicit cross-client comparability assumed by standard federated aggregation, the same modality type should correspond to similar expert usage across clients. However, clients exhibit distinct activation profiles, indicating that modality heterogeneity disrupts routing consistency across clients. Figure 1(b) further shows that the experts themselves become semantically misaligned. The t-SNE visualization of expert-layer outputs reveals different color and cluster structures across clients, where colors denote the top-1 routed expert. This suggests that same-index experts do not necessarily learn semantically compat-ible functions, and instead drift toward client-specific functional roles induced by local modality distribution. Such semantic misalignment diminishes the gains expected from federated aggrega-tion. Figure 1(c) reports the validation F1 change after aggregation relative to the pre-aggregation local model. While aggregation is consistently beneficial under balanced modality distributions, its effect becomes unreliable under heterogeneous modality distributions, sometimes yielding little improvement or even performance degradation. These results show that federated sparse MoEs are 3fragile under modality heterogeneity, highlighting the need for mechanisms that maintain cross-client specialization consistency during routing and aggregation. More comprehensive analyses are detailed in Appendix E. 
+
+## 3 MedMix 
+
+MedMix has three key components: (1) modality-context-aware routing guides expert selection using each token’s modality identity, position, and incompleteness context, (2) consensus-guided routing alignment constructs reliable consensus routing anchors for shared modality patterns and aligns local batch-level routing distributions to these anchors, and (3) client-adaptive expert aggregation uses client-specific modality-pattern prototypes to match and aggregate functionally similar experts while preserving client-specific specialization consistency. Appendix A details the algorithm. 
+
+3.1 Modality-Context-Aware Routing 
+
+Standard MoE routers typically compute expert-selection scores from the token representa-tion [4, 8, 17, 30]. However, under dual-level modality heterogeneity, similar token representations may appear in distinct observation contexts: a modality may be observed alone, together with differ-ent complementary modalities, or under client-specific modality-availability patterns. Since these contexts affect how a token should be interpreted, token-only routing can conflate inputs that require different expert-specialization behaviors. We address this by introducing Modality-Context-aware 
+
+Routing (MCR), which augments the router with each token’s modality identity, observed modality mask, and token position. Specifically, for a token representation h from modality m, observed under modality mask r at token position t, MCR first constructs a context-aware input 
+
+z = ψ ([ h; em; er; et]) , (3) where em, er, and et are embeddings of the modality identity, modality-availability mask, and token position, respectively, and ψ is a lightweight context projection network. The routing distribution is then 
+
+qMCR (h, m, r, t ) = softmax( Wg z). (4) By injecting modality context into the router input, MCR makes expert selection depend on both token content and context under which the token is observed. As a result, the router can distinguish similar tokens arising from different modality-availability patterns and produce more semantically consistent expert assignments across heterogeneous clients. 
+
+3.2 Consensus-Guided Routing Alignment 
+
+MCR makes routing decisions sensitive to modality context, but it does not ensure that the same modality context is routed consistently across clients. In federated training, each client updates the router using only the modality contexts present in its local data; under inter-client modality heterogeneity, these context distributions are skewed and often incomplete. Consequently, different clients may develop different expert preferences for the same modality pattern p = ( r, m ), causing shared expert indices to lose consistent cross-client meaning (see Figure 1). To address this, we introduce Consensus-guided Routing Alignment (CRA), which constructs reliable consensus anchors from cross-client routing statistics and uses them to align local routing behavior for shared modality patterns. Formally, we define a modality pattern as p = ( r, m ), denoting modality m observed under mask r.After local training, client k summarizes its routing behavior for each layer ℓ and supported pattern p.Let Ik,p denote the set of validation tokens belonging to pattern p. The client computes the mean routing distribution 
+
+¯qℓk,p = 1
+
+|I k,p |
+
+X
+
+> (i,t )∈I k,p
+
+qℓ
+
+> MCR
+
+(hi,t , m, ri, t ). (5) The server combines these client-level summaries into a consensus routing anchor: 
+
+aℓp =
+
+PKk=1 wℓk,p ¯qℓk,p 
+
+PKk=1 wℓk,p 
+
+, (6) 4where wℓk,p weights each client summary according to its reliability, based on the number of validation tokens with pattern p and the normalized negative entropy of their token-level routing distributions. Anchors are retained only for patterns with sufficient cross-client support, preventing rare or client-specific patterns from imposing unreliable alignment targets. At the next communication round, the retained anchors are broadcast to clients as auxiliary routing targets. For an anchored pattern p that appears in a local training batch, let ˆqℓk,p denote the batch-averaged routing distribution of the current model. CRA minimizes 
+
+Lk 
+
+> CRA
+
+= 1
+
+Zk
+
+X
+
+> ℓ
+
+X
+
+> p∈P ℓk
+
+KL  aℓp ∥ ˆqℓk,p 
+
+ , (7) where Pℓk is the set of anchored patterns present in the current batch at layer ℓ, and Zk = P 
+
+> ℓ
+
+|P ℓk|.Thus, CRA guides routing only for observable and reliably anchored patterns; when no such pattern appears in a batch, the alignment loss is zero. CRA can provide an alignment signal only when an anchored pattern appears in a local training batch. To increase such opportunities, we use anchor-exposure augmentation , a training-time mask augmentation strategy that maps observed samples to feasible subpatterns of their available modalities. For a sample with observed mask r, define the feasible submasks 
+
+F(r) = {r′ : Ω( r′) ⊊ Ω( r), |Ω( r′)| ≥ mmin } . (8) With probability ρ, we sample an augmented mask ˜r ∈ F (r) proportionally to the empirical global mask distribution πG(˜ r) and remove modalities excluded from r; otherwise, we keep ˜r = r. If no feasible submask has positive probability under πG, the original mask is also retained. By exposing clients to globally supported feasible subpatterns without introducing unobserved modalities, anchor-exposure augmentation increases the frequency with which CRA can align local routing behavior to reliable consensus anchors. 
+
+3.3 Client-Adaptive Expert Aggregation 
+
+MCR and CRA make expert selection context-aware and more consistent across clients, but they do not by themselves determine how expert parameters should be aggregated under modality hetero-geneity. Each client optimizes its experts on a different distribution of modality patterns, so directly averaging expert parameters can blur semantically distinct client-specific specialization behaviors. We therefore introduce Client-adaptive Expert Aggregation (CEA), which personalizes expert MLPs through prototype-based functional expert matching. After local training, each client summarizes its expert-input space with pattern-level prototypes computed from validation data. For client k, layer ℓ,and pattern p = ( r, m ), let uℓi,t denote the input to the expert MLP for token (i, t ). Client k computes 
+
+¯uℓk,p = 1
+
+|I k,p |
+
+X
+
+> (i,t )∈I k,p
+
+uℓi,t . (9) These prototypes provide compact summaries of the client’s local expert-input distribution without sharing raw data. The server then uses these target-client prototypes to compare experts according to their functional behavior on shared modality patterns. For each target expert, CEA considers all source experts as candidates, allowing experts with different indices to be matched when they exhibit similar functional responses on the target client’s prototypes. Let gℓk,e denote expert e of client k at layer ℓ. For target client k and target expert e, the similarity of source expert e′ from client j is 
+
+sℓk,e ←j,e ′ = X
+
+> p∈P ℓk
+
+αℓk,p,e cos  gℓk,e (¯ uℓk,p ), g ℓj,e ′ (¯ uℓk,p ) , (10) where Pℓk is the set of supported target-client patterns, and αℓk,p,e assigns higher weight to patterns with greater prototype support and higher mean routing probability to the target expert e. Similarities are then converted into aggregation weights using a temperature-scaled softmax, 
+
+βℓk,e ←j,e ′ = exp( sℓk,e ←j,e ′ /τ )
+
+P 
+
+> j′̸=k
+
+P 
+
+> e′′
+
+exp( sℓk,e ←j′,e ′′ /τ ) . (11) 5Subsequently, CEA forms a personalized expert for target client k:
+
+˜gℓk,e = ηg ℓk,e + (1 − η) X 
+
+> j̸=k
+
+X
+
+> e′
+
+βℓk,e ←j,e ′ gℓj,e ′ , (12) where η preserves a residual contribution from the target client’s original expert specialization. The personalized experts are returned to client k in the next communication round, while all non-expert components are aggregated globally. 
+
+3.4 Federated Optimization 
+
+Appendix A provides the complete round-by-round procedure. At communication round t, the server sends each selected client the current globally shared components, its CEA-personalized expert parameters, and the CRA anchors constructed from the previous round, {aℓ,t −1 
+
+> p
+
+}. The anchors serve only as auxiliary routing targets during local optimization. Each client then trains its local model using MCR-enabled MoE routing. Let Aρ(·| r) denote the anchor-exposure augmentation distribution described above. The local training objective is 
+
+Lk,t = E(x,y, r)∼D k E˜r∼A ρ(·| r) [ℓ(fθ (x, ˜r), y )] + λbal Lk,t  
+
+> bal
+
++ λCRA Lk,t 
+
+> CRA
+
+, (13) where Lk,t  
+
+> bal
+
+is the standard MoE load-balancing loss [30] that discourages collapse onto a small subset of experts, and λbal controls its strength. The term Lk,t  
+
+> CRA
+
+aligns current batch-level routing distributions to available consensus anchors, with weight λCRA , and is zero when no anchored pattern appears in the batch. After local training, clients send model updates and pattern-level routing summaries to the server. The server aggregates shared components, constructs next-round CRA anchors, and forms CEA-personalized experts. Together, the components promote specialization-consistent routing and aggregation under modality heterogeneity without sharing raw data. 
+
+## 4 Experiments 
+
+Datasets. We evaluate MedMix on two real-world multimodal medical datasets: ADNI [27] and MIMIC-IV [10, 12]. ADNI contains up to four modalities per sample, including MRI, genomics, clinical assessments, and biospecimen biomarkers, for three-class Alzheimer’s diagnosis prediction. MIMIC-IV contains up to three EHR modalities, including laboratory measurements, discharge-note text features, and diagnosis/procedure code features, for one-year mortality prediction. We follow standard preprocessing from prior multimodal medical learning work [30]. Both datasets naturally exhibit modality incompleteness; we further construct federated splits with increasing inter-client modality heterogeneity: Balanced , Medium , and High . We further evaluate increased intra-client incompleteness and an extreme Mod-Excl. setting, where clients have unique modality sets. Details are in Appendix C. 
+
+Baselines. We compare MedMix with a broad set of baselines covering the primary method families relevant to our setting. First, we adapt representative centralized multimodal fusion architectures to the FL setting: Attention [1], Transformer [25], FuseMoE [8], and FlexMoE [30]. Second, we include FL-native incomplete-modality methods, FedDUET [21] and PEPSY [19], which jointly address inter-client modality heterogeneity and intra-client incompleteness. Third, we include federated sparse MoE methods, FedMoE [17] and FedAlign-MoE [4], adapting their LLM fine-tuning mechanisms to our end-to-end supervised multimodal clinical prediction setting. 
+
+Implementation and evaluation protocol. All methods are implemented in PyTorch [22] and trained in the same federated simulation framework. Unless otherwise specified, each method is trained for up to 150 communication rounds with one local epoch per round and full client participation. Clients optimize the supervised task objective using Adam. We use a 70/15/15 train/validation/test split per client, select the best checkpoint according to validation F1 with smoothed early stopping, and report test F1 as the mean and standard deviation over five random seeds, using macro-F1 for ADNI and binary F1 for MIMIC-IV. For baselines, we use the best hyperparameters from the original papers when available, otherwise tuning learning rate and batch 6Table 1: Performance comparison under modality heterogeneity. Results are F1 scores (macro-F1 for ADNI and binary F1 for MIMIC-IV; mean ±std over five seeds). Balanced/Medium/High denote increasing inter-client modality heterogeneity; + Intra-Client Missingness adds record-level modality dropout; Mod-Excl. denotes modality-exclusive clients. Method Inter-Client Heterogeneity +Intra-Client Missingness Extreme Avg. Balanced Medium High Balanced Medium High Mod-Excl. Attention .507 ±.004 .492 ±.009 .463 ±.029 .476 ±.006 .471 ±.024 .395 ±.114 .365 ±.033 .453 Transformer .509 ±.009 .498 ±.037 .481 ±.028 .505 ±.011 .472 ±.018 .501 ±.020 .346 ±.057 .473 FuseMoE .520 ±.006 .522 ±.015 .487 ±.031 .498 ±.007 .495 ±.015 .490 ±.026 .382 ±.054 .485 FlexMoE .568 ±.025 .520 ±.008 .507 ±.025 .515 ±.012 .488 ±.011 .523 ±.010 .471 ±.045 .513 FedDUET .509 ±.010 .494 ±.020 .486 ±.005 .464 ±.003 .483 ±.009 .489 ±.007 .384 ±.023 .473 PEPSY .497 ±.017 .492 ±.007 .399 ±.023 .476 ±.003 .440 ±.022 .353 ±.019 .310 ±.097 .424 FedMoE .511 ±.007 .501 ±.021 .488 ±.044 .454 ±.029 .498 ±.016 .499 ±.029 .334 ±.043 .469 FedAlign-MoE .489 ±.017 .495 ±.014 .490 ±.027 .479 ±.022 .473 ±.023 .509 ±.017 .317 ±.039 .464 
+
+MedMix .560 ±.023 .521 ±.024 .546 ±.010 .540 ±.012 .519 ±.016 .540 ±.012 .481 ±.034 .530 
+
+(a) ADNI 
+
+Method Inter-Client Heterogeneity +Intra-Client Missingness Extreme Avg. Balanced Medium High Balanced Medium High Mod-Excl. Attention .596 ±.009 .534 ±.012 .529 ±.008 .542 ±.007 .538 ±.012 .520 ±.011 .472 ±.010 .533 Transformer .616 ±.011 .585 ±.012 .565 ±.012 .564 ±.007 .561 ±.008 .547 ±.008 .485 ±.015 .561 FuseMoE .616 ±.006 .588 ±.006 .566 ±.009 .566 ±.008 .563 ±.010 .548 ±.007 .497 ±.015 .564 FlexMoE .597 ±.012 .590 ±.008 .557 ±.014 .553 ±.016 .563 ±.014 .543 ±.015 .483 ±.013 .555 FedDUET .517 ±.006 .507 ±.014 .464 ±.020 .479 ±.005 .509 ±.022 .448 ±.009 .392 ±.035 .474 PEPSY .562 ±.003 .578 ±.010 .525 ±.006 .526 ±.006 .557 ±.018 .499 ±.008 .483 ±.008 .533 FedMoE .607 ±.018 .574 ±.018 .554 ±.037 .562 ±.014 .569 ±.009 .538 ±.027 .492 ±.012 .556 FedAlign-MoE .616 ±.010 .580 ±.012 .562 ±.011 .564 ±.005 .570 ±.004 .552 ±.008 .504 ±.010 .564 
+
+MedMix .614 ±.005 .587 ±.005 .571 ±.005 .567 ±.008 .576 ±.006 .551 ±.009 .505 ±.008 .567 
+
+(b) MIMIC-IV 
+
+size. For MedMix , we use one sparse MoE fusion layer, gate load-balancing weight 0.01, CRA weight 0.02, anchor-exposure augmentation probability 0.3, and CEA residual weight 0.5. All experiments were conducted using NVIDIA GeForce RTX 3090 GPUs. Further implementation details are provided in Appendix D. 
+
+## 5 Results 
+
+Primary Results. MedMix achieves the strongest average performance under modality heterogeneity on both datasets, as shown in Table 1. On ADNI, MedMix achieves the best average macro-F1, outperforming the strongest baseline, FlexMoE, and ranks top-2 in every setting. The gains are most pronounced in challenging heterogeneity regimes, including High inter-client heterogeneity (0.546 vs. 0.507) and Mod-Excl. (0.481 vs. 0.471). On MIMIC-IV, MedMix also achieves the best average binary F1 (0.567), while remaining competitive across all settings and obtaining the strongest results under High inter-client heterogeneity, +Intra-Client Medium, and Mod-Excl. The relative gains are larger on ADNI because it presents a more challenging modality-heterogeneity regime, with four modalities, fewer training samples per client, and more fragmented per-silo modality-mask support. In contrast, MIMIC-IV has three modalities and substantially more records per client, allowing existing MoE baselines to learn comparatively stable expert specialization under moderate heterogeneity. This helps explain why MedMix yields especially clear improvements on ADNI, while on MIMIC-IV the gains are smaller but remain concentrated in stronger heterogeneity settings. These results show that strong centralized multimodal MoE models are not inherently robust un-der federated modality heterogeneity. FuseMoE and FlexMoE remain competitive in balanced or moderate settings, but become less consistent as client modality distributions diverge, likely because routers and experts are aggregated after learning different local specialization semantics. FL-native 710 -5 
+
+> 10 -4
+> 10 -3
+> 10 -2
+> 10 -1
+> Routing  divergence  0.0175
+
+Base 
+
+> 5.0e-04
+
+MCR only 
+
+> 3.5e-04
+
+MCR+CRA    
+
+> individual shared patterns support-weighted mean
+
+(a) Cross-client routing divergence. 20 40 60 80 100 120 
+
+Round    
+
+> 0.01 0.02 0.03 0.04 0.05
+> Cosine  drift
+> w/o CEA w/ CEA
+
+(b) Prototype-weighted expert drift. 
+
+Figure 2: Cross-client specialization consistency analysis. (a) Each small dot denotes one shared modality-mask pattern, and the large dot denotes the support-weighted mean JS divergence; MCR substantially reduces routing disagreement, while CRA further improves cross-client routing con-sistency. (b) Index-wise global aggregation without CEA causes larger cosine drift from the target client’s local expert, whereas CEA maintains substantially lower drift throughout training, indicating improved semantic compatibility of expert specialization. Table 2: System cost comparison. Params denote trainable per-client inference parameters. FLOPs and time are measured per sample on a balanced test split. Avg. F1 reports the average performance across all evaluated heterogeneity settings.                                                                                          
+
+> Metric Attention Transformer FuseMoE FlexMoE FedDUET PEPSY FedMoE FedAlign-MoE MedMix
+> ADNI
+> Params (M) ↓3.79 4.17 10.84 5.02 4.65 4.46 10.84 10.84 4.90 MFLOPs ↓55.8 90.3 324.7 63.5 53.8 63.3 324.7 324.7 73.9 Time (ms) ↓0.82 0.94 1.85 2.70 0.72 1.51 1.92 1.91 2.37 Avg. F1 ↑.453 .473 .485 .513 .473 .424 .469 .464 .530 MIMIC-IV
+> Params (M) ↓0.21 0.62 7.16 2.59 0.86 0.82 7.16 7.16 2.55 MFLOPs ↓4.9 25.9 194.6 9.5 1.9 9.2 194.6 194.6 24.6 Time (ms) ↓0.33 0.58 1.36 0.97 0.25 0.71 1.39 1.41 0.88 Avg. F1 ↑.533 .561 .564 .555 .474 .533 .556 .564 .567
+
+incomplete-modality methods such as FedDUET and PEPSY explicitly address modality incomplete-ness, but lack sparse expert specialization mechanisms for highly heterogeneous modality contexts. Federated MoE baselines increase expert capacity, but their aggregation mechanisms are not designed to tackle dual-level modality heterogeneity. In contrast, MedMix explicitly promotes specialization consistency across heterogeneous clients, leading to more stable performance across datasets and modality heterogeneity regimes. 
+
+Cross-Client Routing Alignment and Expert Compatibility. To examine whether MedMix im-proves cross-client specialization consistency, we analyze both routing behavior and expert aggrega-tion dynamics. First, we compute the support-weighted Jensen–Shannon divergence between clients’ routing distributions over shared modality-mask patterns. As shown on a log scale in Fig. 2(a), the baseline exhibits substantially larger cross-client routing disagreement, while MCR reduces this divergence by more than an order of magnitude. Adding CRA further lowers the divergence, suggesting that MCR improves the compatibility of routing decisions across clients and that CRA further stabilizes shared routing semantics. Second, we evaluate whether CEA improves expert aggregation by measuring prototype-weighted functional drift between each client’s local expert and the aggregated expert received after server aggregation. Fig. 2(b) shows that index-wise global aggregation without CEA produces steadily larger cosine drift, indicating that same-index experts are not necessarily semantically compatible across clients. In contrast, CEA keeps the personalized expert much closer to the target client’s local expert throughout training, supporting its role as a function-aware aggregation mechanism that preserves specialization consistency under modality heterogeneity. 8Table 3: Ablation study on ADNI. MCR denotes modality-context-aware routing, CRA denotes consensus-guided routing alignment, and CEA denotes client-adaptive expert aggregation. Variant Balanced Medium High Mod-Excl. +Intra Bal. +Intra Med. +Intra High Avg. w/o CEA,CRA,MCR .567 .527 .535 .446 .541 .513 .533 .523 w/o CEA, CRA .571 .521 .524 .467 .544 .508 .543 .523 w/o CEA .554 .524 .544 .467 .548 .514 .549 .529          
+
+> MedMix Complete .560 .521 .546 .481 .540 .519 .540 .530
+
+System Cost. Table 2 compares MedMix with all baselines using trainable per-client inference parameters, FLOPs, wall-clock inference time, and Avg. F1 across heterogeneity settings. Cost metrics are measured per sample on a balanced test split with a fixed test-sample budget. MedMix 
+
+achieves the highest Avg. F1 on both datasets with a moderate computational footprint. Compared with FuseMoE, FedMoE, and FedAlign-MoE, it uses about 2.2× fewer parameters and 4.4× fewer FLOPs on ADNI, and about 2.8× fewer parameters and 7.9× fewer FLOPs on MIMIC-IV. It is also comparable in size to FlexMoE while achieving higher Avg. F1 on both datasets, suggesting that its gains come from improved specialization consistency rather than increased expert capacity. Although sparse routing adds overhead beyond FLOP counts, MedMix remains in the same millisecond-scale range as the baselines and is faster than FuseMoE, FedMoE, and FedAlign-MoE on MIMIC-IV. 
+
+Ablation Study. Table 3 ablates the main components of MedMix on ADNI. The base variant without CEA, CRA, and MCR achieves an average F1 of 0.523, while MedMix Complete improves the average to 0.530. Adding MCR alone (w/o CEA, CRA) improves the Mod-Excl. setting from 0.446 to 0.467, suggesting that modality-context-aware routing is especially useful when clients have strongly divergent modality patterns, though its effect is less pronounced in easier settings. Adding CRA increases the average F1 to 0.529 and gives the best results in the +Intra Balanced and +Intra High settings. This supports the role of consensus-guided alignment in improving cross-client routing consistency when sample-level modality incompleteness changes the modality patterns observed during local training. Finally, adding CEA yields MedMix Complete, which achieves the best overall average and the strongest Mod-Excl. result, improving Mod-Excl. from 0.467 without CEA to 0.481. Overall, the components address complementary aspects of specialization consistency under modality heterogeneity: MCR reduces routing ambiguity, CRA improves cross-client routing consistency, and CEA preserves semantic compatibility during expert aggregation. 
+
+## 6 Discussion and Conclusion 
+
+Limitations and societal impacts. For evaluation, we construct inter-client heterogeneity and intra-client incompleteness scenarios complementary to natural modality incompleteness already present in real-world medical datasets. This enables systematic study of modality heterogeneity, but may not capture the full complexity of real hospital deployments, where modality availability can correlate with label distributions and other site-specific clinical factors. In addition, our experiments focus on modality heterogeneity under a shared prediction task. Extending MedMix to multi-task and task heterogeneous settings remains an important direction for future work. More broadly, our results suggest that standard MoE regularization objectives such as load balancing are insufficient for federated sparse MoEs under modality heterogeneity, since balanced expert utilization alone does not guarantee semantic compatibility of expert specialization across clients. By enabling privacy-preserving, decentralized training for multimodal medical tasks under modality heterogeneity, 
+
+MedMix can facilitate collaboration across institutions with different modality availability and improve model robustness for patients with partial clinical evidence. 
+
+Conclusion. We show that federated multimodal MoEs are fragile under modality heterogeneity, as client-specific modality distributions can induce divergent routing behavior and weaken the semantic compatibility of expert specialization across clients. To address this, we propose MedMix ,which promotes specialization consistency through context-aware routing, consensus-guided routing alignment, and client-adaptive expert aggregation based on functional similarity. Experiments on ADNI and MIMIC-IV demonstrate that MedMix improves robustness across diverse modality heterogeneity and modality incompleteness settings. 9References 
+
+[1] Dzmitry Bahdanau. Neural machine translation by jointly learning to align and translate. arXiv preprint arXiv:1409.0473 , 2014. [2] Tadas Baltrusaitis, Chaitanya Ahuja, and Louis-Philippe Morency. Multimodal machine learn-ing: A survey and taxonomy. IEEE transactions on pattern analysis and machine intelligence ,41(2):423–443, 2019. [3] Liwei Che, Jiaqi Wang, Yao Zhou, and Fenglong Ma. Multimodal federated learning: A survey. 
+
+Sensors , 23(15):6986, 2023. [4] Zihan Fang, Qianru Wang, Haonan An, Zheng Lin, Yiqin Deng, Xianhao Chen, and Yuguang Fang. Aggregation alignment for federated learning with mixture-of-experts under data hetero-geneity. arXiv preprint arXiv:2603.21276 , 2026. [5] William Fedus, Barret Zoph, and Noam Shazeer. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23 (120):1–39, 2022. [6] Tiantian Feng, Digbalay Bose, Tuo Zhang, Rajat Hebbar, Anil Ramakrishna, Rahul Gupta, Mi Zhang, Salman Avestimehr, and Shrikanth Narayanan. Fedmultimodal: A benchmark for multimodal federated learning. In Proceedings of the 29th ACM SIGKDD conference on knowledge discovery and data mining , pages 4035–4045, 2023. [7] Ary L Goldberger, Luis AN Amaral, Leon Glass, Jeffrey M Hausdorff, Plamen Ch Ivanov, Roger G Mark, Joseph E Mietus, George B Moody, Chung-Kang Peng, and H Eugene Stanley. Physiobank, physiotoolkit, and physionet: components of a new research resource for complex physiologic signals. circulation , 101(23):e215–e220, 2000. [8] Xing Han, Huy Nguyen, Carl Harris, Nhat Ho, and Suchi Saria. Fusemoe: Mixture-of-experts transformers for fleximodal fusion. Advances in Neural Information Processing Systems , 37: 67850–67900, 2024. [9] Mohammad Havaei, Nicolas Guizard, Nicolas Chapados, and Yoshua Bengio. Hemis: Hetero-modal image segmentation. In International conference on medical image computing and computer-assisted intervention , pages 469–477. Springer, 2016. [10] A. Johnson, T. Pollard, S. Horng, L. A. Celi, and R. Mark. MIMIC-IV-Note: Deidentified free-text clinical notes (version 2.2), 2023. RRID:SCR_007345. [11] Alistair Johnson, Lucas Bulgarelli, Tom Pollard, Brian Gow, Benjamin Moody, Steven Horng, Leo Anthony Celi, and Roger Mark. MIMIC-IV (version 3.1), 2024. RRID:SCR_007345. [12] Alistair EW Johnson, Lucas Bulgarelli, Lu Shen, Alvin Gayles, Ayad Shammout, Steven Horng, Tom J Pollard, Sicheng Hao, Benjamin Moody, Brian Gow, et al. Mimic-iv, a freely accessible electronic health record dataset. Scientific data , 10(1):1, 2023. [13] Peter Kairouz, H Brendan McMahan, Brendan Avent, Aurélien Bellet, Mehdi Bennis, Ar-jun Nitin Bhagoji, Kallista Bonawitz, Zachary Charles, Graham Cormode, Rachel Cummings, et al. Advances and open problems in federated learning. Foundations and trends® in machine learning , 14(1–2):1–210, 2021. [14] Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu, Dehao Chen, Orhan Firat, Yanping Huang, Maxim Krikun, Noam Shazeer, and Zhifeng Chen. Gshard: Scaling giant models with condi-tional computation and automatic sharding. arXiv preprint arXiv:2006.16668 , 2020. [15] Mengmeng Ma, Jian Ren, Long Zhao, Sergey Tulyakov, Cathy Wu, and Xi Peng. Smil: Multimodal learning with severely missing modality. In Proceedings of the AAAI conference on artificial intelligence , volume 35, pages 2302–2310, 2021. [16] Brendan McMahan, Eider Moore, Daniel Ramage, Seth Hampson, and Blaise Aguera y Arcas. Communication-efficient learning of deep networks from decentralized data. In Artificial intelligence and statistics , pages 1273–1282. PMLR, 2017. 10 [17] Hanzi Mei, Dongqi Cai, Ao Zhou, Shangguang Wang, and Mengwei Xu. Fedmoe: Personalized federated learning via heterogeneous mixture of experts. arXiv preprint arXiv:2408.11304 ,2024. [18] Manh Duong Nguyen, Trung Thanh Nguyen, Huy Hieu Pham, Trong Nghia Hoang, Phi Le Nguyen, and Thanh Trung Huynh. Fedmac: Tackling partial-modality missing in federated learning with cross-modal aggregation and contrastive regularization. In 2024 22nd International Symposium on Network Computing and Applications (NCA) , pages 278–285. IEEE, 2024. [19] Manh Duong Nguyen, Trong Nghia Hoang, Thanh Trung Huynh, Quoc Viet Hung Nguyen, and Phi Le Nguyen. Learning reconfigurable representations for multimodal federated learning with missing data. In The Thirty-ninth Annual Conference on Neural Information Processing Systems , 2025. [20] Adiba Orzikulova, Jaehyun Kwak, Jaemin Shin, and Sung-Ju Lee. Federated learning for time-series healthcare sensing with incomplete modalities. arXiv preprint arXiv:2405.11828 ,2024. [21] Adiba Orzikulova, Jaehyun Kwak, Jaemin Shin, Yunqi Guo, Xiaomin Ouyang, Guoliang Xing, and Sung-Ju Lee. FedDUET: Bridging modality gaps with decoupled uncertainty-enhanced training. OpenReview, 2025. [22] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, et al. Pytorch: An imperative style, high-performance deep learning library. Advances in neural information processing systems , 32, 2019. [23] Matthias Reisser, Christos Louizos, Efstratios Gavves, and Max Welling. Federated mixture of experts. arXiv preprint arXiv:2107.06724 , 2021. [24] Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. In International Conference on Learning Representations , 2017. [25] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. Advances in neural information processing systems , 30, 2017. [26] Qi Wang, Liang Zhan, Paul Thompson, and Jiayu Zhou. Multimodal learning with incomplete modalities by knowledge distillation. In Proceedings of the 26th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining , pages 1828–1838, 2020. [27] Michael W Weiner, Paul S Aisen, Clifford R Jack Jr, William J Jagust, John Q Trojanowski, Leslie Shaw, Andrew J Saykin, John C Morris, Nigel Cairns, Laurel A Beckett, et al. The alzheimer’s disease neuroimaging initiative: progress report and future plans. Alzheimer’s & Dementia , 6(3):202–211, 2010. [28] Michael W Weiner, Dallas P Veitch, Paul S Aisen, Laurel A Beckett, Nigel J Cairns, Robert C Green, Danielle Harvey, Clifford R Jack Jr, William Jagust, John C Morris, et al. The alzheimer’s disease neuroimaging initiative 3: Continued innovation for clinical trial improve-ment. Alzheimer’s & Dementia , 13(5):561–571, 2017. [29] Renjie Wu, Hu Wang, Hsiang-Ting Chen, and Gustavo Carneiro. Deep multimodal learning with missing modality: A survey. arXiv preprint arXiv:2409.07825 , 2024. [30] Sukwon Yun, Inyoung Choi, Jie Peng, Yangfan Wu, Jingxuan Bao, Qiyiwen Zhang, Jiayi Xin, Qi Long, and Tianlong Chen. Flex-moe: Modeling arbitrary modality combination via the flexible mixture-of-experts. Advances in Neural Information Processing Systems , 37: 98782–98805, 2024. 11 A Algorithm 
+
+Algorithm 1 MedMix Federated Training 
+
+Require: Clients {D k}Kk=1 , rounds T , local epochs E, loss weights λbal , λ CRA , anchor-exposure rate ρ 
+
+> 1:
+
+Initialize shared params θ0sh and client expert states {Γ0
+
+> k
+
+}Kk=1 from a common model  
+
+> 2:
+
+Initialize CRA anchors B0 = ∅ 
+
+> 3:
+
+for t = 1 , . . . , T do  
+
+> 4:
+
+Server selects clients St 
+
+> 5:
+
+for all k ∈ S t in parallel do  
+
+> 6:
+
+Server sends shared params θt−1sh , CEA expert state Γt−1 
+
+> k
+
+, and CRA anchors Bt−1 
+
+> 7:
+
+(θt
+
+> sh ,k
+
+, Γtk, loc , Rtk, Ptk) ← CLIENT UPDATE (k, θ t−1sh , Γt−1 
+
+> k
+
+, Bt−1) 
+
+> 8:
+
+end for  
+
+> 9:
+
+Aggregate shared params θt 
+
+> sh
+
+from {θt 
+
+> sh ,k
+
+: k ∈ S t} using sample-weighted FedAvg  
+
+> 10:
+
+Construct CRA anchors Bt from routing summaries {R tk : k ∈ S t} 
+
+> 11:
+
+Form CEA-personalized expert states {Γtk : k ∈ S t} from local experts and prototypes 
+
+{(Γ tk, loc , Ptk) : k ∈ S t} 
+
+> 12:
+
+Retain Γtk = Γ t−1 
+
+> k
+
+for clients k / ∈ S t 
+
+> 13:
+
+end for  
+
+> 14:
+
+return Shared params θT
+
+> sh
+
+, CRA anchors BT , and CEA expert states {ΓTk }Kk=1 
+
+Algorithm 2 CLIENT UPDATE for MedMix 
+
+Require: Client k with Dk, shared params θsh , expert state Γk, CRA anchors B, local epochs E 
+
+> 1:
+
+Initialize local model by combining θsh with expert params Γk 
+
+> 2:
+
+for local epoch e = 1 , . . . , E do  
+
+> 3:
+
+for minibatch (x, y, r) do  
+
+> 4:
+
+Sample ˜r ∼ A ρ(·| r) using anchor-exposure augmentation  
+
+> 5:
+
+Encode modalities observed under ˜r 
+
+> 6:
+
+Apply MCR routing  
+
+> 7:
+
+Compute task loss ℓ(fθ (x, ˜r), y ) and MoE load-balancing loss Lbal  
+
+> 8:
+
+Compute CRA loss LCRA for anchored patterns present in the minibatch  
+
+> 9:
+
+Update local model using 
+
+ℓ(fθ (x, ˜r), y ) + λbal Lbal + λCRA LCRA . 
+
+> 10:
+
+end for  
+
+> 11:
+
+end for  
+
+> 12:
+
+Collect pattern-level routing summaries Rk 
+
+> 13:
+
+Collect pattern-level expert-input prototypes Pk 
+
+> 14:
+
+Split updated local model into shared params θsh ,k and local expert params Γk, loc  
+
+> 15:
+
+return θsh ,k , Γk, loc , Rk, and Pk
+
+Routing summaries Rk contain support, confidence, and mean routing distributions for layer-level modality patterns p = ( r, m ). Expert prototypes Pk contain aggregate expert-input representations for the same patterns and are used by CEA for functional expert matching. 
+
+## B Related Work 
+
+Multimodal Learning with Missing Modalities. Multimodal learning studies how models rep-resent, align, and fuse information from multiple data sources [2]. This is especially important in medical AI, where imaging, genomics, laboratory measurements, structured records, and clinical text provide complementary evidence about a patient’s condition. In practice, however, patient records are rarely modality-complete because exams may not be ordered, measurements may be unavailable, and institutions may differ in which modalities they routinely collect. Prior work has addressed missing modalities through reconstruction-based and representation-based strategies [29]. 12 HeMIS embeds each available imaging modality into a shared latent space and aggregates observed modalities without synthesizing missing ones [9]; Wang et al. use modality-specific teachers to learn from incomplete multimodal data while avoiding noisy imputation [26]; and SMIL studies severe missingness during both training and testing with Bayesian meta-learning [15]. These works show that missing modalities should be handled as part of model design rather than as a preprocessing afterthought. MedMix builds on this motivation but studies a federated setting, where missingness also varies systematically across clients. Thus, incomplete modalities become not only a sample-level robustness problem, but also a source of cross-client heterogeneity that can make shared multimodal models difficult to train consistently. 
+
+Sparse Mixture-of-Experts for Multimodal Fusion. Sparse Mixture-of-Experts (MoE) models use conditional computation to increase capacity while activating only a small subset of parameters for each input. The sparsely-gated MoE layer introduced by Shazeer et al. uses a trainable gating network to select expert subnetworks on a per-example basis [24], while Switch Transformer simplifies sparse routing and highlights practical issues such as routing stability and expert load balancing [5]. This conditional structure is naturally appealing for multimodal fusion, where different modality subsets may require different fusion behavior. Recent multimodal MoE methods therefore use sparse experts to improve robustness under incomplete or variable modality observations: FuseMoE introduces a MoE Transformer for fleximodal fusion with missing modalities and irregular sampling [8], and Flex-MoE models arbitrary modality combinations using a missing-modality bank and sparse MoE routing [30]. These methods show that sparse MoE architectures are powerful tools for flexible multimodal fusion under missingness. However, they are primarily designed for centralized learning, where routing and expert specialization are learned under a shared data distribution. In federated multimodal learning, clients may observe different modality subsets with different frequencies, causing sparse routers and experts to specialize in client-specific ways before aggregation. MedMix addresses this federated MoE setting by coordinating routing and expert aggregation across heterogeneous clients. 
+
+Federated Multimodal Learning with Incomplete Modalities. Federated learning is a natural fit for multimodal medical AI because sensitive patient data often cannot be centralized across institutions. Multimodal federated learning (MFL), however, introduces challenges beyond standard unimodal FL: clients may differ not only in label or feature distributions, but also in which modalities are available locally [3]. Benchmarks such as FedMultimodal show that missing modalities are an important real-world corruption in MFL systems [6]. Recent methods address incomplete modalities directly in federated settings: FedMAC combines cross-modal aggregation with contrastive regu-larization for partial-modality missing [18]; FedDUET studies dual-level modality heterogeneity using decoupled training and uncertainty-aware optimization [21]; and PEPSY learns reconfigurable representations with client-side embedding controls that encode missing-data patterns [19]. These methods show that federated multimodal models must account for both inter-client modality differences and intra-client missingness. However, they primarily focus on representation alignment, reconstruction, uncertainty modeling, or personalization in non-MoE fusion architectures. In contrast, 
+
+MedMix studies sparse MoE-based multimodal FL, where modality heterogeneity creates an additional failure mode: routers and experts may specialize differently across clients before aggregation. MedMix 
+
+therefore complements prior incomplete-modality MFL work by explicitly coordinating routing behavior and expert aggregation under dual-level modality heterogeneity. 
+
+Federated Mixture-of-Experts. Mixture-of-experts ideas have also been explored in federated learning to address client heterogeneity. FedMix trains an ensemble of specialized models and lets each client adaptively select a user-specific subset of ensemble members, allowing clients with similar data characteristics to share statistical strength while avoiding a single global model for all clients [23]. This formulation uses MoE primarily as a client-level ensemble of specialized models, whereas our setting concerns sparse internal MoE layers in which multimodal tokens are routed to expert networks during fusion. Closer to our setting, FedMoE applies sparse MoE architectures to personalized federated learning by constructing client-specific sub-MoE models from expert activation patterns and exchanging knowl-edge through modular aggregation and expert recommendation [17]. FedAlign-MoE further identifies routing divergence and same-index expert semantic mismatch in federated MoE training, addressing 13 these issues through routing-distribution alignment and semantic-aware expert aggregation [4]. These methods show that sparse MoE components require special care in federated optimization, but they are primarily motivated by language-model fine-tuning under general client or task heterogeneity. In contrast, MedMix studies end-to-end multimodal medical prediction under incomplete modalities, where routing and expert specialization are shaped by structured modality-availability patterns across both clients and samples. 
+
+## C Federated Modality-Missingness Construction 
+
+Medical FL across institutions rarely has a perfectly aligned set of modalities. We therefore evaluate under splits that vary two sources of modality heterogeneity: inter-client modality heterogeneity ,where clients differ in the modalities available at the institution level, and intra-client missingness ,where individual records within a client have additional missing modalities. All split construction is monotone with respect to the dataset-provided natural modality mask: we only remove observed modalities and never add unavailable evidence. Let M denote the number of modalities. For record i at client k, let rnat  
+
+> i,k
+
+∈ { 0, 1}M be the natural modality-availability mask from the dataset. The final mask ri,k always satisfies 
+
+ri,k ≤ rnat  
+
+> i,k
+
+(14) elementwise. Records with no remaining observed modality are removed. 
+
+Inter-client heterogeneity. We report three inter-client heterogeneity levels: Balanced , Medium ,and High . The Balanced setting uses a stratified partition that approximately preserves label and natural modality-mask distributions across clients, without adding structural modality drops. For 
+
+Medium and High , we simulate client-level structural modality availability using a Beta–Bernoulli process. For each client k, we sample 
+
+p(k) 
+
+> a
+
+∼ Beta( α, β ), (15) then draw a client-level modality-access vector 
+
+zk,m ∼ Bernoulli( p(k) 
+
+> a
+
+), m = 1 , . . . , M. (16) This access vector is applied to all records in the client: 
+
+rstruct  
+
+> i,k,m
+
+= rnat 
+
+> i,k,m
+
+zk,m . (17) Thus, if zk,m = 0 , modality m is absent for every record in client k, mimicking institutional differences in equipment, measurement protocols, or clinical workflows. If all modalities are dropped for a client, we randomly retain one modality to avoid a degenerate client. 
+
+Intra-client missingness. For the +Intra-Client Missingness variants, we further apply record-level modality dropout after inter-client structural masking. For each remaining observed modality, we independently sample 
+
+di,k,m ∼ Bernoulli( pintra ) (18) and set 
+
+ri,k,m = rstruct  
+
+> i,k,m
+
+(1 − di,k,m ). (19) We use pintra = 0 .3 for the intra-client missingness variants and preserve at least one observed modality for each retained record. 
+
+Modality-exclusive setting. We also evaluate an extreme Mod-Excl. setting, where each sufficiently frequent modality combination is assigned to a distinct client. This creates clients with disjoint modality patterns and is used to stress-test methods under severe inter-client modality specialization. 
+
+Dataset-specific parameters. Table 4 summarizes the Beta–Bernoulli parameters used for the 
+
+Medium and High inter-client heterogeneity levels. The parameters are dataset-specific because ADNI has four modalities whereas MIMIC-IV has three modalities. 14 Table 4: Inter-client modality-availability settings. Balanced uses the natural stratified split without additional structural modality drops. Medium and High use Beta–Bernoulli client-level structural masking. The +Intra-Client Missingness variants additionally use pintra = 0 .3.Dataset M Setting Beta (α, β ) E[pa] E[#avail] 
+
+ADNI 4Balanced — — 4.00 
+
+Medium (17 , 3) 0.85 3.40 
+
+High (6 , 14) 0.30 1.20 
+
+MIMIC-IV 3Balanced — — 3.00 
+
+Medium (15 , 5) 0.75 2.25 
+
+High (6 , 14) 0.30 0.90 
+
++Intra-Client Missingness pintra = 0 .3 — —Table 5: Federated baseline training hyperparameters used in our experiments. Dataset Method Learning rate Batch size ADNI Attention [1] 4 × 10 −5 8Transformer [25] 1 × 10 −4 8FuseMoE [8] 1 × 10 −4 16 FlexMoE [30] 1 × 10 −4 8FedDUET [21] 1 × 10 −4 16 PEPSY [19] 4 × 10 −5 8FedMoE [17] 1 × 10 −4 16 FedAlign-MoE [4] 1 × 10 −4 16 MIMIC-IV Attention [1] 1 × 10 −4 16 Transformer [25] 4 × 10 −5 8FuseMoE [8] 1 × 10 −4 16 FlexMoE [30] 4 × 10 −5 16 FedDUET [21] 4 × 10 −5 16 PEPSY [19] 1 × 10 −4 16 FedMoE [17] 1 × 10 −4 16 FedAlign-MoE [4] 1 × 10 −4 16 
+
+## D Implementation Details 
+
+Shared federated protocol. All federated methods are trained for up to 150 communication rounds with one local epoch per round, and all clients participate in every round. Each client uses the Adam optimizer for local training. We use a 70/15/15 train/validation/test split within each client. Model selection is based on validation F1 with smoothed early stopping, using smoothing coefficient 0.1,minimum improvement 10 −3, and patience equal to 20% of the training budget. All results are reported over five seeds, {42 , 43 , 44 , 45 , 46 }.
+
+Missing-modality handling. For all methods, the dataset loader preserves the observed-modality mask for each record. Unavailable modalities are represented by zero-valued placeholders with the correct input shape, and methods that support masking receive the observed-modality mask during fusion. Simulated missingness splits use partition-specific labels containing the modified modality masks, while natural splits use the original dataset-level modality masks. 
+
+Baseline hyperparameters. Table 5 summarizes the learning rates and batch sizes used for baseline methods in the federated experiments. For standard multimodal fusion baselines, model architectures follow the corresponding centralized fusion configurations, while federated local learning rates and batch sizes are tuned separately. FedMoE and FedAlign-MoE are adapted from their original fine-tuning setting to our end-to-end supervised multimodal prediction setting. 15 Table 6: MedMix model and training hyperparameters. Dataset Experts Top-k Heads Layers Classifier hidden/layers LR Batch size ADNI 16 2 4 1 256 / 2 1 × 10 −4 8MIMIC-IV 32 4 4 1 320 / 3 4 × 10 −5 16 C1 C2 C5 E0 E3 E6 E9 E12 E15     
+
+> (a) CB / C
+> C1 C2 C5
+> (b) CB / B
+> C4 C5 E0 E3 E6 E9 E12 E15
+> (c) GC / C
+> C4 C5
+> (d) GC / G
+
+Figure 3: Additional routing-divergence examples. Normalized top-2 expert activation frequencies for four different observed modality patterns. Here, C, B, and G denote clinical, biospecimen, and genomic modalities; for example, CB / C refers to the clinical modality token when only clinical and biospecimen modalities are observed for the sample. Darker green indicates more frequent expert selection. When routing the same modality pattern, clients activate different expert subsets, extending Figure 1(a). 
+
+MedMix hyperparameters. Table 6 summarizes the main MedMix hyperparameters. For both datasets, we use one sparse MoE fusion layer, a single router, gate load-balancing weight 0.01 , MCR modality/mask/position embedding dimensions of 32 /64 /16 , and router hidden dimension 256 . CRA uses minimum per-client pattern support 160 , quorum size 2, alignment weight 0.02 , and starts from round 2. Anchor-exposure augmentation uses targeted modality dropout with probability 0.3 and keeps at least one modality. CEA uses cross-expert matching, residual self-weight 0.5, temperature 
+
+0.2, unsupported-source weight 0.5.
+
+## E Additional Preliminary Experiment Details 
+
+We provide additional details and results for the preliminary diagnostics in Section 2. All experiments are conducted on ADNI, and use the same sparse MoE fusion backbone as MedMix with standard FedAvg aggregation. Unless otherwise stated, statistics are computed from final local models before server aggregation and on each client’s validation set. 
+
+Router top-k activation frequencies. For each modality pattern p = ( r, m ), we count how often each expert is selected by the top-2 router and normalize counts within each client. Figure 3 shows additional examples where clients show diverging routing distributions even for the same modality patterns. 16 −50 050 
+
+C1 High 
+
+C2 C3 C4 C5   
+
+> −50 050 −50 050
+
+C1 Mod-Excl.   
+
+> −50 050
+
+C2   
+
+> −50 050
+
+C3   
+
+> −50 050
+
+C4   
+
+> −50 050
+
+C5 E0 E3 E6 E9 E12 E15 Figure 4: Expert misalignment across clients. t-SNE visualizations of final-round expert outputs for all clients in the High and Mod-Excl. heterogeneity settings. Each row uses a shared embedding across clients, and colors denote top-1 routed experts. Structure varies across clients, extending Figure 1(b). 1 50 100 150 
+
+> FL round
+> -.10 -.05 .00 .05 .10
+> ΔF1 (post agg - pre agg)
+> Aggregation impact across rounds
+> Balanced Medium High Mod-Excl.
+
+Figure 5: Aggregation impact over training. Round-wise aggregation impact, ∆F1 = F1 post −
+
+F1 pre , for four different heterogeneity settings. Lines show means over clients and seeds. Shaded regions denote standard error over seeds. Negative values indicate that aggregation hurts the just-trained local model. 
+
+Expert-output t-SNE visualizations. We collect final-round expert-output vectors and color each point by its top-1 routed expert. For each row in Figure 4, one t-SNE embedding is fit jointly across all five clients in that split and then faceted by client. 
+
+Aggregation impact over rounds. At each round t, we evaluate client k before and after FedAvg aggregation on the same client validation set: 
+
+∆F1 k,t = F1 post  
+
+> k,t
+
+− F1 pre  
+
+> k,t
+
+. (20) Figure 5 plots the round-wise mean over clients and five seeds on four different heterogeneity settings. 17 F License of Assets 
+
+This work uses two restricted-access third-party clinical research datasets: the Alzheimer’s Disease Neuroimaging Initiative (ADNI) [27] dataset and MIMIC-IV [10, 12]. We did not create, redistribute, sublicense, or release participant-level data from either resource. All experiments were conducted by authorized users under the applicable data access agreements. ADNI data were obtained from the ADNI database through the LONI Image and Data Archive (IDA). Only aggregate results are reported in this paper, and no ADNI participant-level data are included in the paper, supplementary material, code release, or model artifacts. MIMIC-IV was accessed through PhysioNet. We report only aggregate, de-identified experimental results. No MIMIC-IV records, tables, notes, or participant-level derivatives are redistributed with this submission. Users who wish to reproduce experiments requiring these datasets must independently obtain access from ADNI/LONI and PhysioNet and comply with the respective data use agreements. 18
