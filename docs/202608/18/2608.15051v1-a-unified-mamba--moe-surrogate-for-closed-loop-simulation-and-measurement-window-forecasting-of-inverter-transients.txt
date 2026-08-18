@@ -1,0 +1,1307 @@
+Title: A Unified Mamba–MoE Surrogate for Closed-Loop Simulation and Measurement-Window Forecasting of Inverter Transients
+
+URL Source: https://arxiv.org/pdf/2608.15051v1
+
+Published Time: Tue, 18 Aug 2026 00:26:44 GMT
+
+Number of Pages: 10
+
+Markdown Content:
+> 1
+
+# A Unified Mamba–MoE Surrogate for Closed-Loop Simulation and Measurement-Window Forecasting of Inverter Transients 
+
+Haoguang Wang , Huy Hoang Le , Akhila Kandivalasa , Student Member, IEEE, 
+
+Christian Moya , Marcos Netto , Senior Member, IEEE, and Guang Lin *
+
+Abstract —This paper proposes a Mamba surrogate model with mixture-of-experts (MoE) routing to represent the transient dynamics of inverter-based resources. A Mamba surrogate model is a predictive machine learning model built on the Mamba architecture. MoE routing uses a router network to assign data-dependent weights to specialized subnetworks (experts). The resulting Mamba–MoE surrogate can perform two tasks: (i) closed-loop simulation and (ii) measurement-window forecasting of inverter transients. A single Mamba backbone with task conditioning and expert routing serves both tasks, replacing two separate specialists. Task-matched objectives fit each prediction form, and an adaptive conformal layer provides prediction inter-vals for both tasks. For the considered grid-following inverter, the unified surrogate model remains in the same low-error regime as a Mamba specialist pair while using 13% fewer parameters. The prediction intervals achieve 94–96% empirical mean marginal coverage across the two tasks. For transient dynamics—that is, beyond the vicinity of an equilibrium point—our surrogate model with MoE routing yields lower errors across all outputs in both tasks compared to a shared Mamba backbone without expert routing. A controller hardware-in-the-loop simulation validates our results and shows that adapting only the shared output head with limited measured data reduces held-out forecasting error. 
+
+Index Terms —Inverter-based resources, surrogate model, state space model, mixture of experts, adaptive conformal inference, power system transient dynamics, uncertainty quantification. 
+
+I. I NTRODUCTION 
+
+# POWER system dynamics are rapidly shifting toward being strongly driven by utility-scale inverter-based resources (IBRs). Indeed, IBR instantaneous penetration now regularly exceeds 60% of total generation within the Electric Reliability Council of Texas’s jurisdiction [1]. This fundamental change has renewed interest in power system dynamics modeling [2], particularly regarding IBRs. The dynamics of IBRs, however, are difficult to represent with a first-principles model. IBRs’ physical parameters vary with specific hardware and software implementations and with grid operating conditions. Different power-stage designs and control structures introduce nonidealities such as variable-frequency switching, control 
+
+We acknowledge support from the National Science Foundation (DMS-2533878, DMS-2053746, DMS-2134209, ECCS-2328241, CBET-2347401, OAC-2311848); the Department of Energy Office of Science Advanced Scientific Computing Research program (DE-SC0023161) and Fusion Energy Sciences program (DE-SC0024583); and the SciDAC LEADS Institute. H. Wang and G. Lin are with the School of Mechanical Engineering, Purdue University, West Lafayette, IN 47907 USA (e-mail: wang6411@purdue.edu; guanglin@purdue.edu). H. H. Le is with the R&D Department, Powermore Ltd., Da Nang, 550000 VN (e-mail: lhhoang@powermore.vn). C. Moya and G. Lin are with the Department of Mathematics, Purdue University, West Lafayette, IN 47907 USA (e-mail: cmoyacal@purdue.edu). A. Kandivalasa and M. Netto are with the Department of Electrical and Computer Engineer-ing, New Jersey Institute of Technology, Newark, NJ 07102 USA (e-mail: ak3366@njit.edu; marcos.netto@njit.edu). *Corresponding author: G. Lin. 
+
+dead time, quantization and sampling errors, digital delay, and system parameter discrepancies. In addition, inverters are often equipped with nonlinear controllers to perform sophisticated functions, such as voltage ride-through, active power sharing, and frequency droop [3]. Therefore, first-principles modeling of inverters can be unreliable and inaccurate, especially when system parameters and control schemes are unknown or kept confidential [4] due to strict nondisclosure requirements from original equipment manufacturers (OEMs) driven by security and intellectual property concerns. Developing generic IBR models has also proven difficult. Parameterizing a generic IBR model is fundamentally a model-structure and identifiability problem [5]: a reduced-order, non-proprietary model must reproduce dynamics governed largely by vendor-specific firmware, protection logic, current limits, and controller settings, which are often incompletely docu-mented. The challenge is compounded by model flexibility— e.g., the Western Electricity Coordinating Council (WECC) central station photovoltaic power plant generic model [6] has between 45–75 parameters and more than 30 possible control configurations. WECC explicitly cautions that the number of parameters available for tuning should be minimized to prevent mathematical degeneracy [6]. Multiple parameter sets may fit a single disturbance yet be neither physically meaningful nor predictive under other conditions; parameterization requires selecting the correct control mode, estimating only identifiable parameters, and independently validating the fitted model [7]. Learning IBR models from terminal measurement data can capture input-output dynamics—including aggregation effects, control interactions, operating-point dependence, delays, and nonlinear limits—without requiring OEMs to disclose internal controller details. It can also provide computationally efficient representations for contingency screening, controller testing, real-time simulation, and operational decision support when detailed models are unavailable or too expensive to execute [8], especially when many scenarios must be screened repeatedly. This is the focus of the present work, and §II provides a literature review. In particular, this paper asks whether a single learned surrogate model can serve two tasks: closed-loop simulation and measurement-window forecasting .In closed-loop simulation, the goal is to perform an autore-gressive rollout—that is, an inference method where a model’s prediction for one step is fed back into itself as the input for the next step, repeating this loop iteratively to generate future time-series trajectories. In measurement-window forecasting, the goal is to use a fixed-size window of recent past data—the measurement or input window—to predict future values. By shifting, rolling, or sliding this window forward as new data arXiv:2608.15051v1 [cs.LG] 15 Aug 2026 2
+
+arrives, the surrogate model should capture recent trends, adapt to structural shifts, and continuously output updated forecasts. The tasks differ in their inputs and error propagation: simu-lation advances the output trajectory step by step using control and reference inputs; hence, rollout errors can accumulate over the horizon [9], whereas forecasting directly uses a recent measurement window to predict outputs over a horizon without auxiliary inputs. Because the same latent inverter dynamics generate both tasks and predict the same variables, albeit through different conditional prediction maps, training two dedicated models can duplicate the same dynamic information [10]. However, a plain shared network may not adapt well to both tasks. The central challenge is to exploit the common dynamic structure within a single model while preserving task-specific prediction behavior. This paper proposes a unified Mamba surrogate with mixture-of-experts (MoE) routing [11], referred to as Mamba–MoE, for both tasks. The Mamba backbone is a selective state-space model (SSM) that recursively updates a hidden state to capture temporal dependencies in sampled transient trajectories [12]. A task-conditioning mechanism indicates whether the current input is for simulation or forecasting , allowing the shared backbone to adapt its representation to the task identity [13]. To reflect these two prediction forms, this paper uses task-matched training objectives and adds an adaptive conformal layer that equips each simulated and forecast trajectory with a calibrated prediction interval, enabling the surrogate to report its own uncertainty for downstream screening and risk assessment [14], [15]. The MoE routing layer weights expert subnetworks by task type and operating condition, sharing dynamics while adapting across operating regimes [16]. The contributions are threefold. First, this paper formu-lates inverter transient simulation and measurement-window forecasting as a dual-task surrogate modeling problem, mak-ing explicit their shared prediction target and distinct input structures. Second, it develops a unified model that combines a Mamba temporal backbone, task conditioning, and MoE routing, enabling a single network to serve both tasks rather than training two separate specialists. Third, it combines task-matched objectives with adaptive conformal prediction and evaluates error, parameter efficiency, interval coverage, robustness under operating-point shifts and measurement cor-ruption, and cross-topology forecasting and adaptation. From a practical standpoint, this paper presents an early study with preliminary results on applying modern artificial intelligence (AI) to power system dynamics . Realistic measurement data collected from a controller hardware-in-the-loop (CHIL) simu-lation are used to evaluate the forecasting task for cross-system adaptation. This paper is organized as follows. Section II reviews related work. Section III describes the system model and defines the two tasks. Sections IV–VI present the model, training, and prediction-interval methods. Section VII reports the experimental results, and Section VIII concludes. II. R ELATED WORK 
+
+A. Data-Driven Surrogates for IBR Dynamics 
+
+Data-driven surrogates include recurrent, convolutional, operator-learning, and Gaussian-process models [8]. Recent measurement-based studies also learn sub-cycle inverter-based resource dynamics from synchro-waveform measurements [17]. Interface-aware long short-term memory models enforce terminal voltage-current consistency but require inverter equa-tions that may be unavailable [18]. Operator-learning methods, including DeepONet [19] and graph operator networks, have been used to predict post-fault swing equation trajectories [20], [21]; DeepONet is therefore included as a baseline. These methods address single-input, single-output formulations or rely on physical constraints specific to a particular prediction setting. In contrast, this paper frames closed-loop simulation 
+
+and measurement-window forecasting as distinct task formula-tions of the same inverter dynamics and asks whether a single surrogate serves both. Relative to established power-system tools, electromagnetic-transient models remain the accuracy reference [2] (hence, we validate our surrogate using CHIL simulation); the surrogate instead targets repeated-screening regimes where detailed runs are computationally expensive or operational planning scenarios where calibrated models are un-available. It is complementary to dynamic equivalencing [22] and to forecasting-aided state estimation [23], with which the measurement-window forecasting task is most closely related. Physics-constrained surrogates are also strong contenders in data-limited regimes: Koopman-operator methods [24], gray-box neural ordinary differential equations [25], and low-order parametric or reduced-order models [22] incorporate structure to improve data efficiency. The proposed physics-agnostic surrogate, by contrast, shares a single network across both tasks and is complementary to these approaches. 
+
+B. Deep Learning Sequence Architectures for Time Series Structured SSMs like S4 [26] use fixed, input-independent matrices for efficient parallel training via convolutions, while 
+
+selective SSMs (like Mamba [12]) make those parameters dynamically dependent on the input to filter information like an attention mechanism. In particular, PowerMamba [27] applies Mamba for quasi-steady-state forecasting problems— specifically, load, electricity price, ancillary service price, and renewable generation forecasting—showing that selective SSMs are effective for power system time series. This paper focuses on power system dynamics . In particular, IBR transient dynamics under different task formulations. 
+
+C. Task Conditioning and Expert Routing 
+
+To adapt a shared sequence backbone to different tasks, prior work commonly uses task conditioning or expert rout-ing. Feature-wise linear modulation (FiLM) injects condition-ing information through learned feature scaling and shift-ing [13], while MoE layers condition the input through ex-pert subnetworks [11], [16]. Prior MoE-augmented Mamba models (MoE-Mamba [28], BlackMamba [29], and Routing Mamba [30]) mainly increase capacity or training efficiency 3
+
+in large models via per-layer or sparse routing, rather than separating task-conditioned transient behavior in a compact power-system surrogate. We therefore use one compact dense soft-routing layer after the shared Mamba backbone, condi-tioned on task identity and trajectory features, so expert mixing serves the inverter simulation and forecasting tasks [31]. III. S YSTEM MODEL AND TASK FORMULATION 
+
+This section first presents an inverter–infinite-bus system (Fig. 1) and its parameters, and then defines the closed-loop simulation and measurement-window forecasting tasks. 
+
+A. Inverter–Infinite-Bus System 
+
+The inverter in Fig. 1 is a standard grid-following inverter [3] equipped with a synchronization controller—that is, a phase-locked loop (PLL); an outer (power) controller; an inner (current) controller; and a dc-link voltage controller. We represent the system using an averaged model; see [32] for the explicit nonlinear differential–algebraic equations. The branch current is modeled as an algebraic variable rather than as an independent differential state. The system model is expressed in per unit (pu) on the in-verter base power Sgen = 2 .75 MVA at 60 Hz. The system base 
+
+Ssys = 100 MVA and the inverter base use the same nominal base voltage; hence, the 0.075 -pu grid reactance on the system base corresponds to ωℓ g = 0 .075( Sgen /S sys ) = 0 .00206 pu on the inverter base. The grid resistance rg = 0 , and the Bus 1 voltage magnitude |v1| = 1 .00001 pu is constant since the grid is modeled as an infinite bus; together, these settings define a single-inverter strong-grid condition. The filter impedance 
+
+zf = rf + jωℓ f = 0 .016 + j0.009 pu. The dc-link voltage is regulated at Vdc = 1.0 pu; PLL-, power-, and current-loop (proportional, integral) controller gains are (2 .0, 20 .0) ,
+
+(2 .0, 30 .0) , and (0 .37 , 0.7) , respectively. The PLL input low-pass filter uses ωℓp = 2 π × 66 rad/s, the active- and reactive-power measurement filters use ωz = ωf = 2 π × 6.6 rad/s, and the voltage-feedforward gain kffv = 0 . Note that although we develop the Mamba–MoE surrogate using an inverter–infinite-bus system, we report results for a numerically simulated 9-bus system and for data collected from a realistic CHIL simulation [33]; see §VII for more details. We select the following four current components to form the observed output vector: 
+
+xt = icv  
+
+> d
+
+, i cv  
+
+> q
+
+, i filt  
+
+> r
+
+, i filt 
+
+> i
+
+T ∈ Rnx , nx = 4 , (1) where r and i denote real and imaginary components in the network reference frame, whereas d and q denote direct and quadrature components aligned with the PLL dq reference frame. These outputs are two coordinate representations of the same branch current. For a nonzero branch current, the PLL angle θPLL is not included as a separate output; it equals the network-frame current phase minus the dq -frame current phase, modulo 2π. The controller-integrator variables are not included in xt.
+
+B. Unified Task Formulation 
+
+Accordingly, xt is an observed output vector rather than a complete Markov state; the task mappings below are con-ditioned on encoded observation history and recurrent state. 
+
+rg + jωℓ g rf + jωℓ f ¯icv           
+
+> ¯vcv
+> ¯ifilt
+> ¯v1¯vgrid AC DC Fig. 1. One-line diagram of the inverter–infinite-bus system. The inverter connects to the grid (modeled as an infinite bus) through a series rℓ branch, with ¯vcv =vcv ejθ cv
+> and ¯icv =icv ejα cv
+> .
+
+Both tasks use the same xt but differ in their inputs and prediction forms: simulation generates a trajectory by step-by-step rollout, whereas forecasting produces H future outputs from a recent measurement window in a single pass. Hereafter, the superscripts sim and fcast are used only in mathematical notation to denote the simulation and forecasting tasks, respec-tively; hats denote model predictions. 
+
+Simulation task. At each autoregressive step t, the model receives the current-output vector, the active-power output, 
+
+pm ∈ R, and the time-varying active-power reference pref (t):
+
+ξsim  
+
+> t
+
+= [ xt, p m, p ref (t)] ∈ Rnx+2 . (2) The one-step residual target is defined as δx t = xt+1 − xt and obtained directly from the sampled data rather than derived from the continuous-time equations. Encoding a known history window initializes a latent state that evolves across rollout steps. The rollout begins from the window’s last observed output, and each predicted output is reused as the next input. The model predicts r1,t ∈ Rnx as an estimate of δx t and advances the output as 
+
+ˆxsim  
+
+> t+1
+
+= ˆ xsim  
+
+> t
+
++ r1,t . (3) Because the predicted output is fed back as a subsequent input, simulation error may accumulate with the rollout horizon. 
+
+Forecasting task. This task targets short-term current-output forecasting from local measurements when the control references of black-box IBRs are unavailable to the system operator. It uses a window of the most recent W current-output samples as input. The power command and reference input used in the simulation task are not provided to the forecasting task; to keep a unified input dimension, the two auxiliary channels are set to zero at each time τ in the window: 
+
+ξfcast  
+
+> τ
+
+= [ xτ , 0, 0] ∈ Rnx+2 , τ = t − W + 1 , . . . , t. (4) These zero-filled auxiliary channels serve as a constant null/missingness marker rather than a physical command value (pm lies in [0 .4, 0.8] pu, so zero is non-physical), and the forecasting mode is jointly identified by the task embedding 
+
+cm introduced in §IV. The model produces H future residuals 
+
+[r1, . . . , r H ] ∈ RH×nx in a single forward pass. Each residual 
+
+rh approximates the displacement from the last observed output xt to the future output xt+h:
+
+rh ≈ xt+h − xt, ˆxfcast  
+
+> t+h
+
+= xt + rh, h = 1 , . . . , H. (5) This direct H-output prediction form does not recursively use predicted outputs as inputs and is therefore distinct from autoregressive simulation rollout. Because the forecaster re-ceives no future commands, two cases that share the same past window but differ in future references are indistinguishable; forecasting is therefore evaluated under the fixed reference-step timing used to generate the offline data, rather than under arbitrary unobserved command changes. Fig. 2 illustrates the simulation and forecasting tasks. 4Surrogate Surrogate Surrogate predicted output reused rollout input: xt, p m, p ref (t)                          
+
+> forecast horizon ( Hsteps) measurement window ( Wsteps)
+> ˆxt+1
+> ˆxt+1 ˆxt+2 ˆxt+H
+> ˆxt+Hroll
+> ... ... ... (i) Closed-loop simulation (ii) Measurement-window forecasting
+> xt
+> xt
+> xt−W+1 ... tt+ 1 ... t+Htt+ 1 ... t+Hroll
+> xt−W+1
+> Fig. 2. Task (i) closed-loop simulation; (ii) measurement-window forecasting, with Houtputs per forward pass and reported forecasting metrics based on
+> h=1 .
+> Task label: simulation or forecasting Input sequence: outputs and auxiliary inputs Task embedding
+> conditioning
+> Router expert weights Weighted sum Output residuals Simulation output
+> Next-step residual H-step residuals
+> Forecasting output Output Mamba layer Linear output head Routed features Input projection
+> Mamba
+> backbone
+> FiLM– conditioned
+> K Experts
+> Expert 1 Expert 2 Expert K ...
+> Fig. 3. The proposed Mamba–MoE surrogate architecture.
+
+IV. P ROPOSED MAMBA –M OE S URROGATE FRAMEWORK 
+
+A. Architecture Overview 
+
+Fig. 3 shows the unified Mamba–MoE forward path. The input sequence is first projected into a dmodel -dimensional representation space. A binary task label m ∈ { 0, 1} (m=0 
+
+simulation, m=1 forecasting) is mapped to a task embedding 
+
+cm ∈ Rdc . This embedding is used to apply FiLM to the Mamba blocks and, together with the routing representation, is fed to the MoE router. The Mamba backbone produces time-step hidden representations ht; the expert-mixed output is then passed to a shared output Mamba block and a unified output head to generate H-step output residuals. 
+
+B. Mamba Backbone and Task Conditioning 
+
+The Mamba backbone models trajectory sequences with an input-modulated (selective) state-space recurrence. Let ht be the hidden representation at step t and st be the SSM internal state. The input-dependent recurrence is written as 
+
+∆t = softplus( htW∆), ¯At = exp(∆ t ⊙ A),st = ¯At ⊙ st−1 + ∆ t ⊙ (htB),zt = σ(htWz ) ⊙ (stC + D(ht)) .
+
+(6) Here, W∆ and Wz are learnable projection matrices, ⊙ denotes element-wise multiplication, softplus( ·) and σ(·) denote the softplus and sigmoid activation functions, respectively, and 
+
+D(·) is a learnable input projection. Let Alog be a learnable parameter and set A = − exp( Alog ); therefore, A < 0 and each component of ¯At lies in (0 , 1) . In the present implemen-tation, the input dependence of the SSM scan is introduced through ∆t, while B and C are static learned projections shared across the sequence. Here ht, z t ∈ Rdmodel and the SSM state st ∈ Rds (state dimension ds); the recurrence is diagonal, so A, ∆t, ¯At ∈ Rds enter the state update element-wise, while 
+
+B ∈ Rdmodel ×ds , C ∈ Rds×dmodel , W∆ ∈ Rdmodel ×ds , and 
+
+Wz ∈ Rdmodel ×dmodel are the projections. Eq. (6) keeps the exact transition ¯At = exp(∆ t ⊙ A) and uses the first-order (Euler-type) input discretization ∆t ⊙(htB).Task conditioning is implemented using FiLM [13]. The task embedding cm is passed through a multilayer perceptron to generate a scale term gFiLM and a shift term β, which modulate the layer normalization in each Mamba block: 
+
+γ = 1 + gFiLM , LN FiLM (u) = γ ⊙ LN( u) + β. (7) 
+
+LN( ·) denotes standard layer normalization, u the normalized input, and 1 is an all-ones vector. At initialization, gFiLM = 0 
+
+and β = 0 , so FiLM reduces to standard layer normalization. 
+
+C. MoE Routing and Expert Mixing 
+
+The MoE routing layer introduces task- and operating-condition-dependent adaptation after the shared Mamba rep-resentation. Let hr denote the hidden representation used for routing. In the simulation task, hr corresponds to the hidden representation at the current rollout step; in the forecasting task, hr corresponds to the final hidden representation of the measurement window. The router maps the concatenation of 
+
+hr and the task embedding cm to expert logits: 
+
+ℓ = r([ hr ; cm]) ∈ RK , (8) where r(·) is the routing network, K is the number of experts, and [ ; ] denotes vector concatenation. The expert weights are obtained by softmax normalization: 
+
+gk = exp( ℓk)
+
+PKq=1 exp( ℓq ) , k = 1 , . . . , K. (9) Let Ek(·) be the kth expert subnetwork. The expert-mixed output 
+
+e =
+
+> K
+
+X
+
+> k=1
+
+gkEk(hr ), e ∈ Rdmodel . (10) This paper uses dense soft routing, in which all experts par-ticipate in each forward pass with soft weights. For the model scale considered here, this design has a small computational overhead and avoids the load-imbalance issue that may arise in sparse top-k routing. The expert combination is thus jointly determined by the current dynamic features and the simulation or forecasting task identity. 
+
+D. Unified Output Head and Task-Specific Readout 
+
+Given the expert-mixed output e (the routed representation at the current step), a shared output Mamba block Gout (·)
+
+produces the output representation ho ∈ Rdmodel , and a unified linear output head generates an H-output residual matrix: 
+
+ho = Gout (e), o = Head( ho) = [ r1, . . . , r H ], (11) where rh ∈ Rnx is the h-th residual output (row of o). Gout is applied one step at a time: in simulation it carries its SSM state across the rollout, whereas for forecasting it is applied once to the final-window representation, and the H residuals are produced by the linear head rather than by Gout . The output space has the same dimension as the current-output vector xt,so the same output head can generate output residuals for both tasks. The two tasks share the same residual matrix but read it differently. The simulation task uses only the first-step residual 
+
+r1,t at each autoregressive step: 
+
+ˆxsim  
+
+> t+1
+
+= ˆ xsim  
+
+> t
+
++ r1,t . (12) 5
+
+The forecasting task uses all H residuals and adds them to the last observed output xt of the measurement window: 
+
+ˆxfcast  
+
+> t+h
+
+= xt + rh, h = 1 , . . . , H. (13) Therefore, the unified output head defines a common output-residual space, while task differences are handled by the input structure, FiLM conditioning, MoE routing, and task-specific training objectives. V. T ASK -M ATCHED TRAINING OBJECTIVES 
+
+This section defines the training objectives for the unified Mamba–MoE surrogate. Training has two stages. The Mamba backbone is first pretrained with one-step output residual prediction to learn a shared current-response representation. The complete model is then jointly trained so that simulation and forecasting follow their respective prediction forms. 
+
+A. Backbone Pretraining 
+
+The pretraining stage forms a one-step residual target from output trajectories. Let hW denote the final hidden representa-tion produced by the Mamba backbone from an output window of length W . A temporary residual head HPT (·) predicts 
+
+δx t = xt+1 − xt. The pretraining loss is 
+
+LPT = 1
+
+NB nxNBX
+
+> i=1
+> nx
+
+X
+
+> j=1
+
+
+
+HPT (h(i) 
+
+> W
+
+)j − δx (i)
+
+> j
+
+2
+
+, (14) where NB is the batch size. The task-conditioning vector is set to zero during pretraining, so the backbone first learns a task-agnostic transition representation. After pretraining, HPT 
+
+is discarded. 
+
+B. Task-Matched Losses 
+
+Both tasks predict the same current outputs, but their losses match different prediction forms. The simulation task uses autoregressive rollout. Since each predicted output is fed back as the next input, its loss is computed over Hroll rollout steps: 
+
+Lsim = 1
+
+Hroll NB nxHroll X
+
+> h=1
+> NB
+
+X
+
+> i=1
+> nx
+
+X
+
+> j=1
+
+
+
+ˆx(i),sim  
+
+> t+h,j
+
+− x(i)
+
+> t+h,j
+
+2
+
+, (15) where Hroll is the simulation rollout horizon used in training. The forecasting task directly maps a recent measurement window to H future output residuals. Its loss supervises the full forecasting horizon: 
+
+Lfcast = 1
+
+NB Hn xNBX
+
+> i=1
+> H
+
+X
+
+> h=1
+> nx
+
+X
+
+> j=1
+
+
+
+ˆx(i),fcast  
+
+> t+h,j
+
+− x(i)
+
+> t+h,j
+
+2
+
+. (16) 
+
+C. Joint Objective and Algorithm 
+
+Joint training optimizes both task losses and two lightweight MoE regularizers. Let ¯gk be the average soft routing weight of expert k in a batch, and let ¯ak be its top-1 assignment frequency; both statistics are pooled over the simulation and forecasting routing decisions in the joint batch, since the router is shared by both tasks. The load-balancing term is 
+
+LLB = K
+
+> K
+
+X
+
+> k=1
+
+¯gk sg(¯ ak), (17) 
+
+Algorithm 1 Unified Mamba–MoE Training 
+
+Require: DPT , Dsim , Dfcast , W , H, Hroll , NPT , Njoint , {λ·}
+
+Ensure: Trained parameters θ 
+
+> 1:
+
+Initialize θ and set the task-conditioning vector to 0. 
+
+> 2:
+
+for e = 1 , . . . , N PT do  
+
+> 3:
+
+Sample (xt−W +1: t, δx t) ∼ D PT . 
+
+> 4:
+
+Update input projection, backbone, and HPT using LPT . 
+
+> 5:
+
+end for  
+
+> 6:
+
+Enable cm, FiLM, MoE routing, and the shared output head.  
+
+> 7:
+
+for e = 1 , . . . , N joint do  
+
+> 8:
+
+Sample Bsim ∼ D sim , compute Lsim , and record its routing weights.  
+
+> 9:
+
+Sample Bfcast ∼ Dfcast , compute Lfcast , and record its routing weights.  
+
+> 10:
+
+Form LLB from the pooled routing weights and Ldiv from the corresponding expert outputs.  
+
+> 11:
+
+Update θ with AdamW to minimize Ltotal . 
+
+> 12:
+
+end for  
+
+> Fig. 4. Adaptive conformal calibration workflow.
+
+where K is the number of experts and sg( ·) denotes stop-gradient. The expert-diversity term penalizes positive cosine similarity between different expert outputs: 
+
+Ldiv = 2
+
+K(K − 1) 
+
+X
+
+> k<l
+
+[cos( Ek(hr ), E l(hr ))] + (18) where [a]+ = max {a, 0}. For K < 2 the diversity term Ldiv 
+
+is set to zero and the load-balancing term LLB is omitted, so the K = 1 ablation is trained without MoE regularization. The total objective is 
+
+Ltotal = λsim Lsim + λfcast Lfcast + λLB LLB + λdiv Ldiv , (19) where all λ values are non-negative weights specified in the experimental setup. Algorithm 1 summarizes the two-stage training procedure. VI. A DAPTIVE PREDICTION -I NTERVAL CALIBRATION 
+
+Fig. 4 summarizes the adaptive conformal inference (ACI) workflow: task-specific conformal widths are computed on the calibration split, and a per-output scale factor is adapted online to track the target coverage level. 
+
+A. Calibration Challenges for Simulation and Forecasting 
+
+Point predictions alone do not indicate whether a transient estimate is reliable. Standard conformal prediction (CP) [14] provides distribution-free coverage under exchangeable cal-ibration and test residuals, but the two prediction modes considered here have different residual structures. Simulation residuals are horizon-dependent because rollout reuses predic-tions, whereas forecasting residuals are more homogeneous after closest-window merging; residual levels may still shift when the test operating point differs from the calibration 6
+
+set. Because the residuals come from overlapping temporal windows, the coverage reported in §VII is empirical rather than a finite-sample distribution-free guarantee. 
+
+B. Task-Specific Conformal Base Widths 
+
+Simulation uses horizon-wise conformal widths because rollout uncertainty grows with horizon. For target miscoverage 
+
+α, horizon h, and output dimension j, let 
+
+ϵsim (1) ,h,j ≤ · · · ≤ ϵsim (nh,j ),h,j 
+
+denote the sorted absolute calibration residuals, where nh,j is the corresponding calibration count. The split-conformal rank 
+
+ρsim  
+
+> h,j
+
+= min {⌈ (nh,j + 1)(1 − α)⌉ , n h,j } , (20) and the simulation base width is 
+
+qsim  
+
+> h,j
+
+= ϵsim (ρsim   
+
+> h,j ),h,j
+
+. (21) Forecasting is calibrated after closest-window merging. For target time t′, the eligible forecast origins are 
+
+Ai(t′) = {t ∈ W i : 1 ≤ t′ − t ≤ H}, (22) where Wi contains the last observation time of each input window in trajectory i. We select the most recent eligible origin and its associated horizon: 
+
+t⋆i (t′) = max Ai(t′), h⋆i (t′) = t′ − t⋆i (t′). (23) The merged prediction is 
+
+ˆxmerge  
+
+> i,t ′,j
+
+= ˆ xfcast    
+
+> i,t ⋆i(t′),h ⋆i(t′),j
+
+. (24) Forecasting residuals are then computed as 
+
+ϵfcast  
+
+> i,t ′,j
+
+= xi,t ′,j − ˆxmerge  
+
+> i,t ′,j
+
+. (25) By sorting the nj merged residuals for output dimension j as 
+
+ϵfcast (1) ,j ≤ · · · ≤ ϵfcast (nj ),j ,
+
+the forecasting base width is 
+
+ρfcast  
+
+> j
+
+= min {⌈ (nj + 1)(1 − α)⌉ , n j } ,qfcast  
+
+> j
+
+= ϵfcast (ρfcast   
+
+> j),j
+
+. (26) All base widths use the calibration split only. 
+
+C. Online ACI Scaling 
+
+Operating-point mismatch between calibration and test tra-jectories can shift the residual level. ACI therefore scales the conformal base widths using sequential coverage feed-back [15]. Let u index the evaluated intervals and let qu,j 
+
+denote the corresponding base width: qsim  
+
+> h,j
+
+in simulation and 
+
+qfcast  
+
+> j
+
+in forecasting. For each output dimension j, the interval 
+
+ˆCu,j = [ˆ xu,j ± κu(j)qu,j ] , κu(j) = exp( zu(j)) . (27) The log-scale update is 
+
+zu+1 (j) = Π [−c,c ]
+
+
+
+zu(j) + ηACI 
+
+
+
+1
+
+h
+
+xu,j /∈ ˆCu,j 
+
+i
+
+− α
+
+ 
+
+,
+
+(28) with 
+
+Π[−c,c ](z) = min {max {z, −c}, c }. (29) We use c = 5 . The validation stream is processed sequentially from z1(j) = 0 ; each test trajectory is reset to the same final state obtained from this stream. The update is strictly prequen-tial: ˆCu,j is formed before xu,j is revealed, and the realized label is used only to score coverage and update zu+1 (j); thus no future test label enters interval construction. Each merged forecast target is processed when its label becomes available. VII. C ASE STUDIES AND RESULTS 
+
+We evaluate the unified model from six perspectives: clean-condition accuracy and model size, ablation behavior, robust-ness under operating-point shift and measurement corruption, cross-topology forecasting and adaptation on a 9-bus system, cross-system CHIL adaptation, and interval reliability after ACI calibration. 1
+
+A. Experimental Setup and Baselines 
+
+The baseline dataset comprises 150 offline transient trajec-tories generated by integrating the inverter–infinite-bus model in Section III-A using MATLAB’s ode15s . The solver uses adaptive internal steps, and outputs are recorded every 5 ms. We split the trajectories into 80 training, 20 validation, and 50 test trajectories, and apply z-score normalization to all output channels before training. Each trajectory contains a step change in the active-power reference from 0.5 pu to 
+
+pm at t = 3 s. The trajectory-level power command varies across cases as pm ∼ U (0 .4, 0.8) pu, while the reactive-power reference is held fixed at its system setpoint. The analysis window covers t ∈ [2 , 4] s; at this recording interval, each trajectory contains L = 401 samples. For Tables I–III, we report root-mean-square error (RMSE) and its global-range-normalized form (G-NRMSE): 
+
+G-NRMSE j (%) = RMSE j
+
+Range train 
+
+> j
+
+× 100 , (30) where j = 1, . . . , n x indexes the output dimension and 
+
+Range train  
+
+> j
+
+= max( xtrain  
+
+> j
+
+) − min( xtrain  
+
+> j
+
+) is the per-dimension dynamic range observed during training. The per-dimension values are Range train  
+
+> icv
+> d
+
+= 0 .783 pu, Range train  
+
+> icv
+> q
+
+= 0 .745 pu, 
+
+Range train  
+
+> ifilt
+> r
+
+= 0 .783 pu, and Range train 
+
+> ifilt
+> i
+
+= 0 .745 pu. Because all four ranges are comparable, cross-channel G-NRMSE dif-ferences are not caused by unequal denominators. In absolute terms, a G-NRMSE near 0.1% corresponds to a current RMSE on the order of 10 −3 pu, i.e., less than one percent of the per-unit current range used for normalization, so the reported errors are small at the system level. For interval reliability, let m ∈ { sim , fcast } denote the task and let Im be its evaluation set. For simulation, Isim 
+
+contains rollout evaluation points. For forecasting, Ifcast con-tains target-time predictions after closest-window merging. For 
+
+u ∈ I m, let ˆCu,j denote the prediction interval for output j.We report marginal coverage (MCOV) and mean prediction interval width (MPIW) as 
+
+MCOV (m) = 1
+
+|I m|nx
+
+X
+
+> u∈I m
+> nx
+
+X
+
+> j=1
+
+1
+
+h
+
+xu,j ∈ ˆCu,j 
+
+i
+
+, (31) 
+
+MPIW (m) = 1
+
+|I m|nx
+
+X
+
+> u∈I m
+> nx
+
+X
+
+> j=1
+
+width 
+
+ ˆCu,j 
+
+
+
+. (32) Static CP keeps the conformal scale fixed at κu(j) = 1 ,whereas ACI updates the scale factors online. The target coverage is 1 − α = 95% . Unless otherwise stated, the unified model uses dmodel = 128 , four Mamba blocks, K = 4 experts, 
+
+dc = 32 , ds = 16 , W = 10 , H = 24 , and Hroll = 20 .
+
+> 1Data and code will be available upon publication. 7
+
+Training supervises all H forecast outputs, but unit-stride origins and closest-window merging select h = 1, so the reported forecasting errors and intervals are 5-ms-ahead. We use λsim = λfcast = 1 and λLB = λdiv = 5 × 10 −4;AdamW starts at 10 −3 for pretraining and 5 × 10 −4 for joint training, with weight decay 10 −5; and ACI uses α = 0 .05 ,
+
+ηACI = 0.02 , and c = 5. DeepONet, Transformer, and Mamba are each trained as separate simulation and forecasting specialists with task-matched objectives; Table I reports the combined parameter count of each pair. DeepONet [20], [21], [34]–[36] learns the operator mapping from input functions to output trajectories. Transformer [37] uses a standard encoder– decoder with positional encoding and causal masking for autoregressive rollout. The Mamba specialists use the same selective state-space block design as the Mamba–MoE back-bone but exclude FiLM conditioning and MoE routing, making them the closest architectural references. Training schedules are architecture- and task-specific, while all methods use the same data split and evaluation protocol. 
+
+B. Clean-Condition Comparison with Specialists 
+
+Table I compares clean-condition G-NRMSE and RMSE. The zero-delta baseline sets the output increment to zero at every prediction step and tests whether a learned model improves on a persistence predictor. In simulation, Mamba– MoE reduces the d/r output errors from about 10% for zero-delta to at most 0.21% , and the q/i output errors from 
+
+2.72% to about 1.39% . In forecasting, Mamba–MoE reduces 
+
+icv  
+
+> d
+
+and ifilt  
+
+> r
+
+from 0.81% to 0.10% and 0.12% , respectively. The forecasting errors for icv  
+
+> q
+
+and ifilt  
+
+> i
+
+remain close to zero-delta because these q/i outputs remain near zero in steady state, so brief transient excursions define the range and leave limited G-NRMSE headroom. DeepONet and Transformer of-fer additional architectural references, but neither consistently outperforms Mamba–MoE across both tasks. The Mamba specialist pair provides the strongest clean-condition specialist reference, especially for forecasting icv  
+
+> d
+
+and ifilt  
+
+> r
+
+. Mamba–MoE does not exceed every specialist metric under clean conditions; instead, it keeps both tasks in the same low-error regime while using a single unified model. At 800,260 parameters versus 921,316 for the Mamba specialist pair, the unified model uses about 13% fewer parameters. 
+
+C. Ablation Analysis 
+
+Table II examines four design choices. First, two task-specific heads reduce forecasting G-NRMSE for the d/r 
+
+outputs from 0.10% /0.12% to 0.03% /0.03% , while changing simulation errors from 0.14% /0.21% to 0.15% /0.16% . Nei-ther head configuration dominates all tasks and outputs. We retain the shared head because both tasks predict residuals in the same normalized output space. Second, compared with K = 4 , K = 1 gives lower error only for simulation ifilt  
+
+> r
+
+; all remaining metrics are higher or essentially unchanged. Thus, K = 4 gives lower errors for more outputs, but not for every output. Table III shows greater routing benefits as operating points move farther from the training range. Third, removing FiLM lowers simulation G-NRMSE for the 
+
+d/r outputs from 0.14% /0.21% to 0.13% /0.15% , but raises forecasting errors from 0.10% /0.12% to 0.13% /0.17% . Its effect is task-dependent and mainly benefits forecasting d/r 
+
+outputs. Because the router still uses the task embedding cm,this ablation removes FiLM but not task conditioning entirely. Finally, removing either supervised loss increases error for that task. With λfcast = 0 , forecasting G-NRMSE for the d/r 
+
+outputs rises to 18 .70% /22 .74% ; with λsim = 0 , simulation errors rise to 65 .65% /121 .70% . Both losses are required for the unified surrogate under the current training objective. 
+
+D. Robustness Under Distribution Shift and Measurement Corruption 
+
+Table III compares the K = 4 and K = 1 configurations under operating-point shifts that partially extend beyond the training range. We define the command deviation as ∆pm =
+
+pm − 0.5. The two shifted commands are 0.5 + 1 .2∆ pm
+
+and 0.5 + 1 .5∆ pm, mapping the training interval [0 .4, 0.8] 
+
+to [0 .38 , 0.86] and [0 .35 , 0.95] , respectively. Both shifted in-tervals extend beyond the training range at their lower and upper ends. Under clean conditions, K = 4 has lower errors for more outputs, although neither configuration dominates across all outputs. At ∆pm ×1.2, the advantage is task- and channel-dependent. For ifilt  
+
+> r
+
+, K = 4 gives a forecasting G-NRMSE of 0.24% , compared with 0.42% for K = 1 , whereas 
+
+K = 1 gives a slightly lower simulation G-NRMSE for icv  
+
+> d
+
+.At ∆pm ×1.5, K = 4 has lower errors across all outputs in both tasks. Thus, in this generalization experiment, the K = 4 
+
+configuration has a broader advantage under the larger shift. Sensor dropout is more damaging than additive measure-ment noise. With p = 0 .2 random dropout, forecasting icv 
+
+> d
+
+reaches 4.10% , whereas doubling the measurement-noise scale gives 0.23% . Additive noise perturbs measurement magni-tudes, but dropout removes parts of the sequential context. The stronger degradation of the d/r outputs is consistent with Table I: the near-zero q/i outputs have less G-NRMSE headroom relative to the zero-delta baseline. 
+
+E. Cross-Topology Forecasting and Adaptation: 9-Bus System 
+
+Next, we evaluate cross-topology forecasting and target-domain adaptation on a 9-bus system. The network contains one dynamically modeled synchronous generator, a grid-following inverter, and a fixed infinite bus as the slack refer-ence. The 9-bus system uses a 100-MVA base. For its inverter model, rf = 0 .016 and xf = 0 .009 pu are specified directly on this base, not converted from the 2.75-MVA base of the offline benchmark. Trajectories are integrated with a fixed-step fourth-order Runge–Kutta method using a 1-ms internal step and recorded every 5 ms. Within the 9-bus domain, the in-distribution (ID) set and two out-of-distribution sets (OOD-1 and OOD-2) contain 200, 50, and 50 trajectories, with pm ranges of [0 .3, 0.7] , [0 .7, 0.9] ,and [0 .9, 1.1] pu, respectively. Fine-tuning (FT) uses 160 ID trajectories; the remaining 40 form the validation subset re-ported as ID in Table IV, while both OOD sets are reserved for evaluation. The zero-shot (ZS) source model and the fine-tuned 8
+
+TABLE I CLEAN -CONDITION ACCURACY AND PARAMETER COUNTS ; BASELINE COUNTS SUM THE PARAMETERS OF THE SIMULATION AND FORECASTING SPECIALISTS .
+
+Model Params Output G-NRMSE Simulation (%) RMSE Simulation (pu) G-NRMSE Forecasting (%) RMSE Forecasting (pu) 
+
+Zero-delta —
+
+icv  
+
+> d
+
+10.17 7.97 × 10 −2 0.81 6.38 × 10 −3
+
+icv  
+
+> q
+
+2.72 2.02 × 10 −2 1.56 1.16 × 10 −2
+
+ifilt  
+
+> r
+
+10.18 7.97 × 10 −2 0.81 6.38 × 10 −3
+
+ifilt  
+
+> i
+
+2.72 2.03 × 10 −2 1.56 1.16 × 10 −2
+
+DeepONet 704,648 
+
+icv  
+
+> d
+
+0.19 1.53 × 10 −3 0.10 7.59 × 10 −4
+
+icv  
+
+> q
+
+1.48 1.10 × 10 −2 1.42 1.06 × 10 −2
+
+ifilt  
+
+> r
+
+0.19 1.49 × 10 −3 0.09 7.21 × 10 −4
+
+ifilt  
+
+> i
+
+1.47 1.10 × 10 −2 1.42 1.05 × 10 −2
+
+Transformer 1,107,300 
+
+icv  
+
+> d
+
+0.42 3.29 × 10 −3 0.06 4.44 × 10 −4
+
+icv  
+
+> q
+
+1.42 1.06 × 10 −2 1.41 1.05 × 10 −2
+
+ifilt  
+
+> r
+
+0.43 3.34 × 10 −3 0.05 3.79 × 10 −4
+
+ifilt  
+
+> i
+
+1.43 1.06 × 10 −2 1.41 1.05 × 10 −2
+
+Mamba (specialist pair) 921,316 
+
+icv  
+
+> d
+
+0.12 9.48 × 10 −4 0.02 1.87 × 10 −4
+
+icv  
+
+> q
+
+1.39 1.03 × 10 −2 1.41 1.05 × 10 −2
+
+ifilt  
+
+> r
+
+0.11 8.78 × 10 −4 0.02 1.62 × 10 −4
+
+ifilt  
+
+> i
+
+1.39 1.03 × 10 −2 1.41 1.05 × 10 −2
+
+Mamba–MoE (unified) 800,260 
+
+icv  
+
+> d
+
+0.14 1.06 × 10 −3 0.10 7.93 × 10 −4
+
+icv  
+
+> q
+
+1.39 1.04 × 10 −2 1.41 1.05 × 10 −2
+
+ifilt  
+
+> r
+
+0.21 1.64 × 10 −3 0.12 9.70 × 10 −4
+
+ifilt  
+
+> i
+
+1.39 1.04 × 10 −2 1.40 1.05 × 10 −2
+
+TABLE II ABLATION STUDY ON DESIGN COMPONENTS .
+
+Variant Head K FiLM λsim λfcast Output G-NRMSE Simulation RMSE Simulation G-NRMSE Forecasting RMSE Forecasting (%) (pu) (%) (pu) 
+
+Mamba–MoE Baseline 1H 4 ✓ 1.0 1.0 
+
+icv  
+
+> d
+
+0.14 1.06 × 10 −3 0.10 7.93 × 10 −4
+
+icv  
+
+> q
+
+1.39 1.04 × 10 −2 1.41 1.05 × 10 −2
+
+ifilt  
+
+> r
+
+0.21 1.64 × 10 −3 0.12 9.70 × 10 −4
+
+ifilt  
+
+> i
+
+1.39 1.04 × 10 −2 1.40 1.05 × 10 −2
+
+(A) Two-head 2H 4 ✓ 1.0 1.0 
+
+icv  
+
+> d
+
+0.15 1.15 × 10 −3 0.03 2.60 × 10 −4
+
+icv  
+
+> q
+
+1.39 1.04 × 10 −2 1.41 1.05 × 10 −2
+
+ifilt  
+
+> r
+
+0.16 1.23 × 10 −3 0.03 2.59 × 10 −4
+
+ifilt  
+
+> i
+
+1.39 1.04 × 10 −2 1.41 1.05 × 10 −2
+
+(B) K = 1 
+
+(no routing) 1H 1 ✓ 1.0 1.0 
+
+icv  
+
+> d
+
+0.15 1.20 × 10 −3 0.14 1.06 × 10 −3
+
+icv  
+
+> q
+
+1.39 1.04 × 10 −2 1.41 1.05 × 10 −2
+
+ifilt  
+
+> r
+
+0.14 1.10 × 10 −3 0.15 1.17 × 10 −3
+
+ifilt  
+
+> i
+
+1.39 1.04 × 10 −2 1.41 1.05 × 10 −2
+
+(C) w/o FiLM 1H 4 × 1.0 1.0 
+
+icv  
+
+> d
+
+0.13 1.04 × 10 −3 0.13 1.02 × 10 −3
+
+icv  
+
+> q
+
+1.39 1.04 × 10 −2 1.41 1.05 × 10 −2
+
+ifilt  
+
+> r
+
+0.15 1.18 × 10 −3 0.17 1.30 × 10 −3
+
+ifilt  
+
+> i
+
+1.39 1.03 × 10 −2 1.41 1.05 × 10 −2
+
+(D1) λfcast =0 1H 4 ✓ 1.0 0
+
+icv  
+
+> d
+
+0.10 8.10 × 10 −4 18.70 1.46 × 10 −1
+
+icv  
+
+> q
+
+1.39 1.04 × 10 −2 14.94 1.11 × 10 −1
+
+ifilt  
+
+> r
+
+0.14 1.11 × 10 −3 22.74 1.78 × 10 −1
+
+ifilt  
+
+> i
+
+1.39 1.04 × 10 −2 12.48 9.30 × 10 −2
+
+(D2) λsim =0 1H 4 ✓ 0 1.0 
+
+icv  
+
+> d
+
+65.65 5.14 × 10 −1 0.04 2.98 × 10 −4
+
+icv  
+
+> q
+
+18.14 1.35 × 10 −1 1.41 1.05 × 10 −2
+
+ifilt  
+
+> r
+
+121.70 9.53 × 10 −1 0.04 3.13 × 10 −4
+
+ifilt  
+
+> i
+
+24.95 1.86 × 10 −1 1.41 1.05 × 10 −2
+
+model are evaluated on the same subsets. Table IV reports G-NRMSE normalized by each target set’s per-channel range; comparisons are therefore made within each set. Persistence repeats the latest observed output as the 5-ms-ahead forecast, 
+
+ˆxt+1 = xt. ZS has higher error than persistence in all 12 set– channel comparisons. FT matches or outperforms persistence in 11 of the 12 comparisons; the only exception is ifilt 
+
+r on OOD-2 ( 2.11% versus 2.08% ). Across the evaluated sets and channels, FT lowers the ZS error in all 12 comparisons. 
+
+F. Cross-System Adaptation to CHIL Measurements 
+
+To assess cross-system adaptation, we evaluated Mamba– MoE using measurement data collected from a CHIL simula-tion of a three-phase grid-tied inverter [33]. Its four channels, 
+
+[icv 
+
+d , i cv 
+
+q , i filt 
+
+d , i filt 
+
+q ]T, form two measured-current pairs in the PLL-aligned dq frame, whereas the offline outputs represent one branch current in two frames. The listed order defines the channel mapping. The logged PLL angle was used upstream to form the recorded dq channels but was neither a surrogate input nor an output. The 1-kHz record contains DC-link-9
+
+TABLE III ROBUSTNESS UNDER DISTRIBUTION SHIFTS AND MEASUREMENT CORRUPTION . E NTRIES ARE RMSE ( PU ) / G-NRMSE (%). D ASHES (—) 
+
+> MARK SETTINGS NOT EVALUATED
+
+; THE SENSOR -DROPOUT AND MEASUREMENT -NOISE TESTS ARE FORECASTING -ONLY .
+
+Category Condition Output Simulation Forecasting 
+
+Baseline Clean 
+
+icv  
+
+> d
+
+1.06 ×10 −3/0.14 7.93 ×10 −4/0.10 
+
+icv  
+
+> q
+
+1.04 ×10 −2/1.39 1.05 ×10 −2/1.41 
+
+ifilt  
+
+> r
+
+1.64 ×10 −3/0.21 9.70 ×10 −4/0.12 
+
+ifilt  
+
+> i
+
+1.04 ×10 −2/1.39 1.05 ×10 −2/1.40 
+
+Operating-point shift 
+
+∆pm ×1.2
+
+(K=4 )
+
+icv  
+
+> d
+
+1.68 ×10 −3/0.22 2.67 ×10 −3/0.34 
+
+icv  
+
+> q
+
+2.69 ×10 −2/3.62 2.72 ×10 −2/3.65 
+
+ifilt  
+
+> r
+
+2.37 ×10 −3/0.30 1.85 ×10 −3/0.24 
+
+ifilt  
+
+> i
+
+2.69 ×10 −2/3.61 2.72 ×10 −2/3.65 ∆pm ×1.5
+
+(K=4 )
+
+icv  
+
+> d
+
+2.17 ×10 −2/2.77 4.13 ×10 −3/0.53 
+
+icv  
+
+> q
+
+3.93 ×10 −2/5.28 3.14 ×10 −2/4.22 
+
+ifilt  
+
+> r
+
+2.19 ×10 −2/2.80 3.01 ×10 −3/0.38 
+
+ifilt  
+
+> i
+
+3.95 ×10 −2/5.30 3.14 ×10 −2/4.21 ∆pm ×1.2
+
+(K=1 )
+
+icv  
+
+> d
+
+1.40 ×10 −3/0.18 3.01 ×10 −3/0.38 
+
+icv  
+
+> q
+
+2.70 ×10 −2/3.63 2.73 ×10 −2/3.66 
+
+ifilt  
+
+> r
+
+1.73 ×10 −3/0.22 3.29 ×10 −3/0.42 
+
+ifilt  
+
+> i
+
+2.70 ×10 −2/3.62 2.73 ×10 −2/3.66 ∆pm ×1.5
+
+(K=1 )
+
+icv  
+
+> d
+
+2.60 ×10 −2/3.31 5.26 ×10 −3/0.67 
+
+icv  
+
+> q
+
+4.33 ×10 −2/5.81 3.16 ×10 −2/4.24 
+
+ifilt  
+
+> r
+
+2.75 ×10 −2/3.51 5.25 ×10 −3/0.67 
+
+ifilt  
+
+> i
+
+4.31 ×10 −2/5.78 3.16 ×10 −2/4.24 
+
+Sensor Dropout (p=0 .2)Forecasting only 
+
+icv  
+
+> d
+
+— 3.21 ×10 −2/4.10 
+
+icv  
+
+> q
+
+— 1.35 ×10 −2/1.81 
+
+ifilt  
+
+> r
+
+— 3.20 ×10 −2/4.09 
+
+ifilt  
+
+> i
+
+— 1.29 ×10 −2/1.73 
+
+Measurement Noise 
+
+×1.5 scale 
+
+icv  
+
+> d
+
+— 1.49 ×10 −3/0.19 
+
+icv  
+
+> q
+
+— 1.05 ×10 −2/1.41 
+
+ifilt  
+
+> r
+
+— 1.56 ×10 −3/0.20 
+
+ifilt  
+
+> i
+
+— 1.05 ×10 −2/1.41 
+
+×2.0 scale 
+
+icv  
+
+> d
+
+— 1.83 ×10 −3/0.23 
+
+icv  
+
+> q
+
+— 1.05 ×10 −2/1.41 
+
+ifilt  
+
+> r
+
+— 1.88 ×10 −3/0.24 
+
+ifilt  
+
+> i
+
+— 1.05 ×10 −2/1.41 
+
+TABLE IV FIVE -MS -AHEAD FORECASTING ON THE 9-BUS SYSTEM (TARGET -SET 
+
+G-NRMSE, %). 
+
+Set Method icv  
+
+> d
+
+icv  
+
+> q
+
+ifilt  
+
+> r
+
+ifilt 
+
+> i
+
+ID Persistence 2.23 3.01 2.16 3.15 ZS 3.21 5.29 3.07 5.97 FT 1.55 2.57 1.26 2.68 OOD-1 Persistence 1.18 1.72 1.16 1.52 ZS 3.11 16.32 4.84 15.61 FT 0.96 1.72 0.90 1.47 OOD-2 Persistence 2.02 2.86 2.08 2.41 ZS 2.22 15.29 4.05 13.55 FT 1.82 2.77 2.11 2.32 
+
+reference changes and was downsampled fivefold to 200 Hz. We compared the frozen source model with one whose shared output head was adapted using the first 10 s (5.1%) and only the first-horizon loss. Both were evaluated 5 ms ahead on the fixed test block beginning at 42 s. The CHIL values were not converted to the offline benchmark’s pu base. After normalization by each channel’s test-block range, the mean normalized RMSE decreased from 13.09% to 3.07%. Fig. 7 compares the measurements with the frozen and adapted forecasts. 
+
+Fig. 5. Simulation predictions with ACI intervals under a step disturbance. 
+
+Fig. 6. Forecasting predictions with ACI intervals. 
+
+Fig. 7. CHIL current forecasts before and after 10-s (5.1%) shared-output-head adaptation; the vertical reference line marks a DC-link-reference change. 
+
+G. Interval Reliability: Static CP and ACI 
+
+Table V compares static CP and ACI. Simulation residuals are more nonstationary than forecasting residuals because rollout errors evolve across time, whereas closest-window merging produces more homogeneous forecasting residuals. For simulation, static CP achieves 91 .70% MCOV, below the 
+
+95% target. ACI raises MCOV to 94 .47% and reduces mean MPIW from 0.005648 to 0.004823 . For forecasting, static CP already reaches 94 .55% MCOV with mean MPIW 0.002072 .ACI shifts coverage to 96 .04% with a small width increase to 0.002255 . The practical benefit of ACI is therefore most evident for simulation. The remaining simulation coverage gap is about 0.5 percentage points and occurs near disturbance onset. At that point, the operating point changes abruptly and the residual grows before the online scale factor κu(j) accu-mulates enough feedback. Fig. 5 shows simulation predictions and ACI 95% intervals. The intervals widen near t = 3 s, where the disturbance causes the largest transient residuals. Fig. 6 shows the forecasting counterpart. After closest-window merging, the forecasting intervals are narrower and more uniform across target times than the simulation intervals. 10 
+
+TABLE V ACI INTERVAL RELIABILITY .              
+
+> Method Mode Mean MCOV (%) Mean MPIW (pu)
+> CP (symmetric) Simulation 91.70 0.005648 ACI (symmetric) Simulation 94.47 0.004823 CP (symmetric) Forecasting 94.55 0.002072 ACI (symmetric) Forecasting 96.04 0.002255
+
+VIII. C ONCLUSION 
+
+This paper studies a unified surrogate for autoregressive simulation and measurement-window forecasting of sampled closed-loop current outputs. The tasks share the same current-output channels but differ in prediction form: autoregres-sive rollout versus single-pass multi-step forecasting from a measurement window. Mamba–MoE learns a single temporal representation for shared transient dynamics, while task con-ditioning and expert routing adapt task-dependent residuals. Task-matched objectives address error propagation, and ACI calibration improves interval reliability. On the inverter benchmark, Mamba–MoE keeps errors for both tasks close to those of a Mamba specialist pair while reducing parameters by about 13%. ACI intervals achieve about 94–96% mean marginal coverage, close to the 95% target. At the larger operating-point shift evaluated in this study, expert routing yields lower errors across all outputs in both tasks. In the cross-system CHIL study, shared-output-head adaptation with limited measured data reduces the mean held-out forecasting error across the four measured-current channels. Future work will extend the framework to multi-inverter networks, stability-constrained long-horizon rollout, and physics-guided constraint handling for stiff differential– algebraic systems [38]. REFERENCES [1] Electric Reliability Council of Texas (ERCOT), “Renewable Inte-gration Report.” Available at: https://www.ercot.com/mp/data-products/ data-product-details?id=NP4-760-ER (Accessed: 5 August 2026) [2] B. Badrzadeh and Z. Emin (Eds.), “Power System Dynamic Modelling and Analysis in Evolving Networks,” Springer Cham, 2024. [3] Y. Li, Y. Gu, and T. C. Green, “Revisiting grid-forming and grid-following inverters: A duality theory,” IEEE Trans. Power Syst. , vol. 37, no. 6, pp. 4541-4554, Nov. 2022. [4] L. Fan et al. , “Data-driven dynamic modeling in power systems: A fresh look on inverter-based resource modeling,” IEEE Power Energy Mag. ,vol. 20, no. 3, pp. 64-76, Mar. 2022. [5] B. Odunlami and M. Netto, “Observability and parameter estimation of a generic model for aggregated distributed energy resources,” preprint arXiv:2510.10892 , 2025. [6] Western Electricity Coordinating Council, “WECC guideline: Central station photovoltaic power plant model validation guideline,” June 2015. [7] Western Electricity Coordinating Council, “Inverter-based resources power plant modeling and validation guideline,” 2026. [8] S. Subedi et al. , “Applications of data-driven dynamic modeling of power converters in power systems: An overview,” IEEE Trans. Ind. Appl. , vol. 61, no. 2, pp. 2434-2456, Mar./Apr. 2025. [9] A. Venkatraman, M. Hebert, and J. Bagnell, “Improving multi-step prediction of learned time series models,” in Proc. AAAI Conf. Artif. Intell. , vol. 29, no. 1, 2015. [10] R. Caruana, “Multitask learning,” Mach. Learn. , vol. 28, no. 1, pp. 41-75, 1997. [11] R. A. Jacobs, M. I. Jordan, S. J. Nowlan, and G. E. Hinton, “Adaptive mixtures of local experts,” Neural Comput. , vol. 3, no. 1, pp. 79-87, 1991. [12] A. Gu and T. Dao, “Mamba: Linear-time sequence modeling with selective state spaces,” in Proc. First Conf. Lang. Model. , 2024. [13] E. Perez, F. Strub, H. de Vries, V. Dumoulin, and A. Courville, “FiLM: Visual reasoning with a general conditioning layer,” in Proc. AAAI , 2018, pp. 3942-3951. [14] A. N. Angelopoulos and S. Bates, “Conformal prediction: A gentle introduction,” Found. Trends Mach. Learn. , vol. 16, no. 4, pp. 494-591, 2023. [15] I. Gibbs and E. Cand` es, “Adaptive conformal inference under distribu-tion shift,” Adv Neural Inf Process Syst , vol. 34, pp. 1660-1672, 2021. [16] N. Shazeer et al. , “Outrageously large neural networks: The sparsely-gated mixture-of-experts layer,” in Proc. ICLR , 2017. [17] H. Mohsenzadeh-Yazdi, F. Ahmadi-Gorjayi, and H. Mohsenian-Rad, “Data-driven modeling of sub-cycle dynamics of inverter-based re-sources using real-world synchro-waveform measurements,” IEEE Trans. Power Del. , vol. 40, no. 4, pp. 2314-2326, Aug. 2025. [18] K. Yang et al. , “Data-driven dynamic modeling for inverter-based resources using neural networks,” Nat. Commun. , vol. 16, no. 1, Art. no. 11696, 2025. [19] L. Lu, P. Jin, G. Pang, Z. Zhang, and G. E. Karniadakis, “Learning nonlinear operators via DeepONet based on the universal approximation theorem of operators,” Nat Mach Intell , vol. 3, no. 3, pp. 218-229, 2021. [20] C. Moya, S. Zhang, G. Lin, and M. Yue, “DeepONet-grid-UQ: A trustworthy deep operator framework for predicting the power grid’s post-fault trajectories,” Neurocomputing , vol. 535, pp. 166-182, 2023. [21] Y. Sun, C. Moya, G. Lin, and M. Yue, “DeepGraphONet: A deep graph operator network to learn and zero-shot transfer the dynamic response of networked systems,” IEEE Syst J , vol. 17, no. 3, pp. 4360-4370, 2023. [22] J. H. Chow (Ed.), Power System Coherency and Model Reduction . New York, NY, USA: Springer, 2013. [23] J. Zhao et al. , “Power system dynamic state estimation: Motivations, definitions, methodologies, and future work,” IEEE Trans. Power Syst. ,vol. 34, no. 4, pp. 3188-3198, Jul. 2019. [24] Y. Susuki, I. Mezi´ c, F. Raak, and T. Hikihara, “Applied Koopman operator theory for power systems technology,” Nonlinear Theory Appl. IEICE , vol. 7, no. 4, pp. 430-459, 2016. [25] R. T. Q. Chen, Y. Rubanova, J. Bettencourt, and D. K. Duvenaud, “Neural ordinary differential equations,” in Proc. Adv. Neural Inf. Process. Syst. (NeurIPS) , 2018, pp. 6572-6583. [26] A. Gu, K. Goel, and C. R´ e, “Efficiently modeling long sequences with structured state spaces,” in Proc. Int. Conf. Learn. Represent. , 2022. [27] A. Menati, F. Doudi, D. Kalathil, and L. Xie, “PowerMamba: Adeep state space model and comprehensive benchmark for time series prediction in electric power systems,” IEEE Trans. Power Syst. , vol. 41, no. 3, pp. 1812-1825, May 2026. [28] M. Pi´ ero et al. , “MoE-Mamba: Efficient selective state space models with mixture of experts,” preprint arXiv:2401.04081 , 2024. [29] Q. Anthony, Y. Tokpanov, P. Glorioso, and B. Purohit, “BlackMamba: Mixture of experts for state-space models,” preprint arXiv:2402.01771 ,2024. [30] Z. Zhan et al. , “Routing Mamba: Scaling state space models with mixture-of-experts projection,” preprint arXiv:2506.18145 , 2025. [31] J. Puigcerver, C. Riquelme, B. Mustafa, and N. Houlsby, “From sparse to soft mixtures of experts,” Proc. Int. Conf. Learn. Represent. , 2024. [32] X. Zhao, M. Netto, and J. Zhao, “Stiffness-aware decentralized dy-namic state estimation for inverter-dominated power systems,” preprint arXiv:2604.18732 , 2026. [33] J. Orsinger, “Three-phase PV inverter for grid-tied applications,” Imperix Knowledge Base , 2021. http://dx.doi.org/10.66800/0006 [34] G. Lin, C. Moya, and Z. Zhang, “Learning the dynamical response of nonlinear non-autonomous dynamical systems with deep operator neural networks,” Eng. Appl. Artif. Intell. , vol. 125, p. 106689, 2023. [35] C. Moya and G. Lin, “DAE-PINN: A physics-informed neural network model for simulating differential algebraic equations with application to power networks,” Neural Comput. Appl. , vol. 35, no. 5, pp. 3789-3804, 2023. [36] C. Moya and G. Lin, “Bayesian, multifidelity operator learning for complex engineering systems—A position paper,” J. Comput. Inf. Sci. Eng. , vol. 23, no. 6, Art. no. 060814, 2023. [37] A. Vaswani et al. , “Attention is all you need,” Adv. Neural Inf. Process. Syst. , vol. 30, pp. 5998-6008, 2017. [38] H. H. Le, H. Wang, C. Moya, M. Netto, and G. Lin, “Physics-guided dimension reduction for simulation-free operator learning of stiff differential-algebraic systems,” preprint arXiv:2604.19930 , 2026.

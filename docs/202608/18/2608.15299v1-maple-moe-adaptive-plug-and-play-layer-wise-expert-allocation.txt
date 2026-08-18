@@ -1,0 +1,504 @@
+Title: MAPLE: MoE Adaptive Plug-and-play Layer-wise Expert allocation
+
+URL Source: https://arxiv.org/pdf/2608.15299v1
+
+Published Time: Tue, 18 Aug 2026 00:43:05 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+Preprint 
+
+# MAPLE: M OE A DAPTIVE PLUG -AND -PLAY LAYER -
+
+# WISE EXPERT ALLOCATION 
+
+Lie Li 
+
+University of Bristol 
+
+fx260102@bristol.ac.uk 
+
+Wen Li 
+
+University of Bristol 
+
+wen.li@bristol.ac.uk 
+
+Junxiao Shen 
+
+University of Bristol junxiao.shen@bristol.ac.uk 
+
+Guosheng Hu 
+
+University of Bristol g.hu@bristol.ac.uk 
+
+## ABSTRACT 
+
+Sparsely-activated Mixture-of-Experts (MoE) Transformers universally fix the same number of routed experts across all layers, a convention that ignores the well-documented heterogeneity in layer-wise redundancy. We demonstrate that this uniformity is systematically suboptimal and propose MAPLE , a plug-and-play framework that reallocates the routed-expert budget heterogeneously across layers of any pretrained MoE LLM, without modifying weights or requiring re-training. Our core contribution is a closed-form sensitivity-guided allocation: we probe each layer’s response to variation in expert count, quantify sensitivity using three measures, and derive an analytically optimal budget assignment that directs capacity towards sensitive layers and absorbs reductions in redundant layers. This closed-form solution is further refined by a sensitivity-constrained genetic search that uses layer-wise sensitivity as a before guide for exploration, yielding faster convergence and superior allocation quality. On four MoE models spanning dif-ferent scales and architectures, MAPLE outperforms uniform and pruning-based baselines under a 75% routed-expert budget. Notably, on DeepSeek-MoE-16B, 
+
+MAPLE uses only 75% of the experts yet surpasses the original 100% expert-uniform baseline on ARC-E, ARC-C, and BoolQ, improving accuracy from 65.09 to 71.40, 48.49 to 51.50, and 80.03 to 82.38, respectively. These accuracy gains translate into measured deployment efficiency: implementing MAPLE in SGLang reduces single-GPU end-to-end serving latency by 32.2% and improves throughput by 47.4%. These results show that well-designed heterogeneous allo-cation can be more effective than simply activating more experts, establishing it as a principled and practical axis for improving MoE efficiency. 
+
+## 1 INTRODUCTION 
+
+Plug-and-play adaptability, first formalised in signal processing (Venkatakrishnan et al., 2013), de-scribes the ability to insert a module into an existing system and immediately reap benefits without redesigning it from scratch. Deep learning has demonstrated this principle through several landmark interventions: Batch Normalization (Ioffe & Szegedy, 2015) stabilised training across diverse archi-tectures; Residual connections (He et al., 2016) unlocked networks an order of magnitude deeper; Dropout (Srivastava et al., 2014) became a widely applicable regulariser requiring minimal modifi-cation. In each case, the intervention was lightweight yet delivered outsized returns. As neural networks developed, the plug-and-play philosophy also became more targeted. Rather than applying the same intervention uniformly across an entire model, researchers began introducing lightweight modules that selectively emphasised the most informative components. In convolutional neural networks, Squeeze-and-Excitation blocks (Hu et al., 2018) and CBAM (Woo et al., 2018) exemplified this shift by adaptively recalibrating feature responses through simple add-on modules. The broader lesson was clear: when internal components contribute unevenly, targeted modular interventions can be more effective than uniform ones. 1arXiv:2608.15299v1 [cs.LG] 15 Aug 2026 Preprint Layer 1 Layer 2 Layer 3 Layer L       
+
+> High Layer 1 Layer 2 Layer 3 Layer L ARC-E ARC-C BoolQ Accuracy Gain (%) 654321
+> 1. Uniform Allocation (Baseline) 2. Layer-wise Sensitivity Analysis 3. Heterogeneous Allocation (25% Inactive) +6.31% +3.01% +2.35%
+> Activated Expert Inactivated Expert
+> Low
+> (a) MAPLE (25 % Inactivate Rate) (b) Performance Gain (75% Budget)
+> Sensitivity
+
+Figure 1: Main idea and key result of MAPLE . (a) Overview of MAPLE : uniform expert allocation is replaced by sensitivity-guided heterogeneous allocation under the same budget. (b) Less compute, better performance: with only 75% routed experts, MAPLE surpasses the full-expert uniform base-line on ARC-Easy (ARC-E), ARC-Challenge (ARC-C), and BoolQ reasoning benchmarks. As Transformer-based language models continued to scale (Devlin et al., 2019; Raffel et al., 2020; Brown et al., 2020; Chowdhery et al., 2023; Touvron et al., 2023a;b), full retraining became in-creasingly expensive, making plug-and-play adaptation more attractive. Adapter layers (Houlsby et al., 2019), LoRA (Hu et al., 2022), Prefix tuning (Li & Liang, 2021), prompt tuning (Lester et al., 2021), and BitFit (Zaken et al., 2022) offered efficient alternatives by updating only a small subset of parameters. Yet despite evidence that different model components contribute unequally (Bahdanau et al., 2015; Vaswani et al., 2017; Michel et al., 2019; Voita et al., 2019), these methods still largely treat adaptation uniformly rather than tailoring it to the parts of the model that matter most. This untapped dimension becomes especially important in Mixture-of-Experts (MoE) LLMs (Jacobs et al., 1991; Shazeer et al., 2017), where model capacity is exposed explicitly through sparse expert activation. By replacing dense feed-forward layers with sparsely activated expert pools, MoE models decouple parameter capacity from per-token compute (Fedus et al., 2022; Lepikhin et al., 2021; Du et al., 2022). With continued improvements in stability and routing (Zoph et al., 2022; Zhou et al., 2022), MoE architectures have also been adopted in a number of recent high-performing models, in-cluding OLMoE (Muennighoff et al., 2024), DeepSeek-MoE (Dai et al., 2024), and Moonlight (Liu et al., 2025). Yet despite this flexibility, current pretrained MoE LLMs still typically use a fixed per-layer number of active experts, even though recent work suggests that expert importance and redundancy vary substantially across layers (Guo et al., 2023; Lu et al., 2024; Zhang et al., 2026). Existing evidence also points to substantial layer-wise heterogeneity. In parameter-efficient fine-tuning, higher layers have been shown to benefit from more LoRA experts (Gao et al., 2024), sug-gesting that adaptation demands are not uniform across depth. More importantly, recent studies on expert pruning and layer compression indicate that redundancy in MoE models varies substantially across layers (Lu et al., 2024; Liu et al., 2024; Dong et al., 2025; Cao et al., 2024). Taken together, these findings suggest that routed expert capacity should not be allocated uniformly, but instead determined in a layer-aware manner. However, implementing such layer-aware allocation through existing approaches remains costly. Unstructured methods (Han et al., 2015; Frantar & Alistarh, 2023; Sun et al., 2024) and MoE-specific variants (Xie et al., 2024) often rely on calibration data, weight reconstruction, or additional recovery procedures to maintain performance. Structured methods that permanently remove experts, whether guided by activation statistics (Lu et al., 2024), low-rank decomposition (Yang et al., 2024), condensation (Cao et al., 2024), Shapley-value estimation (Huang et al., 2025), or domain-specific calibration (Dong et al., 2025), similarly introduce extra data, retraining, or task-specific overhead. Expert merging (Li et al., 2024) adds further computational complexity. In addition, representative MoE pruning methods such as MoNE (Zhang et al., 2026) and EEP (Liu et al., 2024) also operate by identifying and removing redundant experts or expert parameters. Since these methods alter the original expert structure rather than only reallocating the active expert budget at inference time, they are less amenable to plug-and-play deployment on pretrained MoE models. 2Preprint In this work, we propose MAPLE (MoE Adaptive Plug-and-play Layer-wise Expert allocation), a plug-and-play framework for automatically determining heterogeneous per-layer expert allocations in pretrained MoE Transformers without modifying weights or retraining. MAPLE formulates ex-pert reallocation as a constrained optimisation problem: it first performs a lightweight layer-wise sensitivity scan, then derives a closed-form heterogeneous allocation under a global expert bud-get, and subsequently applies a sensitivity-guided genetic refinement, all in a fully post-hoc manner without modifying model architectures. Figure 1 provides an overview of MAPLE , showing that sensitivity-guided heterogeneous expert allocation improves performance under a fixed budget and can even surpass the full-expert uniform baseline using only 75% experts. Our main contributions are as follows: • We identify heterogeneous per-layer expert allocation as an underexplored yet effective axis for improving pretrained MoE LLMs. Unlike existing work (Frantar & Alistarh, 2023; Sun et al., 2024; Zhang et al., 2024; Liu et al., 2024; Zhang et al., 2026), we propose MAPLE ,a fully plug-and-play framework that requires no weight updates, retraining. • We introduce a sensitivity-guided optimisation strategy for expert reallocation, in which a lightweight layer-wise sensitivity scan enables a closed-form allocation under a global expert budget, with genetic search for subsequent refinement. • Under the same expert budget, MAPLE improves overall performance over the uniform baseline and delivers superior results compared with pruning-based and expert-reallocation methods across five reasoning benchmarks. In particular, even with 25% fewer routed experts, MAPLE is able to surpass the original full-expert MoE on multiple tasks, high-lighting the value of sensitivity-guided heterogeneous expert allocation. 
+
+## 2 RELATED WORK 
+
+Layer-wise Sensitivity Analysis. Understanding layer-wise response to capacity reduction is fun-damental to model compression. Prior work has shown that network redundancy is substantial but highly non-uniform across layers Han et al. (2015); Frankle & Carbin (2019); Guo et al. (2023). Sensitivity-based analyses therefore motivate non-uniform compression, where capacity is allocated according to functional importance rather than reduced uniformly Engelbrecht (2001); Ma et al. (2023). Evidence from structured pruning and attention-head analysis further supports this view, showing that layers and sub-components contribute unequally to performance Michel et al. (2019); Voita et al. (2019). 
+
+Mixture-of-Experts Models and Expert Compression. MoE models improve parameter efficiency through sparse expert activation (Shazeer et al., 2017; Fedus et al., 2022), as shown by recent ar-chitectures such as Mixtral (Jiang et al., 2024) and DeepSeekMoE (Dai et al., 2024). To reduce deployment cost, early work adapted dense-model pruning methods to MoE experts, including SparseGPT (Frantar & Alistarh, 2023), Wanda (Sun et al., 2024), and router-aware pruning in MoE-Pruner (Xie et al., 2024). Because unstructured sparsity often brings limited practical acceleration, later studies shifted to structured expert-level compression. These include activation-frequency-based pruning in Not All Experts are Equal (Lu et al., 2024), evolutionary expert search in EEP (Liu et al., 2024), and expert merging in MC-SMoE (Li et al., 2024). More recent methods further in-troduce lightweight replacements or calibration-guided compression, such as MoNE (Zhang et al., 2026), ConDense-MoE (Cao et al., 2024) and domain-specific expert pruning approaches (Dong et al., 2025). However, these methods generally modify model weights or structure, rely on cali-bration data, and often overlook heterogeneous layer-wise redundancy. LExI(Chitty-Venkata et al., 2025) is more closely related to MAPLE: it also preserves the pretrained model and assigns het-erogeneous active-expert counts across layers, but derives the allocation in a data-free manner from model-weight statistics. Our method instead reallocates the active expert budget across layers based on sensitivity, without altering model weights. 
+
+Budget-Constrained Architecture Search. From an optimisation perspective, allocating a fixed budget non-uniformly across layers is a discrete combinatorial problem whose search space grows rapidly with network depth, making exact optimisation impractical for large models (Elsken et al., 2019). Prior work has therefore relied on approximate search strategies. In CNNs, AMC (He et al., 2018) used reinforcement learning to assign layer-wise compression ratios under a global FLOPs 3Preprint budget and showed clear gains over uniform policies. NetAdapt addressed the same problem with iterative greedy adaptation, trading global optimality for search efficiency (Yang et al., 2018). NAS later generalised this idea to broader architecture search, where evolutionary methods proved ef-fective in discrete design spaces (Elsken et al., 2019; Real et al., 2019; Tan et al., 2019). Similar observations have also emerged in Transformers: MoLA showed that heterogeneous LoRA expert assignment outperforms uniform allocation under the same parameter budget (Gao et al., 2024). Our method follows this line of work, but avoids expensive search in the allocation step by deriving a closed-form layer-wise expert allocation from sensitivity estimates. 
+
+## 3 METHOD 
+
+We present MAPLE , a plug-and-play framework for sensitivity-guided heterogeneous expert alloca-tion in budget-constrained MoE Transformers. Layers that are more sensitive to expert count should deviate less from their preferred allocation. MAPLE proceeds in three steps: it estimates layer-wise sensitivity and identifies each layer’s single-layer optimum (Section 3.1); derives a closed-form al-location under the global budget (Section 3.2); and refines the discrete solution with a lightweight genetic search (Section 3.3). 3.1 LAYER -WISE SENSITIVITY MODELLING 
+
+MoE Transformers typically use a uniform expert count across layers, although layers play distinct roles and exhibit varying redundancy (Guo et al., 2023; Lu et al., 2024; Zhang et al., 2026). Because routing is performed independently at each layer (Qiu et al., 2025), we probe layers individually. Specifically, while fixing all other layers at the baseline expert count k0, we vary the expert count of layer l over E = {1, . . . , k 0}, where e ∈ E denotes the number of routed experts assigned to layer 
+
+l, and record the validation accuracy Al(e). The single-layer optimum is k∗ 
+
+> l
+
+= min {e | Al(e) = max e′∈E Al(e′)}.The optimum k∗ 
+
+> l
+
+alone does not indicate how strongly layer l responds to expert-count variation. Prior work in pruning, quantisation, and adaptive fine-tuning similarly reports layer-dependent sen-sitivity (LeCun et al., 1990; Molchanov et al., 2019; Dong et al., 2019; 2020; Wu et al., 2020; Zhang et al., 2023). We therefore consider three lightweight sensitivity measures: sacc  
+
+> l
+
+= max e∈E Al(e) −
+
+min e∈E Al(e), swl = 1
+
+> |Wl|
+
+P  
+
+> W∈Wl
+
+Var( W ), and sout  
+
+> l
+
+= 1
+
+> |E|
+
+P 
+
+> e∈E
+
+MSE  Hl(e), H l(k0). Here, 
+
+Wl is the set of parameter tensors in layer l, and Hl(e) is its output when using e experts. These metrics capture performance-, parameter-, and representation-level sensitivity, respectively. We use accuracy range by default and evaluate the alternatives in the ablation study; sl denotes the selected metric. 3.2 SENSITIVITY -GUIDED CLOSED -FORM EXPERT ALLOCATION 
+
+Given the preferred expert counts {k∗ 
+
+> l
+
+}Ll=1 , sensitivities {sl}Ll=1 , and global budget K, we seek an allocation k = [ k1, . . . , k L] that stays close to each layer’s optimum. More sensitive layers should deviate less, so we solve min k J (k) = PLl=1 wl
+
+ kl − k∗
+
+> l
+
+2 s.t. PLl=1 kl = K, where 
+
+wl = sl > 0 in our implementation. Introducing a Lagrange multiplier λ gives L(k, λ ) = J (k) + λ
+
+PLl=1 kl − K
+
+
+
+. Setting ∂L/∂k l =0 yields kcont  
+
+> l
+
+= k∗ 
+
+> l
+
+− λ 
+
+> 2wl
+
+, with λ = 2(PLl=1 k∗ 
+
+> l−K
+
+)PLl=1 1/w l
+
+.Let ∆ = K − P 
+
+> l
+
+k∗ 
+
+> l
+
+and Γ = P 
+
+> l
+
+k∗ 
+
+> l
+
+− K. Any surplus or deficit relative to K is assigned preferentially to low-sensitivity layers: 
+
+kcont  
+
+> l
+
+=
+
+
+
+k∗ 
+
+> l
+
++ ∆ · 1/s l
+
+PLj=1 1/s j
+
+, if P 
+
+> l
+
+k∗ 
+
+> l
+
+< K, k∗ 
+
+> l
+
+− Γ · 1/s l
+
+PLj=1 1/s j
+
+, if P 
+
+> l
+
+k∗ 
+
+> l
+
+> K. 
+
+(1) 4Preprint We clip kcont to the feasible range [kmin , k max ] and apply the largest-remainder method to obtain an integer allocation ksens satisfying the per-layer bounds and global budget. 3.3 SENSITIVITY -CONSTRAINED GENETIC REFINEMENT 
+
+The closed-form solution ksens provides a principled initialization but may retain rounding artefacts and residual cross-layer interactions. We therefore apply a lightweight genetic algorithm with vali-dation accuracy A(k) as fitness. Candidate allocations are generated by sensitivity-controlled Gaus-sian mutation: ˜kl = ksens  
+
+> l
+
++ ϵl, ϵl ∼ N (0 , σ 2 
+
+> l
+
+), σ2 
+
+> l
+
+∝ 1 
+
+> sl+ε
+
+, so high-sensitivity layers receive smaller perturbations. At each generation, we retain the top two candidates as elites and generate the remaining population using this same perturbation, without crossover. The best candidate gives the final allocation kbest .3.4 DEPLOYMENT COMPATIBILITY 
+
+Because MAPLE only changes, per MoE layer, how many router-ranked experts are activated at inference time, without modifying the router, expert weights, or model architecture, it can be inte-grated into any MoE serving engine that exposes a per-layer top-k routing parameter. We implement 
+
+MAPLE in SGLang by introducing a dedicated execution path for layers assigned k = 1 : after the router computes per-expert scores, only the highest-scoring (argmax) expert is evaluated, bypassing the multi-expert dispatch, weighted combination, and reduction logic required when k > 1. Sec-tion 4 reports the resulting end-to-end latency and throughput gains measured in this SGLang im-plementation. The same mechanism applies to vLLM’s fused MoE kernel, which similarly exposes top-k as a per-layer configuration parameter, so we expect comparable integration to be possible without further modification to MAPLE itself. 
+
+## 4 EXPERIMENTS 
+
+4.1 EXPERIMENTAL SETTINGS 
+
+Model architectures. We evaluate MAPLE on four representative MoE models: DeepSeek-MoE-16B(Dai et al., 2024), DeepSeek-V2-Lite(DeepSeek-AI, 2024), Moonlight-16B-A3B(Liu et al., 2025), and OLMoE-1B-7B(Muennighoff et al., 2024). To assess expert reallocation under con-strained resources, we retain 75% of the routed experts in each model while preserving the number of shared experts when present. As described in Section 3.1, the sensitivity scan and allocation search operate only over each model’s MoE layers, and all reported budgets (75% routed budget / full routed+shared budget, computed over these layers only) are: DeepSeek-MoE-16B 108/162+54; DeepSeek-V2-Lite and Moonlight-16B-A3B 104/156+52; and OLMoE-1B-7B, which has no shared experts, 96/128+0. 
+
+Evaluation benchmarks. We evaluate performance on seven benchmarks spanning both short-form MCQA and long-form generative reasoning. The MCQA benchmarks include RTE for textual entailment, BoolQ for yes/no question answering, PIQA for physical commonsense reasoning, and ARC-E/ARC-C for science question answering. We further include long-form generative bench-marks: GSM8K for mathematical reasoning with 0-shot CoT and BBH for challenging multi-step reasoning with 3-shot CoT. 
+
+Implementation and deployment details. All experiments use NVIDIA RTX A6000 GPUs with 48 GB memory and a 75% routed-expert budget, with accuracy range as the default sensitivity metric. MAPLE computes a sensitivity-guided allocation and refines it using 10 candidates over 10 generations, retaining the top two elites per generation while enforcing the global budget and per-layer bounds. For end-to-end serving, we implement MAPLE in SGLang 0.4.6 and evaluate single-GPU, two-GPU pipeline-parallel (PP), and two-GPU expert-parallel (EP) configurations. Latency and throughput are averaged over five runs. 5Preprint 4.2 EXPERIMENTAL RESULTS 
+
+Overall performance. According to Table1, MAPLE improves average accuracy over the full-budget baseline by 2.63, 6.44, and 4.13 points on DeepSeek-MoE-16B, DeepSeek-V2-Lite, and OLMoE-1B-7B, respectively, while using only 75% of the routed experts; on Moonlight-16B-A3B, it is 0.62 points below baseline but still the best-performing method at this budget. Compared with the strongest baseline in each column, MAPLE improves average accuracy by 3.52, 5.79, 1.14, and 3.61 points across the four models, achieving the best average accuracy on every model evaluated. These results show that uniform expert allocation is often suboptimal, and that sensitivity-guided heterogeneous allocation can match or exceed it with fewer active experts. Table 1: Main results under the 75% routed-expert budget on four MoE architectures and five rea-soning benchmarks. Baseline denotes the original full-budget uniform routed-expert configuration. Bold indicates the best result in each model–task block.                                                                                                                                                                                                                           
+
+> DeepSeek-MoE-16B DeepSeek-V2-Lite Method ARC-C ARC-E BoolQ PIQA RTE Avg. ARC-C ARC-E BoolQ PIQA RTE Avg.
+> Baseline 48.49 65.09 80.03 80.09 84.84 71.71 44.82 64.74 67.40 79.82 53.43 62.04 SparseGPT 46.15 62.11 79.69 79.33 81.22 69.70 44.48 64.91 67.34 78.98 57.76 62.69 Wanda 45.81 62.98 79.72 79.27 82.67 70.09 44.15 64.91 67.31 78.67 54.51 61.91 RIA 46.48 63.16 79.72 79.49 80.87 69.94 45.15 64.04 65.08 78.99 49.82 60.62 EPP 47.49 66.14 79.60 77.86 83.03 70.82 42.47 62.46 67.74 78.40 49.82 60.18 MoNE 47.15 64.04 76.52 76.44 81.46 69.12 42.81 62.11 65.86 78.30 53.42 60.50 LExI 47.49 67.19 79.85 78.35 74.37 69.45 47.16 64.21 68.78 76.82 54.15 62.54 MAPLE 51.50 71.40 82.38 80.85 85.55 74.34 50.84 68.60 73.43 80.20 69.31 68.48 Moonlight-16B-A3B OLMoE-1B-7B Method ARC-C ARC-E BoolQ PIQA RTE Avg. ARC-C ARC-E BoolQ PIQA RTE Avg.
+> Baseline 77.26 88.60 76.54 79.71 69.68 78.36 41.47 54.91 65.96 78.35 77.98 63.73 SparseGPT 75.25 85.79 75.14 78.51 65.34 76.01 43.47 55.09 67.06 77.37 77.61 64.12 Wanda 73.58 85.61 75.08 78.18 64.62 75.41 43.48 54.61 66.88 77.20 77.26 63.89 RIA 76.25 84.25 74.20 78.45 68.31 76.29 43.14 55.96 64.74 78.34 79.06 64.25 EPP 76.60 85.82 74.50 79.65 66.43 76.60 43.83 57.19 66.45 75.19 76.17 63.77 MoNE 74.09 85.80 77.37 77.92 65.53 76.14 33.78 46.15 62.41 76.18 77.62 59.23 LExI 67.89 81.58 70.61 78.67 71.12 73.98 30.43 38.95 63.73 76.82 53.07 52.60 MAPLE 77.59 86.26 74.65 80.16 70.04 77.74 44.81 63.16 68.62 78.94 83.75 67.86
+
+Long-form generative tasks. Beyond short-answer MCQA, we evaluate MAPLE on GSM8K and BBH, which require multi-step chain-of-thought generation rather than single-token answer selection. Table 2 shows that at a 75% budget on DeepSeek-MoE-16B, calibrated directly on each benchmark’s chain-of-thought accuracy, MAPLE preserves GSM8K accuracy within 0.61 points of the full-budget baseline while reducing total evaluation time by 53.0%, and improves BBH accuracy by 0.90 points while reducing total evaluation time by 6.3%. These results indicate that MAPLE ’s gains are not confined to short-form multiple-choice calibration, and that heterogeneous allocation remains competitive with, and can exceed, full-budget uniform routing on long-form generative reasoning. Table 2: GSM8K and BBH accuracy and total evaluation wall-clock time at a 75% budget, DeepSeek-MoE-16B, directly calibrated on each benchmark’s chain-of-thought accuracy. GSM8K uses the complete 1,319-example test set (0-shot); BBH uses the complete 5,911-example set (3-shot CoT). 
+
+GSM8K BBH Configuration Acc. Total time Acc. Total time 
+
+Full uniform (100%) 58.53 492.26 s 43.43 5,776.97 s MAPLE (75%) 57.92 231.48 s 44.33 5,434.15 s 
+
+∆ −0.61 −53 .0% +0 .90 −6.3% 
+
+Efficiency profile: offline cost versus serving gains. Table 3 reports both sides of MAPLE ’s practical cost–benefit trade-off on DeepSeek-MoE-16B: panel (a) gives the one-time offline cali-bration cost, incurred once per model before the resulting allocation is reused indefinitely at no further overhead; panels (b) and (c) give measured serving latency and throughput in SGLang 0.4.6 and vLLM respectively, both on an ARC-Easy workload, where MoE layers assigned a single ac-tive expert use a dedicated execution path that skips multi-expert dispatch, and the model’s dense 6Preprint layer is unaffected throughout. In vLLM, we additionally report a fused CUDA kernel variant of this k = 1 path (“MAPLE 75%”), which further reduces kernel-launch overhead. Gains under the two-GPU pipeline and expert parallelism are smaller than the single-GPU setting in SGLang, since communication and synchronisation overheads do not shrink in proportion to reduced expert com-putation. MAPLE retains all expert weights throughout, so its benefit is reduced active computation and latency rather than model-size compression. Table 3: MAPLE ’s efficiency profile. (a) One-time offline calibration cost per model, summed across five tasks, on a single RTX A6000. (b) Measured SGLang 0.4.6 serving time on DeepSeek-MoE-16B at a 75% budget, averaged over five runs, ARC-Easy workload. (c) Measured vLLM serving throughput and latency on DeepSeek-MoE-16B at a 75% budget, ARC-Easy workload. PP: pipeline parallelism; EP: expert parallelism.      
+
+> Model Total (h)
+> DeepSeek-MoE-16B 7.39 DeepSeek-V2-Lite 14.86 Moonlight-16B-A3B 9.81 OLMoE-1B-7B 6.10
+
+(a) Offline cost                       
+
+> Setting Full Uniform, 75% MAPLE, 75% Time ↓Tput. ↑
+> 1 GPU 2.860 s 2.680 s 1.940 s 32.2% 47.4% 2 GPU, PP 3.660 s 3.660 s 3.470 s 5.2% 5.5% 2 GPU, EP 9.056 s 8.809 s 8.701 s 3.9% 4.1%
+
+(b) SGLang serving latency and throughput                  
+
+> Setting Full Uniform, 75% MAPLE, 75% Time ↓Tput. ↑
+> 1 GPU 3.915 s 3.745 s 3.736 s 4.58% 4.80% 2 GPU, PP 13.703 s 11.819 s 11.762 s 14.16% 16.50%
+
+(c) vLLM serving latency and throughput 
+
+4.3 ABLATION STUDY 
+
+Sensitivity metrics. Table 4 compares different combinations of accuracy-range, weight-variance, and output-deviation sensitivity. Table 4: Ablation of sensitivity metrics (Acc.: accuracy range, Weight: weight variance, Output: output deviation). Best Gen. is the generation at which the best accuracy is reached.                                  
+
+> Acc. Weight Output Best Gen. Best Acc. ∆
+> 1–84.84 –2✓285.55 +0.71 3✓✓485.20 +0.36 4✓✓684.12 -0.72 5✓✓10 83.75 -1.08 6✓✓✓985.55 +0.71
+
+The full-uniform baseline reaches 84.84% (row 1). Accuracy range alone (row 2) achieves the largest gain (+0.71) in just 2 generations. Adding weight variance (row 3) converges more slowly with a smaller gain (+0.36, gen. 4), while adding output deviation instead (row 4) hurts performance (-0.72, gen. 6). Weight and output variance without accuracy range (row 5) perform worst of all (-1.08, gen. 10), showing accuracy range does most of the useful work and the other two signals are redundant at best. Combining all three (row 6) matches the accuracy range alone (+0.71) but needs far more generations (9 vs. 2) to get there. We therefore use accuracy range as the default metric throughout the paper. Figure 2 confirms this across tasks under the same 75% budget, where accuracy range remains consistently competitive while weight and output variance are less stable. We therefore use accuracy range as the default metric. 
+
+Refinement and stability. Table 5 ablates the refinement step while keeping the budget and sen-sitivity metric fixed: refinement improves the closed-form allocation on every benchmark, with gains ranging from +0.82 on PIQA to +7.01 on ARC-E, showing that the closed-form solution provides an effective initial allocation while lightweight task-specific refinement yields further im-provements. Since this stage is stochastic, we additionally rerun it with five independent seeds on DeepSeek-MoE-16B, fixing the model, calibration split, prompts, and expert budget, and varying only random initialisation; the resulting seed standard deviation is an order of magnitude smaller than the refinement gain, indicating a stable solution rather than exploited noise. 7Preprint 50 60 70 80 90         
+
+> Score
+> ARC-C ARC-E BoolQ PIQA RTE Baseline Random Acc-range Weight-var Output-var
+
+Figure 2: Performance of different sensitivity metrics in MAPLE under the 75% expert budget across five tasks. Bold bar outlines indicate the best result within each task. Table 5: Effect of refinement and seed stability. Closed-form denotes the initial allocation, +Re-finement applies the proposed refinement step, and Seed Std. reports the standard deviation of +Refinement accuracy across five independent refinement seeds. 
+
+Task Closed-form +Refinement ∆ Seed Std. 
+
+ARC-C 48.49 51.50 +3.01 ±1.16 
+
+ARC-E 64.39 71.40 +7.01 ±0.90 
+
+BoolQ 80.70 82.39 +1.68 ±0.45 
+
+PIQA 80.03 80.85 +0.82 ±0.21 
+
+RTE 83.39 85.55 +2.16 ±0.75 
+
+Figure 3 examines the refinement dynamics across tasks. Despite substantially different layer-wise sensitivity landscapes across benchmarks, most gains occur in the first few generations and the search converges quickly, supporting the use of a lightweight local refinement rather than an expen-sive global search. ARC -  
+
+> 3
+> 2
+> 10-2
+> EPIQA BoolQ ARC -RTE C
+> -1 -3
+> Z-scored Sensitivity
+
+(a) AR Bo R
+
+> —P
+> ARC-C ARC-E BoolQ PIQA RTE
+
+Generation Remaining Gap      
+
+> 0510 15 19 1.0 0.5 0.0
+
+(b) 
+
+Figure 3: (a) Task-wise standardised sensitivity distributions under the 75% expert budget. (b) Nor-malised convergence trends across tasks, where Remaining Gap denotes the performance difference from the best-found solution. 
+
+Robustness of the calibration signal. Table 6 tests whether MAPLE ’s gains depend on precise, task-specific calibration, or hold under weaker calibration signals on DeepSeek-MoE-16B at a 75% budget. A single allocation jointly calibrated across all five tasks ( Reusable ) still delivers strong accuracy without any per-task recalibration, showing MAPLE does not require a fresh search for every de-ployment task. 8Preprint 
+
+MAPLE also transfers well across tasks: applying each task’s searched allocation directly to the other four ( Cross-task transfer , averaged over the 20 off-diagonal source–target pairs shown in the lower rows) performs on par with established pruning methods despite never being calibrated on the target task, indicating that the sensitivity patterns MAPLE identifies reflect genuine, transferable properties of the model’s layers rather than fitting narrowly to one evaluation set. As an adversarial control, we replace task accuracy with negative token-level NLL on two generic corpora, C4 and FineWeb-Edu, sharing no examples, labels, or format with any evaluation task. Taken together, these results show MAPLE is robust along three independent axes: it does not need per-task recalibration, its allocations generalise across tasks, and its gains are not an artefact of the search procedure. Table 6: Robustness of MAPLE ’s calibration signal on DeepSeek-MoE-16B at a 75% budget. Reusable, Cross-task transfer, C4-NLL, and FineWeb-Edu-NLL are alternative calibration signals; C4-NLL/FineWeb-Edu-NLL replace task accuracy with generic-corpus perplexity. The remaining rows give the full cross-task transfer matrix underlying the Cross-task transfer average above.                                                             
+
+> Calibration signal ARC-C ARC-E BoolQ PIQA RTE Avg.
+> Reusable (joint 5-task) 49.83 68.95 82.05 78.62 83.39 72.57 Cross-task transfer (avg. of 20 pairs) 43.65 65.09 78.83 78.81 79.33 69.14 C4-NLL 44.15 65.26 78.99 79.43 80.14 69.59 FineWeb-Edu-NLL 44.48 62.11 76.45 79.76 81.59 68.88 ARC-C (source) 51.50 64.56 79.24 78.40 79.06 70.55 ARC-E (source) 44.82 71.40 78.75 78.67 76.90 70.11 BoolQ (source) 40.80 64.56 82.38 79.16 81.95 69.77 PIQA (source) 44.48 64.74 79.14 80.85 79.42 69.73 RTE (source) 44.48 66.49 78.17 79.00 85.55 70.74
+
+Expert budget. MAPLE ’s advantage over Wanda and SparseGPT holds at every budget level and widens at the tighter 50% budget, suggesting heterogeneous reallocation becomes more valuable as naive pruning is more likely to remove capacity from layers that still need it. Heterogeneous allocation also improves over the uniform baseline at 100% budget, indicating uniform allocation itself leaves room for better capacity placement independent of any budget reduction. Table 7: ARC-C / RTE accuracy under 50%, 75%, and 100% expert budgets on DeepSeek-MoE-16B. Wanda and SparseGPT are omitted at 100% since their unpruned configuration is identical to the uniform baseline.             
+
+> Budget Wanda SparseGPT MAPLE
+> 50% 41.14 / 72.92 39.46 / 72.20 46.49 / 79.78
+> 75% 45.81 / 82.67 46.15 / 81.22 51.50 / 85.55
+> 100% (uniform baseline: 48.49 / 84.84) ––51.84 / 88.09
+
+## 5 CONCLUSIONS AND LIMITATIONS 
+
+We presented MAPLE , a plug-and-play framework for heterogeneous expert allocation in budget-constrained MoE Transformers. MAPLE estimates layer-wise sensitivity, derives a closed-form allocation, and refines it with a lightweight genetic search, without weight updates, retraining, or architectural modification. Experiments on four MoE models and five benchmarks show that 
+
+MAPLE outperforms pruning-based baselines under a 75% routed-expert budget, and surpasses the full-budget uniform configuration on three models while using fewer routed experts. These results indicate that uniform expert allocation is often suboptimal, and that layer-wise capacity redistribu-tion can better match the heterogeneous demands of MoE layers. In the future, we plan to evaluate MAPLE on diverse hardware platforms, including GPUs, CPUs, and edge devices, and under broader real-world inference scenarios. This will allow us to further assess its practical efficiency, deployment flexibility, and applicability beyond the current experi-mental setting. In particular, hardware-aware evaluation can reveal whether reduced routed-expert 9Preprint computation translates into actual latency, memory, and energy benefits across different deployment environments. Such deployment-oriented analysis may also provide deeper insight into how het-erogeneous expert allocation interacts with system-level constraints in practical inference systems, including memory bandwidth, batching behaviour, and hardware support for sparse MoE execution. 
+
+## REFERENCES 
+
+Dzmitry Bahdanau, Kyunghyun Cho, and Yoshua Bengio. Neural machine translation by jointly learning to align and translate. In International Conference on Learning Representations (ICLR) ,2015. Tom B. Brown, Benjamin Mann, Nick Ryder, et al. Language models are few-shot learners. Ad-vances in Neural Information Processing Systems (NeurIPS) , 33:1877–1901, 2020. Mingyu Cao, Gen Li, Jie Ji, Jiaqi Zhang, Xiaolong Ma, Shiwei Liu, and Lu Yin. Condense, don’t just prune: Enhancing efficiency and performance in MoE layer pruning. arXiv preprint arXiv:2412.00069 , 2024. Krishna Teja Chitty-Venkata, Sandeep Madireddy, Murali Emani, and Venkatram Vishwanath. Lexi: Layer-adaptive active experts for efficient moe model inference, 2025. URL https://arxiv. org/abs/2509.02753 .Aakanksha Chowdhery, Sharan Narang, Jacob Devlin, et al. PaLM: Scaling language modeling with pathways. Journal of Machine Learning Research , 24:1–113, 2023. Damai Dai, Chengqi Deng, Chenggang Zhao, R. X. Xu, Huazuo Gao, Deli Chen, Jiashi Li, Wangding Zeng, Xingkai Yu, Y. Wu, et al. DeepSeekMoE: Towards ultimate expert specialization in mixture-of-experts language models, 2024. DeepSeek-AI. DeepSeek-V2: A strong, economical, and efficient mixture-of-experts language model. arXiv preprint arXiv:2405.04434 , 2024. Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. BERT: Pre-training of deep bidirectional transformers for language understanding. In Proceedings of NAACL-HLT , pp. 4171– 4186, 2019. Zhen Dong, Zhewei Yao, Amir Gholami, Michael W. Mahoney, and Kurt Keutzer. HAWQ: Hessian AWare quantization of neural networks with mixed-precision. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) , pp. 293–302, 2019. Zhen Dong, Zhewei Yao, Daiyaan Arfeen, Amir Gholami, Michael W. Mahoney, and Kurt Keutzer. HAWQ-V2: Hessian aware trace-weighted quantization of neural networks. In Advances in Neu-ral Information Processing Systems (NeurIPS) , volume 33, pp. 18518–18529, 2020. Zican Dong, Han Peng, Peiyu Liu, Wayne Xin Zhao, Dong Wu, Feng Xiao, and Zhifeng Wang. Domain-specific pruning of large mixture-of-experts models with few-shot demonstrations. arXiv preprint arXiv:2504.06792 , 2025. Nan Du, Yanping Huang, Andrew M. Dai, et al. GLaM: Efficient scaling of language models with mixture-of-experts. In Proceedings of ICML , pp. 5547–5569, 2022. Thomas Elsken, Jan Hendrik Metzen, and Frank Hutter. Neural architecture search: A survey. 
+
+Journal of Machine Learning Research , 20(55):1–21, 2019. Andries P. Engelbrecht. A new pruning heuristic based on variance analysis of sensitivity informa-tion. IEEE Transactions on Neural Networks , 12(6):1386–1399, 2001. William Fedus, Barret Zoph, and Noam Shazeer. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23(120):1–39, 2022. Jonathan Frankle and Michael Carbin. The lottery ticket hypothesis: Finding sparse, trainable neural networks. In International Conference on Learning Representations (ICLR) , 2019. 10 Preprint Elias Frantar and Dan Alistarh. SparseGPT: Massive language models can be accurately pruned in one-shot. In Proceedings of the 40th International Conference on Machine Learning (ICML) , pp. 10323–10337, 2023. Chongyang Gao, Kezhen Chen, Jinmeng Rao, Baochen Sun, Ruibo Liu, Daiyi Peng, Yawen Zhang, Xiaoyuan Guo, Jie Yang, and V. S. Subrahmanian. Higher layers need more LoRA experts. arXiv preprint arXiv:2402.08562 , 2024. Suhan Guo, Bilan Lai, Suorong Yang, Jian Zhao, and Furao Shen. Sensitivity pruner: Filter-level compression algorithm for deep neural networks. Pattern Recognition , 140:109508, 2023. doi: 10.1016/j.patcog.2023.109508. Song Han, Jeff Pool, John Tran, and William J. Dally. Learning both weights and connections for efficient neural network. In Advances in Neural Information Processing Systems (NeurIPS) ,volume 28, 2015. Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recog-nition. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , pp. 770–778, 2016. Yihui He, Ji Lin, Zhijian Liu, Hanrui Wang, Li-Jia Li, and Song Han. AMC: AutoML for model compression and acceleration on mobile devices. In Proceedings of the European Conference on Computer Vision (ECCV) , pp. 815–832, 2018. Neil Houlsby, Andrei Giurgiu, Stanislaw Jastrzebski, et al. Parameter-efficient transfer learning for NLP. In Proceedings of the 36th International Conference on Machine Learning (ICML) , pp. 2790–2799, 2019. Edward J. Hu, Yelong Shen, Phillip Wallis, et al. LoRA: Low-rank adaptation of large language models. arXiv preprint arXiv:2106.09685 , 2022. Jie Hu, Li Shen, and Gang Sun. Squeeze-and-excitation networks. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , pp. 7132–7141, 2018. Weizhong Huang, Yuxin Zhang, Xiawu Zheng, Fei Chao, Rongrong Ji, and Liujuan Cao. Discov-ering important experts for mixture-of-experts models pruning through a theoretical perspective. In The Thirty-ninth Annual Conference on Neural Information Processing Systems , 2025. URL 
+
+https://openreview.net/forum?id=7kQjbCQwtT .Sergey Ioffe and Christian Szegedy. Batch normalization: Accelerating deep network training by reducing internal covariate shift. In Proceedings of the 32nd International Conference on Machine Learning (ICML) , pp. 448–456, 2015. Robert A. Jacobs, Michael I. Jordan, Steven J. Nowlan, and Geoffrey E. Hinton. Adaptive mixtures of local experts. Neural Computation , 3(1):79–87, 1991. Albert Q. Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch, Blanche Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Emma Bou Hanna, Florian Bressand, et al. Mixtral of experts. arXiv preprint arXiv:2401.04088 , 2024. Yann LeCun, John S. Denker, and Sara A. Solla. Optimal brain damage. In Advances in Neural Information Processing Systems (NeurIPS) , volume 2, pp. 598–605, 1990. Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu, et al. GShard: Scaling giant models with conditional computation and automatic sharding. arXiv preprint arXiv:2006.16668 , 2021. Brian Lester, Rami Al-Rfou, and Noah Constant. The power of scale for parameter-efficient prompt tuning. In Proceedings of EMNLP , pp. 3045–3059, 2021. Pingzhi Li, Zhenyu Zhang, Prateek Yadav, Yi-Lin Sung, Yu Cheng, Mohit Bansal, and Tianlong Chen. Merge, then compress: Demystify efficient SMoE with hints from its routing policy. In 
+
+International Conference on Learning Representations (ICLR) , 2024. 11 Preprint Xiang Lisa Li and Percy Liang. Prefix-tuning: Optimizing continuous prompts for generation. In 
+
+Proceedings of the 59th Annual Meeting of the Association for Computational Linguistics (ACL) ,pp. 4582–4597, 2021. Enshu Liu, Junyi Zhu, Zinan Lin, Xuefei Ning, Matthew B Blaschko, Shengen Yan, Guohao Dai, Huazhong Yang, and Yu Wang. Efficient expert pruning for sparse mixture-of-experts language models: Enhancing performance and reducing inference costs. arXiv preprint arXiv:2407.00945 ,2024. Jingyuan Liu, Jianlin Su, Xingcheng Yao, et al. Muon is scalable for LLM training, 2025. Xudong Lu, Qi Liu, Yuhui Xu, Aojun Zhou, Siyuan Huang, Bo Zhang, Junchi Yan, and Hongsheng Li. Not all experts are equal: Efficient expert pruning and skipping for mixture-of-experts large language models. In Proceedings of the 62nd Annual Meeting of the Association for Computa-tional Linguistics (ACL) , 2024. Xinyin Ma, Gongfan Fang, and Xinchao Wang. LLM-Pruner: On the structural pruning of large language models. In Advances in Neural Information Processing Systems (NeurIPS) , volume 36, 2023. Paul Michel, Omer Levy, and Graham Neubig. Are sixteen heads really better than one? In Advances in Neural Information Processing Systems (NeurIPS) , volume 32, 2019. Pavlo Molchanov, Arun Mallya, Stephen Tyree, Iuri Frosio, and Jan Kautz. Importance estimation for neural network pruning. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , pp. 11264–11272, 2019. Niklas Muennighoff et al. OLMoE: Open mixture-of-experts language models. arXiv preprint arXiv:2409.02060 , 2024. Zihan Qiu, Zeyu Huang, Shuang Cheng, Yizhi Zhou, Zili Wang, Ivan Titov, and Jie Fu. Layerwise recurrent router for mixture-of-experts. In The Thirteenth International Conference on Learning Representations , 2025. URL https://openreview.net/forum?id=eWNEqdH0vk .Colin Raffel, Noam Shazeer, Adam Roberts, et al. Exploring the limits of transfer learning with a unified text-to-text transformer. Journal of Machine Learning Research , 21(140):1–67, 2020. Esteban Real, Alok Aggarwal, Yanping Huang, and Quoc V. Le. Regularized evolution for image classifier architecture search. In Proceedings of the AAAI Conference on Artificial Intelligence ,volume 33, pp. 4780–4789, 2019. Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. In 
+
+International Conference on Learning Representations (ICLR) , 2017. Nitish Srivastava, Geoffrey Hinton, Alex Krizhevsky, Ilya Sutskever, and Ruslan Salakhutdinov. Dropout: A simple way to prevent neural networks from overfitting. Journal of Machine Learning Research , 15:1929–1958, 2014. Mingjie Sun, Zhuang Liu, Anna Bair, and J. Zico Kolter. A simple and effective pruning approach for large language models. In International Conference on Learning Representations (ICLR) ,2024. Mingxing Tan, Bo Chen, Ruoming Pang, Vijay Vasudevan, Mark Sandler, Andrew Howard, and Quoc V. Le. MnasNet: Platform-aware neural architecture search for mobile. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , 2019. Hugo Touvron, Thibaut Lavril, Gautier Izacard, et al. LLaMA: Open and efficient foundation lan-guage models. arXiv preprint arXiv:2302.13971 , 2023a. Hugo Touvron, Louis Martin, Kevin Stone, et al. Llama 2: Open foundation and fine-tuned chat models. arXiv preprint arXiv:2307.09288 , 2023b. 12 Preprint Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. In Advances in Neural Infor-mation Processing Systems (NeurIPS) , volume 30, 2017. Singanallur V. Venkatakrishnan, Charles A. Bouman, and Brendt Wohlberg. Plug-and-play priors for model based reconstruction. In IEEE Global Conference on Signal and Information Processing (GlobalSIP) , pp. 945–948, 2013. Elena Voita, David Talbot, Fedor Moiseev, Rico Sennrich, and Ivan Titov. Analyzing multi-head self-attention: Specialized heads do the heavy lifting, the rest can be pruned. In Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics (ACL) , pp. 5797–5808, 2019. Sanghyun Woo, Jongchan Park, Joon-Young Lee, and In So Kweon. CBAM: Convolutional block attention module. In Proceedings of the European Conference on Computer Vision (ECCV) , pp. 3–19, 2018. Hao Wu, Patrick Judd, Xiaojie Zhang, Mikhail Isaev, and Paulius Micikevicius. Integer quantization for deep learning inference: Principles and empirical evaluation. CoRR , abs/2004.09602, 2020. URL https://arxiv.org/abs/2004.09602 .Yanyue Xie, Zhi Zhang, Ding Zhou, Cong Xie, Ziang Song, Xin Liu, Yanzhi Wang, Xue Lin, and An Xu. Moe-pruner: Pruning mixture-of-experts large language model using the hints from its router, 2024. URL https://arxiv.org/abs/2410.12013 .Cheng Yang, Yang Sui, Jinqi Xiao, et al. MoE-I 2: Compressing mixture of experts models through inter-expert pruning and intra-expert low-rank decomposition. In Findings of the Association for Computational Linguistics: EMNLP 2024 , pp. 10456–10466, 2024. Tien-Ju Yang, Andrew Howard, Bo Chen, Xiao Zhang, Alec Go, Mark Sandler, Vivienne Sze, and Hartwig Adam. NetAdapt: Platform-aware neural network adaptation for mobile applications. In 
+
+Proceedings of the European Conference on Computer Vision (ECCV) , pp. 285–300, 2018. Elad Ben Zaken, Shauli Ravfogel, and Yoav Goldberg. BitFit: Simple parameter-efficient fine-tuning for transformer-based masked language models. arXiv preprint arXiv:2106.10199 , 2022. Geng Zhang, Yuxuan Han, Yuxuan Lou, Yiqi Zhang, Wangbo Zhao, and Yang You. MoNE: Replac-ing redundant experts with lightweight novices for structured pruning of MoE. In International Conference on Learning Representations (ICLR) , 2026. arXiv:2507.00390. Qingru Zhang, Minshuo Chen, Alexander Bukharin, Nikos Karampatziakis, Pengcheng He, Yu Cheng, Weizhu Chen, and Tuo Zhao. AdaLoRA: Adaptive budget allocation for parameter-efficient fine-tuning. In International Conference on Learning Representations (ICLR) , 2023. Yingtao Zhang, Haoli Bai, Haokun Lin, Jialin Zhao, Lu Hou, and Carlo Vittorio Cannistraci. Plug-and-play: An efficient post-training pruning method for large language models. In International Conference on Learning Representations (ICLR) , 2024. Yanqi Zhou, Tao Lei, Hanxiao Liu, Nan Du, Yanping Huang, Vincent Zhao, Andrew M. Dai, Quoc V. Le, and James Laudon. Mixture-of-experts with expert choice routing. In Advances in Neural Information Processing Systems (NeurIPS) , volume 35, 2022. Barret Zoph, Irwan Bello, Sameer Kumar, et al. ST-MoE: Designing stable and transferable sparse expert models. arXiv preprint arXiv:2202.08906 , 2022. 
+
+## A APPENDIX 
+
+You may include other additional sections here. 13 Preprint A.1 FULL ALGORITHM 
+
+Algorithm 1 summarises the complete three-step MAPLE pipeline. 
+
+Algorithm 1: Pseudocode for MAPLE Input: MoE model with L layers; base expert count k0; total budget K; valid range 
+
+[kmin , k max ]; validation set Dval ; population size P ; generations G
+
+Output: Final allocation kbest  
+
+> 1
+
+Step 1: Layer-wise Sensitivity Modelling ; 
+
+> 2
+
+for l ← 1 to L do  
+
+> 3
+
+Probe layer l by varying its expert count from 1 to k0, with all other layers fixed at k0; 
+
+> 4
+
+Record Al(e) for each candidate count e, and set the preferred count 
+
+k∗ 
+
+> l
+
+= min {e | Al(e) = max e′ Al(e′)}; 
+
+> 5
+
+Compute the sensitivity score sl = max e Al(e) − min e Al(e) (accuracy range; see Section 3.1 for alternative metrics);  
+
+> 6
+
+Step 2: Sensitivity-guided Closed-form Expert Allocation ; 
+
+> 7
+
+if PLl=1 k∗ 
+
+> l
+
+< K then  
+
+> 8
+
+Let ∆ = K − PLl=1 k∗ 
+
+> l
+
+; 
+
+> 9
+
+Allocate the surplus to less sensitive layers: kcont  
+
+> l
+
+= k∗ 
+
+> l
+
++ ∆ · 1/s l
+
+PLj=1 1/s j
+
+for each layer l; 
+
+> 10
+
+else  
+
+> 11
+
+Let Γ = PLl=1 k∗ 
+
+> l
+
+− K; 
+
+> 12
+
+Remove the excess from less sensitive layers: kcont  
+
+> l
+
+= k∗ 
+
+> l
+
+− Γ · 1/s l
+
+PLj=1 1/s j
+
+for each layer l; 
+
+> 13
+
+Clip kcont to [kmin , k max ] and project it to integers via the largest-remainder method to obtain 
+
+ksens ; 
+
+> 14
+
+Step 3: Sensitivity-constrained Genetic Refinement ; 
+
+> 15
+
+Initialise the population P around ksens by sampling ˜kl = ksens  
+
+> l
+
++ ϵl, with ϵl ∼ N (0 , σ 2 
+
+> l
+
+) and 
+
+σ2 
+
+> l
+
+∝ 1
+
+sl + ε ; 
+
+> 16
+
+for g ← 1 to G do  
+
+> 17
+
+Evaluate each candidate k ∈ P on Dval and compute its fitness f (k) = A(k); 
+
+> 18
+
+Keep the top-2 candidates in P as elites;  
+
+> 19
+
+Refill P by perturbing elite solutions with sensitivity-controlled Gaussian noise, then project each result back to the feasible set;  
+
+> 20
+
+return kbest = arg max k∈P f (k);14

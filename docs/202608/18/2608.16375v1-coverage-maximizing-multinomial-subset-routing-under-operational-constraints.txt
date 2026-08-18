@@ -1,0 +1,1984 @@
+Title: Coverage-Maximizing Multinomial Subset Routing under Operational Constraints
+
+URL Source: https://arxiv.org/pdf/2608.16375v1
+
+Published Time: Tue, 18 Aug 2026 02:29:38 GMT
+
+Number of Pages: 25
+
+Markdown Content:
+# Coverage-Maximizing Multinomial Subset Routing under Operational Constraints 
+
+Quan Zhou 1 and Yiyan Huang ∗21National University of Singapore 
+
+> 2
+
+The Great Bay University 
+
+Abstract 
+
+We introduce Multinomial Subset Routing (MSR), a new online routing framework over 
+
+K experts in which the learner keeps a multinomial routing policy instead of a deterministic subset of experts. At each round, the learner samples M experts i.i.d. from the multinomial policy, and the resulting set of distinct sampled experts forms the routed subset. The reward depends only on the best-performing expert(s) in the routed subset. This reward structure arises naturally in routing across specialized models but is not captured by standard combinatorial bandits or subset-selection methods, which optimize determin-istic subsets and typically assume additive rewards. We require the selection to satisfy several long-term, two-sided operational constraints under bandit feedback, observing only the winner’s reward each round. We propose OMD-Approachability, combining online mir-ror descent with Blackwell’s Approachability, and prove it achieves O(1 /√T ) regret in both reward and constraint violation. We ground the framework in practical application domains and validate it empirically on a real-world crowdsourcing dataset. 
+
+# 1 Introduction 
+
+The rise of specialized large language models (LLMs) has enabled hospitals to deploy ensembles of expert models—each trained on a distinct clinical domain—to assist in patient diagnosis and treatment planning. At each patient visit, the platform must select a subset of these specialists to consult. For any consults, only the most knowledgeable model determines the quality of the response, and the contributions of less capable models are subsumed. This winner-takes-all structure stands in sharp contrast to standard combinatorial bandits [30], where the quality is the sum of contributions of selected specialists. A patient’s case typically spans multiple clinical dimensions (e.g., a cardiac complication, a kidney function issue, and a neurological symptom); for each dimension, only the most proficient selected specialist contributes, and the total reward aggregates these per-dimension maxima, yielding a sum-max structure [37]. Formally, given a set of K experts and N medical dimensions, the reward of consulting a subset A ⊆ [K] takes the form 
+
+r(A) = 
+
+> N
+
+X
+
+> k=1
+
+max  
+
+> i∈A
+
+Vk,i ,
+
+where Vk,i ≥ 0 denotes the proficiency of specialist i on the k-th medical dimension. This captures a fundamental property of ensemble consultation: specialists are complementary rather than additive. Crucially, these specialist models are black-box: the platform observes only the aggregate reward r(A) after consultation, not individual model contributions, motivating the bandit feedback setting.  
+
+> ∗Corresponding author: huangyiyan@gbu.edu.cn
+
+1arXiv:2608.16375v1 [cs.LG] 17 Aug 2026 Another key distinction between the proposed setting and standard combinatorial bandits is that the platform does not seek a deterministic subset. Beyond maximizing clinical coverage, the platform must also respect operational constraints: each medical specialty must be consulted sufficiently often to ensure broad coverage, while computational resources must be balanced across servers to ensure timely responses. Consequently, a fixed deterministic subset may fail to satisfy these operational requirements. Instead, the platform seeks a multinomial routing policy that generates different subsets over time, allowing aggregate routing decisions to achieve both high clinical coverage and operational feasibility. We call this setting Multinomial Subset Routing (MSR) . In MSR, the learner maintains a routing distribution over the K experts and, in each round, forms a subset by sampling M experts independently from this distribution. The resulting subset consists of the distinct experts sampled in that round. Thus, the optimization object is a routing policy rather than a deterministic subset. This setting is important for three reasons. First, a fixed MSR policy provides a simple and stable mechanism for repeatedly generating subsets over a long horizon. Second, repeated execution of the same policy enables long-term operational constraints, such as capacity and fairness, to be enforced through average routing frequencies. Third, for sum-max rewards, the expected reward induced by a MSR policy is concave over the probability simplex [37], enabling the use of online convex optimization techniques. Despite their practical importance, existing methods fail to address this problem in its full generality. On one hand, sum-max submodular bandits [37] capture the coverage structure of ensemble selection but do not incorporate operational constraints. On the other hand, ban-dit algorithms with knapsack constraints [6] typically handle budget requirements but assume simple linear or modular reward functions, which fail to model the coverage synergies inherent in multi-expert consultation. In the LLM routing literature, Mixture-of-Experts (MoE) ap-proaches [40] learn to gate over specialists but lack provable feasibility guarantees and do not account for long-term constraint satisfaction. Combining sum-max rewards with operational constraints poses two technical challenges. The sum-max reward structure differs from standard combinatorial bandits, and while its con-cave structure [37] enables online optimization of the reward, it simultaneously introduces a non-convexity in the operational constraints. We show that both challenges can be overcome by carefully exploiting this concave structure for the reward objective while introducing a surrogate constraint reformulation to restore tractability. In this paper, we propose a novel framework for sum-max submodular bandits with two-sided operational (covering and packing) constraints. Our main contributions are: 
+
+• We formulate the problem of online subset selection with sum-max rewards and multiple operational constraints under bandit feedback, a setting not addressed by prior work. 
+
+• We propose an Online Mirror Descent algorithm with Approachability constraints (OMD-Approachability) that achieves sublinear regret in both reward and constraint violation, with provable feasibility guarantees. 
+
+• We extend the framework to the contextual setting, where the learner observes a context before acting. 
+
+• We instantiate the framework on some real-world applications and validate empirically on a real dataset, demonstrating that OMD-Approachability achieves competitive reward while maintaining feasibility. 
+
+# 2 Related Works 
+
+Mixture-of-Experts The Mixture-of-Experts (MoE) architecture, introduced by [29] and scaled to modern LLMs by [40], increases model capacity by routing each input token to a 2learned subset of expert sub-networks via a gating function, activating only a fraction of param-eters per forward pass. The Switch Transformer [21] formalized the notion of expert capacity 
+
+— a hard upper bound on the number of tokens routable to each expert — and introduced load-balancing losses to prevent token dropping or expert collapse. This capacity constraint is a direct motivation for our work: the problem of routing queries to experts under capacity limits is naturally modeled as a bandit problem with knapsack constraints. 
+
+LLM Routing. While MoE routing operates at the token level within a single model, a related but distinct line of work considers routing at the system level — selecting which LLM among a pool of candidates to invoke for each incoming query, trading off response quality against inference cost. Early approaches learn a routing function offline — either by directly optimizing performance minus scaled cost [13, 14], or by training a supervised router with labels from all candidate models [41, 36, 15, 22] — an assumption that breaks at deployment where only the outcome of the chosen model is observed (bandit feedback). Recent work addresses this by framing routing as an online learning problem: [35] formulates it as a multi-armed bandit that balances accuracy and cost, while [46] uses a contextual bandit conditioned on a user-specified performance–cost preference vector. Our work differs along several dimensions: we route a subset of experts simultaneously rather than a single model, we operate under more restricted feedback (only the aggregated reward of the chosen subset is observed), and the selection is subject to multi-dimensional whole-horizon covering and packing constraints. These constraints generalize the single cost-budget of prior work and can additionally encode operational limits (e.g., query caps on a specific GPU cluster) or fairness requirements (e.g., guaranteeing each hospital receives a minimum allocation of queries). This routing-under-capacity problem above is closely related to the following Bandits with Knapsacks (BwK) [6]. 
+
+Bandits with Knapsacks. The framework, pioneered by [6], studies the problem of online decision-making under resource consumption constraints. Over the years, it has been extended in numerous directions, including contextual settings [42, 4], linear bandits [2], combinato-rial variants [32, 38], and adversarial settings [28], as well as connections to dueling bandits [20]. While the majority of approaches adopt UCB-style algorithms, recent work has explored Thompson sampling as an alternative [19]. Most relevant to our work is the setting of concave rewards and convex knapsacks [3], which proposes to handle the constraints via Blackwell’s Approachability algorithm; our work builds on and extends this line of research. 
+
+Submodular Maximization with Constraints. This line of work dates back to the last century, studying the problem of selecting a subset that maximizes a submodular set function subject to combinatorial constraints [5]. It is relevant to our setting because the sum-max reward function we consider is also submodular, satisfying the diminishing-returns property. Classical approaches include greedy [34], double greedy [9], and local search [31], with a cel-ebrated breakthrough being the continuous greedy algorithm [10], which achieves the optimal (1 − 1/e ) approximation for monotone submodular maximization under a matroid constraint, with extensions to non-monotone cases [8]. More recent works extend this framework to richer settings, including the intersection of matroid and knapsack constraints [39, 7], changing en-vironments [48, 33], online settings [26, 43] and resource-aware settings [47]. However, These methods all require access to a value oracle of the set function, or with a access to subroutine to draw samples to estimate the function value e.g., [24], that remain inapplicable to our setting, where the reward function is unknown and must be learned from observations on the fly. 
+
+Submodular Bandits. This line of work relaxes the assumption of full access to a value oracle. The earliest works [50, 49] model the reward as a weighted sum of basis submodular functions with unknown weights, while still requiring access to the value oracle of each basis function. [49] additionally introduce a per-round knapsack constraint, meaning the budget is enforced independently at each round; in contrast, our whole-horizon knapsack couples decisions across rounds, requiring the algorithm to jointly manage exploration and resource consumption 3over time. [44] removes access to the value oracle entirely, requiring only marginal gain obser-vations r(S ∪ { i}) − r(S), and extends to per-round knapsack and matroid constraints. [12] adopts the same observation model but additionally assumes marginal gains are representable via a kernel function. 
+
+K-max Bandits. A special case is when the reward is the maximum over selected arms, which is itself submodular. Two distinct settings have been studied under the name K-max bandits : Extreme Bandits [18, 11, 1], which maximizes the expected best single-sample reward across T rounds, and [25, 23, 17], which defines the per-round reward as the maximum outcome within a selected subset — the setting directly related to ours, which we extend by incorporating knapsack constraints on action costs. The consideration of action costs is not entirely new [24, 37] that both treat costs as a shared quantity across actions. Our formulation is more general along two dimensions: first, we support multiple cost types simultaneously, where each cost type aggregates individual action costs over a specific group — motivated by the notion of 
+
+expert capacity in Mixture-of-Experts (MoE) models; second, we support both upper-bound and lower-bound constraints on each cost type, requiring that certain resource consumption levels are met as well as not exceeded. We encode all of these as whole-horizon knapsack constraints. 
+
+Combinatorial Bandits consider a decision maker that selects M base arms from K in each round, forming a super-arm [30]. In the standard setting, the reward of a super-arm is determined by the rewards of its selected base arms, often through an additive structure. Pop-ular methods include CUCB [16] and CTS [45]. These methods typically select a deterministic super-arm, e.g., the top-M base arms according to their UCB or Thompson-sampling values. In contrast, MSR optimizes a multinomial routing policy that induces subsets through repeated sampling. 
+
+# 3 Motivating Examples 
+
+We instantiate the general framework on three applications that illustrate the breadth of the coverage-maximizing bandit setting. 
+
+Medical Consultation via Mixture-of-Expert LLMs. A hospital network operates K
+
+specialist LLMs, each trained on distinct datasets. At each patient visit, the platform selects a subset At ⊆ [K] of up to M specialists and receives a scalar reward rt(At) = PNk=1 max i∈At V (t) 
+
+> k,i
+
+,reflecting the clinical coverage of the consultation. Here V (t) 
+
+> k,i
+
+≥ 0 captures how well specialist i
+
+covers clinical dimension k for patient t. Patient feedback reflects the quality of the consultation as a whole, not the contribution of any individual specialist, so only the aggregate reward rt(At)is revealed after consultation. As examples of the operational constraints this can capture: (i) a specialty coverage constraint , requiring each specialist to be consulted often enough that it keeps receiving cases to update on; and (ii) a GPU load-balancing constraint , capping the average activations per server cluster. 
+
+Crowdsourcing Team Formation. A crowdsourcing platform assembles teams of up to M
+
+workers from a pool of K to complete sequentially arriving projects. The team quality reward for the t-th project is rt(At) = PNk=1 max i∈At V (t) 
+
+> k,i
+
+, where V (t) 
+
+> k,i
+
+is the match quality between worker i and project t along skill dimension k (e.g. software development, graphic design). The project requester only rates the completed project as a whole, not each worker’s individual sub-contribution, so only the aggregate reward rt(At) is revealed after project completion. As examples of the operational constraints this can capture: (i) a wage budget constraint , capping the average spend per project; and (ii) a group fairness constraint , requiring each demographic group to be hired sufficiently often on average. 4Online Ad Allocation. A platform selects a subset of up to M candidate ads to dis-play at each of T rounds. The resulting engagement reward at the t-th round is rt(At) = 
+
+PNk=1 max i∈At V (t) 
+
+> k,i
+
+, where V (t) 
+
+> k,i
+
+≥ 0 is the relevance of ad i to user-interest category k. The re-alized payoff (e.g. total session revenue) is logged for the displayed slate as a whole; ad-serving logs do not reliably attribute a single conversion to one specific ad among several shown to-gether, so only the aggregate reward rt(At) is revealed after each round. As examples of the operational constraints this can capture: (i) a budget constraint , capping average spend per round; (ii) a fairness constraint , requiring each advertiser group to receive a sufficient share of impressions on average; and (iii) a load-balancing constraint , capping average activations per ad-serving node. 
+
+# 4 Problem Setup and Notation 
+
+We consider an online learning problem in which a learner repeatedly selects subsets of actions to maximize cumulative reward while satisfying long-term operational constraints. Let K, M, T ∈ N be fixed, where K denotes the number of available actions (specialists), 
+
+M is the maximum number of actions selected per round, and T is the time horizon. We write [K] := {1, . . . , K } and denote by ∆ K := 
+
+n
+
+q ∈ RK 
+
+> +
+
+: PKi=1 qi = 1 
+
+o
+
+the probability simplex over [K]. For u ∈ Rd and a nonempty closed set A ⊆ Rd, we write dist( u, A ) := min x∈A ∥x − u∥ for the Euclidean distance from u to A.
+
+Rewards and costs. Each round t is associated with a reward set function rt : 2 [K] → [0 , 1] and rt(∅) = 0. Each action i ∈ [K] incurs a known cost vector ci ∈ [0 , ¯c]d, where ¯ c is the upper bound for each entry of the cost vector. 
+
+Interaction protocol. The interaction protocol below formalizes the MSR setting introduced in Section 1. Nature fixes in advance a sequence of reward functions {rt}Tt=1 , which remain hidden from the learner. At each round t = 1 , . . . , T , the learner proceeds as follows: 1. Choose a routing policy qt ∈ ∆K .2. Draw M i.i.d. actions at, 1, . . . , a t,M ∼ qt and form the (random) subset At := {at,j : j ∈
+
+[M ]} ⊆ [K], so |At| ≤ M .3. Observe the bandit feedback rt(At). 4. Incur the (random) loss ℓt := 
+
+> K
+
+X
+
+> i=1
+
+ci 1[i ∈ At]. The learner must ensure the time-averaged loss vector lies within an axis-aligned box Sori =Qdj=1 [lj , u j ], i.e., 1
+
+> T
+
+PTt=1 ℓt ∈ Sori . We assume throughout that 0 ≤ uj ≤ M ¯c and 0 ≤ lj ≤ ¯c.This is without loss of generality: coordinates violating the bounds are satisfied by every policy, since ci ∈ [0 , ¯c]d for i ∈ [K] and qt ∈ ∆K for t ∈ [T ]. 
+
+4.1 Sum-Max Reward Functions 
+
+Recall the informal sum-max reward r(S) = PNk=1 max i∈S Vk,i from Section 1; following [37], we now fix this formally. 
+
+Definition 1 (Sum-max function) . A set function r : 2 [K] → R is sum-max if there exist N ∈ N
+
+and a matrix V ∈ RN ×K such that 
+
+r(A) = 
+
+> N
+
+X
+
+> k=1
+
+max  
+
+> i∈A
+
+Vk,i ∀ A ⊆ [K], A ̸ = ∅, and r(∅) = 0 .
+
+5Definition 2 (Expected reward) . For any q ∈ ∆K , let b1(q), . . . , b M (q) be i.i.d. draws from the routing policy q and set B(q) := {bj (q) : j ∈ [M ]}. For a set function r : 2 [K] → R, define 
+
+Φr(q) := E[r(B(q))] , q ∈ ∆K .
+
+Lemma 1 (Concavity and gradient of Φ r). Let r be a sum-max function. Then Φr is concave over ∆K , and for every q ∈ ∆K , the partial derivative of the expected reward with respect to the 
+
+ith entry qi, is 
+
+∂iΦr(q) = E
+
+ r(B(q)) 
+
+> qi
+
+X 
+
+> j∈[M]
+
+1{bj (q) = i}
+
+ .
+
+Proof. Both claims follow directly from [37]: concavity of Φ r over ∆ K follows from Theorem 2.3, and the gradient expression from Lemma 6.7. 
+
+4.2 Tractability and constraint reformulation 
+
+Since the realized loss is stochastic, we analyze its expectation. At round t, under routing policy 
+
+qt ∈ ∆K , arm i appears in At with probability 1 − (1 − qt,i )M , so the expected cost vector is 
+
+E[ℓt] = 
+
+> K
+
+X
+
+> i=1
+
+ 1 − (1 − qt,i )M  ci. (1) Recall that one of the learner’s goals is to keep the time-averaged observed cost inside a target set Sori . Since the realized loss ℓt is stochastic, we might first work with the constraint in expectation: 1
+
+> T
+
+PTt=1 E[ℓt] ∈ Sori . However, the map qt 7 → E[ℓt] is concave for M ≥ 1, which prevents the direct use of online convex optimization methods. To restore tractability and apply the approachability algorithm in [27], we construct a convex and compact set S such that playing qt with PKi=1 qt,i ci ∈ S is sufficient to guarantee E[ℓt] ∈ Sori , i.e. S is a safe inner approximation of Sori under the linear surrogate. Let c(j) 
+
+> i
+
+denote the jth entry of the cost vector ci. The construction proceeds in two steps: (i) we replace E[ℓt] by the linear surrogate P 
+
+> i
+
+qici, which yields a strict inner approximation; and (ii) we truncate S to a box, which preserves both the feasible set and the constraint distance and serves only to render S compact, as the approachability analysis of Section 5 requires. 
+
+(i) Surrogate substitution and rescaling. The map qt 7 → E[ℓt] is concave, so constraining it directly does not yield a convex feasible set. We therefore constrain the linear surrogate PKi=1 qt,i ci instead, which is safe because the two are sandwiched coordinate-wise: for each 
+
+j ∈ [d], KX
+
+> i=1
+
+qt,i c(j) 
+
+> i
+
+≤ E[ℓt](j) ≤ M
+
+> K
+
+X
+
+> i=1
+
+qt,i c(j) 
+
+> i
+
+, (2) by p ≤ 1 − (1 − p)M ≤ M p for p ∈ [0 , 1], M ≥ 1, together with c(j) 
+
+> i
+
+≥ 0. Consequently it suffices to enforce PKi=1 qt,i c(j) 
+
+> i
+
+≤ uj /M for an upper-bound coordinate, and 
+
+PKi=1 qt,i c(j) 
+
+> i
+
+≥ lj for a lower-bound one 1.
+
+(ii) Truncating S to a box. The half-lines produced by step (i) are unbounded, so the approachability assumption defined in later text is violated. Since P 
+
+> i
+
+qic(j) 
+
+> i
+
+∈ [0 , ¯c] for every 
+
+q ∈ ∆K and j ∈ [d], we may intersect each S(j) with [0 , ¯c] and take 
+
+S(j) = [ 0 , u j /M ] (upper-bound coordinates) , S(j) = [ lj , ¯c ] (lower-bound coordinates) ,                  
+
+> 1Note that since q7→E[ℓt](j)=P
+> i(1 −(1 −qi)M)c(j)
+> iis concave, the constraint E[ℓt](j)≥ljis convex in qand can be enforced directly without any surrogate. This yields a tighter benchmark OPT, at the cost of non-linear constraints in (6); we adopt the linear surrogate on both sides for uniformity of exposition.
+
+6so that S = Q 
+
+> j
+
+S(j) ⊆ [0 , ¯c]d. This alters neither the feasible set defined in step (i) nor the value of dist( P 
+
+> i
+
+qici, S ), but renders S compact. The following lemma is the guarantee of this construction. Recall that Sori = Qdj=1 (Sori )(j)
+
+is a product of intervals, where each coordinate j is either an upper-bound coordinate with (Sori )(j) = ( −∞ , u j ], or a lower-bound coordinate with ( Sori )(j) = [ lj , ∞); the corresponding coordinates of S are S(j) = [0 , u j /M ] and S(j) = [ lj , ¯c]. 
+
+Lemma 2 (Distance transfer) . For any sequence q1, . . . , q T ∈ ∆K , define 
+
+ϕ := 1
+
+> TT
+
+X
+
+> t=1
+
+E[ℓt] = 1
+
+> TT
+
+X
+
+> t=1
+> K
+
+X
+
+> i=1
+
+ 1 − (1 − qt,i )M ci, φ := 1
+
+> TT
+
+X
+
+> t=1
+> K
+
+X
+
+> i=1
+
+qt,i ci.
+
+Then 
+
+dist  ϕ, S ori  ≤ M · dist( φ, S ) .
+
+Proof. Since Sori and S are both axis-aligned boxes, it suffices to show, for each coordinate j
+
+separately, dist 
+
+
+
+ϕ(j), (Sori )(j)
+
+≤ M · dist 
+
+
+
+φ(j), S (j)
+
+.
+
+We handle the two cases in turn. 
+
+Case 1: Upper-bound coordinate , ( Sori )(j) = ( −∞ , u j ], S(j) = [0 , u j /M ]. The distance of a scalar w ≥ 0 from ( −∞ , u ] is max( w −u, 0), and from [0 , u/M ] it is likewise max( w − u/M, 0). From the sandwich (2), applied coordinate-wise and averaged over t,0 ≤ ϕ(j) ≤ M φ (j),
+
+and in particular φ(j) ≥ 0. Therefore dist  ϕ(j), (Sori )(j) = max( ϕ(j) − uj , 0) 
+
+≤ max( M φ (j) − uj , 0) = M · max  φ(j) − uj 
+
+> M
+
+, 0
+
+= M · dist  φ(j), S (j).
+
+Case 2: Lower-bound coordinate , ( Sori )(j) = [ lj , ∞), S(j) = [ lj , ¯c]. Since φ(j) ≤ ¯c, the upper end of S(j) is inactive and the distance of φ(j) from S(j) is max( lj − φ(j), 0), as it is from [ lj , ∞). From the sandwich (2), averaged over t, ϕ(j) ≥ φ(j) ≥ 0, whence dist  ϕ(j), (Sori )(j) = max( lj − ϕ(j), 0) ≤ max( lj − φ(j), 0) = dist  φ(j), S (j).
+
+Corollary 1 (Constraint transfer) . If 1
+
+> T
+
+PTt=1 
+
+PKi=1 qt,i ci ∈ S, then 1
+
+> T
+
+PTt=1 E[ℓt] ∈ Sori .Proof. φ ∈ S implies dist( φ, S ) = 0, so Lemma 2 gives dist( ϕ, S ori ) = 0, i.e. ϕ ∈ S.
+
+4.3 Online Learning Goal 
+
+The learner’s goal is to simultaneously maximize the cumulative expected reward and keep the time-averaged observed cost inside a target set Sori ⊆ Rd. Since the realized loss ℓt is stochastic, we may impose the constraint in expectation: 1
+
+> T
+
+PTt=1 E[ℓt] ∈ Sori . The non-trivial interaction between the sum-max reward structure and the box constraints prevents a direct formulation. We therefore work with the linear surrogate constraint 1
+
+> T
+
+PTt=1 
+
+P 
+
+> i
+
+qt,i ci ∈ S in 7place of 1
+
+> T
+
+PTt=1 E[ℓt] ∈ Sori , which by Corollary 1 is sufficient to guarantee feasibility with respect to Sori . Further, we compare with the best fixed feasible routing policy in hindsight, not the best fixed subset. The benchmark is OPT := max 
+
+> q∈∆K
+> 1
+> TT
+
+X
+
+> t=1
+
+Φrt (q) s.t. 
+
+> K
+
+X
+
+> i=1
+
+qi ci ∈ S. (3) Since S is a convex polytope and the objective is concave in q (by Lemma 6.7 of [37]), this is a concave program over a convex feasible set. We measure performance through two regret quantities. 
+
+Objective regret. The first compares the learner’s cumulative expected reward against the benchmark OPT, i.e. against the best fixed feasible routing policy in hindsight: 
+
+R1(T ) := OPT − 1
+
+> TT
+
+X
+
+> t=1
+
+Φrt (qt). (4) 
+
+Constraint regret. The second measures how far the learner ends up from feasibility. Note that it is stated in terms of the realized costs ℓt = P 
+
+> i
+
+1[i ∈ At]ci and the original target set 
+
+Sori :
+
+R2(T ) := dist 1
+
+> TT
+
+X
+
+> t=1
+
+ℓt, S ori 
+
+!
+
+. (5) 
+
+# 5 Algorithm and Theoretical Guarantees 
+
+We present Algorithm 1, where hS (w) = max x∈S {w⊤x} denotes the support function of S.Since S = Qdj=1 S(j) is a compact axis-aligned box, the support function hS (w) = max x∈S {w⊤x}
+
+is finite and decomposes coordinate-wise: 
+
+h[0 , u j /M ](wj ) = 
+
+((uj /M ) wj wj ≥ 0,
+
+0 wj < 0, h[lj , ¯c](wj ) = 
+
+(¯c w j wj ≥ 0,lj wj wj < 0.
+
+By [37], gt,i is an unbiased estimate of ∇Φrt (qt), but may explode if qt,i is too small. The following assumption prevents this. 
+
+Assumption 1. The benchmark problem (3) is feasible and admits an optimal solution q ∈ ∆K
+
+satisfying qi ≥ γ for all i ∈ [K].
+
+Remark 1 (feasibility of the QP) . Assumption 1 implies that the quadratic program (6) is feasible. Let q⋆ be an optimal solution of the benchmark problem (3) . By feasibility of (3) , we have PKi=1 q⋆i ci ∈ S. Hence, by Lemma 4, 
+
+w⊤
+
+> K
+
+X
+
+> i=1
+
+q⋆i ci − hS (w) ≤ 0, ∀ ∥ w∥ ≤ 1.
+
+Since the dual iterate wt, as defined in the algorithm, lies in the unit Euclidean ball, the above inequality holds for w = wt. Moreover, Assumption 1 ensures that q⋆i ≥ γ for all i. Therefore 
+
+q⋆ satisfies both the linear constraint and the lower-bound constraints in (6) , so q⋆ is a feasible point of the quadratic program. Consequently, QP (6) is feasible at every round. 
+
+8Algorithm 1: Online Mirror Descent with Approachability Constraints 1. Input: rescaled set S, OCO algorithm A, cost vectors ci ∈ [0 , ¯c]d for i ∈ [K], floor γ and learning rate η.2. Set B ⊂ Rd to be the unit Euclidean ball, as decision set for A.3. Set q0,i := 1 /K and initialize g0,i arbitrarily for i ∈ [K]. 4. For t = 1 , . . . , T :(a) Set ft−1(w) := w⊤
+
+PKi=1 qt−1,i ci
+
+
+
+− hS (w). (b) Query A: wt ← A (f1, . . . , f t−1)(c) Set qt as the solution of: max    
+
+> q∈∆K:q≥γ
+
+q⊤gt−1 − η 
+
+> 2
+
+∥q − qt−1∥2
+
+s.t. w⊤
+
+> tK
+
+X
+
+> i=1
+
+qi ci − hS (wt) ≤ 0(6) (d) Draw at, 1, . . . , a t,M independently from qt;(e) Set At ← { at,j : j ∈ [M ]};(f) Observe rt(At); (g) For each i ∈ [K], define 
+
+gt,i ← rt(At)
+
+> qt,i
+> M
+
+X
+
+> j=1
+
+I{at,j = i}
+
+5.1 Theoretical Guarantees 
+
+All proofs are deferred to Appendix. 
+
+Theorem 1 (Reward regret) . Let qt for t ∈ [T ] be the output of Algorithm 1 with proximal parameter η∗ =
+
+q
+
+2T KM   1 
+
+> γ
+
++ ( M − 1) . Then 
+
+T E[R1(T )] ≤ 2
+
+r
+
+2T KM 
+
+ 1 
+
+> γ
+
++ ( M − 1) 
+
+
+
+.
+
+The constraint regret bound requires the following standard approachability condition. 
+
+Theorem 2 (Constraint regret) . Let A be an OCO algorithm with regret Regret T (A). Then for an absolute constant L > 0,
+
+E [R2(T )] ≤ M · Regret T (A) 
+
+> T
+
++ M ¯cL 
+
+q d log(2 d) 
+
+> T
+
+.
+
+Using online gradient descent (OGD) as A gives Regret T (A) = O(√T ), so both regrets are 
+
+O(1 /√T ) and thus sublinear. 
+
+5.2 Contextual extension 
+
+We extend to the contextual setting, where at round t the learner observes a context xt ∈ X 
+
+from a finite set X (e.g. the case type in Section 3) before selecting its routing policy. No 9distributional assumption is placed on the context sequence. The learner runs one independent copy of Algorithm 1 per context, sharing only the dual variable wt across contexts to enforce the aggregate constraint. The contextual benchmark optimises over the best fixed feasible policy per context, OPT ctx := 1
+
+> T
+
+X
+
+> x∈X
+
+max    
+
+> q∈∆K:qi≥γP
+> iqici∈S
+
+X 
+
+> t:xt=x
+
+Φrt (q),
+
+and the contextual regret is Rctx 1 (T ) := OPT ctx − 1
+
+> T
+
+PTt=1 Φrt (q(xt) 
+
+> t
+
+). The full contextual algo-rithm is given in Appendix D. 
+
+Corollary 2 (Contextual reward regret) . Run the contextual algorithm (Appendix D) with per-context anytime proximal parameter ηt = a√nxt , where a = 2 
+
+q
+
+KM ( 1 
+
+> γ
+
++ M − 1) and nxt is the visit count for context xt up to round t. Then, without prior knowledge of T or {T (x)},
+
+T ERctx 1 (T ) ≤ 4
+
+r
+
+|X | T KM 
+
+ 1 
+
+> γ
+
++ ( M − 1) 
+
+
+
+.
+
+The contextual regret is O(p|X | ) larger than the non-contextual bound—sublinear in the number of contexts. 
+
+Remark 2 (Shared dual, decoupled primal) . Algorithm 2 maintains a separate primal iterate 
+
+q(x) for each context x ∈ X , but a single shared dual variable wt. At round t, only the pri-mal iterate corresponding to the observed context xt is updated, whereas wt is updated using the policy actually played, qt = q(xt). Consequently, the reward optimization decomposes into 
+
+|X | independent per-context online mirror descent problems, while the dual process couples all contexts through the aggregate surrogate cost 1
+
+> T
+
+PTt=1 
+
+PKi=1 qt,i ci. Since the proof of Theorem 2 depends only on this aggregate surrogate cost sequence and the shared dual updates, it applies to Algorithm 2. Therefore the contextual algorithm satisfies the same constraint guarantee as in Theorem 2. 
+
+# 6 Numerical Experiments 
+
+We complement the theoretical guarantees of Section 5.1 with a numerical study on the real-world TREC 2010 Crowdsourcing Track dataset. 
+
+6.1 Data and Preprocessing 
+
+Source and cleaning. We use the TREC 2010 Crowdsourcing Track data distributed with the SpectralMethodsMeetEM repository of [51]: trec crowd.txt records each worker’s binary response to a task, and trec truth.txt records each task’s gold label. Inner-joining the two on task ID (keeping only tasks with a recorded gold label) yields 677 workers, 2 ,275 tasks, and 12 ,863 annotations. For each annotation we mark correct = 1{response = gold label }, and define a worker’s overall accuracy as the mean of correct over their annotations. Workers with fewer than 5 annotations are discarded, since their accuracy estimate would otherwise be too noisy, leaving a reliable pool of 270 workers. 
+
+Per-seed worker pool. For each of the random seeds used throughout Section 6, K = 50 workers are sampled uniformly without replacement from the reliable pool. The skill and cost statistics below are recomputed within that sampled pool of 50 workers, so quantities such as the cost normalization and the expert indicator are relative to the 50 workers actually competing in that seed’s instance, not to the full reliable pool. 10 Base skill matrix. The 2 ,275 tasks are partitioned into N groups by round-robin index on the sorted task IDs (the j-th task in sorted order is assigned to group j mod N ). The base skill matrix Vbase ∈ [0 , 1] N ×50 has Vbase [n, i ] equal to sampled worker i’s accuracy restricted to group n’s tasks; if worker i has no annotations in group n, this entry is imputed with worker 
+
+i’s overall accuracy. The value of N is specified per experiment. 
+
+Cost matrix. Within the sampled pool of 50, each worker i is assigned two cost coordinates: a workload cost, equal to i’s annotation count divided by the largest annotation count in the pool, taking values in [0 , 1]; and a binary expert indicator, equal to 1 for the 10 highest-accuracy workers in the pool and 0 otherwise. 
+
+Per-round realization V (t). Since Vbase is static, the per-round skill matrix V (t) that forms the reward is instead drawn fresh each round from one of two environments built on top of 
+
+Vbase . In the stochastic environment, V (t)[n, i ] ∼ Beta( κV base [n, i ], κ (1 − Vbase [n, i ])) indepen-dently each round with concentration κ = 20, modeling stationary per-round noise around each worker’s true accuracy. In the regime-switching environment, every T / 10 rounds a fresh ran-dom 10% of workers (5 workers) have their mean accuracy shrunk by a factor of 0 .2 for that block, modeling transient drops in annotator reliability (e.g. fatigue) that shift the optimal team composition over time before recovering at the next block. 
+
+6.2 Regret Convergence under Varying Constraint Tightness 
+
+We verify that both the objective regret R1 and the constraint regret R2 decay at the O(n−1/2)rate predicted by the theory, across two reward-dimension settings ( N ∈ { 3, 5}) and three levels of constraint tightness ( K = 50, M = 5, T = 10 ,000 rounds, 5 seeds, stochastic environment with κ = 20). OMD-Approachability (Algorithm 1) is run in the batched setting where the routing distribution q is held fixed for B = 10 rounds and updated once per batch via a proximal QP step (6); the natural convergence clock is therefore the number of OMD update steps n = t/B , and all curves are plotted against n.
+
+Regret metrics. At each batch endpoint we compute two metrics. The objective regret 
+
+R1(n) = 1
+
+> tt
+
+X
+
+> s=1
+
+
+
+EA∼qT [r(A, V (s))] − rs
+
+
+
+, t = nB, 
+
+where rs = rs(As) is the realized reward at round s. The quantity measures how much better the final learned policy qT would have done if deployed from the start, relative to the algorithm’s actual trajectory. We use qT as a proxy for the optimal feasible routing policy q∗ that attains OPT (3), which is not available in closed form; after T = 10 ,000 rounds of learning, qT is taken as its empirical surrogate. The expectation EA∼qT [r(A, V (s))] is estimated via 200 Monte Carlo draws of A ∼ qT applied retrospectively to each V (s). As t grows, the objective regret approaches zero, and the theoretical bound gives a rate of O(n−1/2). The constraint regret 
+
+R2(n) = dist 
+
+ 1
+
+> t
+
+Pts=1 ℓs, S ori 
+
+
+
+is the Euclidean distance from the running-average realized cost vector to the original feasible box Sori ; it is positive only when the time-averaged cost exceeds at least one constraint bound, and decays to zero once the algorithm stays consistently feasible. 
+
+Constraint configurations. Table 1 lists the four configurations, varying the expert-cap bound αexpert (maximum average number of top-accuracy workers selected per round) and the budget margin added to the baseline budget M · C0.11 Table 1: Constraint configurations used in Sections 6.2 and 6.3. The “none” level (uncon-strained) is used in Section 6.3 only. Config Budget margin Expert cap αexpert 
+
+tight (exp ≤ 2) +0 .0 2.0medium (exp ≤ 2.5) +0 .1 2.5loose (exp ≤ 5) +0 .5 5.0none (unconstr.) − ∞
+
+Hyperparameters. The OMD proximal parameter is η = ηmult 
+
+p2T KM (1 /γ + M − 1), with ηmult = 0 .03 for both N = 3 and N = 5. The dual OGD step size is ηogd = 0 .05, and the exploration floor is γ = 1 /(10 K) = 0 .002. 
+
+Figure and results. Figure 1 shows R1(n) (top row) and R2(n) (bottom row) for N = 3 (left) and N = 5 (right). On each panel a dashed c/ √n reference line is shown, reflecting the 
+
+O(n−1/2) theoretical prediction. For R1, all three constraint configurations decay to near-zero by n = 10 ,000 under both 
+
+N values. The empirical curves lie above the O(n−1/2) reference throughout, indicating that convergence is initially slower than the reference rate; nevertheless all curves reach near-zero by the end of the horizon. A short warm-up plateau is visible at n ≲ 30, after which the curves enter a clear monotone descent. Under N = 5, the loose configuration shows a more pronounced early hump, reflecting the wider reward range of the higher-dimensional sum-max objective. For 
+
+R2, only the tight configuration registers meaningful constraint violation: the running-average cost vector starts above the expert-cap boundary, and the dual OGD corrections gradually steer selections away from over-used expert workers. The tight-configuration R2 tracks the O(n−1/2)reference closely, reaching approximately zero by n ≈ 300 for N = 3 and n ≈ 1,000 for N = 5; the larger and slower-decaying violation under N = 5 reflects the wider per-round cost variance when more skill groups are active. The medium configuration shows only a small initial transient that vanishes by n ≈ 20–30. The loose configuration remains at zero throughout. 
+
+6.3 Crowdsourced Annotation via Worker Reliability 
+
+We instantiate the crowdsourcing application of Section 3 on the worker pool and skill/cost matrices of Section 6.1, comparing eight policies across four constraint-tightness levels and two environment types. A team of M = 5 workers is selected per round over T = 10 ,000 rounds, with team-quality reward rt(At) = P3 
+
+> n=1
+
+max i∈At V (t) 
+
+> n,i
+
+. Results are averaged over 20 independent seeds. 
+
+Constraint configurations. The same two knapsack constraints as Section 6.1 are used: a budget constraint bounding time-averaged workload, and an expert-cap constraint limiting the average number of top-accuracy workers selected per round. Four tightness levels are evaluated, as listed in Table 1. 
+
+Policies. All UCB- and TS-based baselines begin with a round-robin warm-up of 10 rounds that cycles through all K = 50 workers before switching to their learned selection rule. Be-cause the sum-max reward is non-decomposable, these baselines attribute the full combinatorial reward rt to each selected arm as a heuristic proxy for its individual contribution. 
+
+• Random: selects M workers uniformly at random without replacement each round. No learning, no constraint awareness; lower-bound reference. 12 Figure 1: Objective regret R1(n) (top) and constraint regret R2(n) (bottom) vs. OMD update step n = t/ 10, for N = 3 (left) and N = 5 (right). Mean ± one standard deviation across 5 seeds. Dashed line: O(n−1/2) reference curve. 
+
+• Greedy: after warm-up, always selects the M workers with the highest empirical mean (running average of the shared reward rt). Pure exploitation; no exploration or constraint awareness. 
+
+• CUCB (Combinatorial UCB): after warm-up, selects the top-M arms by UCB index ˆμi + cp2 log t/n i, where ˆ μi is arm i’s empirical mean reward, ni is the number of rounds arm i has been selected so far, and c = 2. Since only the aggregate team reward rt(At) is observed, ˆ μi is updated via the shared-reward heuristic described above: rt is attributed to every selected arm as a proxy for its individual contribution. No constraint awareness; serves as an unconstrained reward ceiling. 
+
+• CBwK (Combinatorial Bandits with Knapsacks): extends CUCB with a Lagrangian dual λ ∈ Rd
+
+> +
+
+, initialized at λ = 0. The selection score for arm i is UCB i + ( λ ⊙ sign) ⊤C:,i ,steering away from constraint-violating arms as λ grows. Dual updated each round by subgradient ascent on the running-average constraint violation, step size 10 /√T .
+
+• TS (Thompson Sampling): maintains a Beta( αi, β i) posterior per arm, initialized at 
+
+αi = βi = 1. Each round samples si ∼ Beta( αi, β i) and selects the top-M by si. Posterior update: αi += rt/N , βi += 1 − rt/N for each selected arm (normalized by N to keep increments in [0 , 1]). No constraint awareness; Bayesian counterpart to CUCB. 
+
+• TS-BwK (Thompson Sampling with Knapsacks): extends TS with the same La-grangian dual as CBwK. Selection score is si + ( λ ⊙ sign) ⊤C:,i ; same subgradient dual update (step size 10 /√T ). Bayesian counterpart to CBwK. 
+
+• MoE (constrained online MoE gating): an adaptation of sparse Mixture-of-Experts gating [40] to the online, bandit-feedback, constrained setting. Each worker plays the role of an expert; the gating network is a logit vector θ ∈ RK that learns which experts to 13 activate. Rather than training on a supervised loss with per-expert gradients, the gate is updated online via REINFORCE on the aggregate team reward — the only signal available under winner-only bandit feedback. Selection uses Gumbel-Top-M (top-M indices of 
+
+θ + ξ, ξi i.i.d.
+
+∼ Gumbel(0 , 1)), the standard stochastic routing mechanism of sparse MoE, which interpolates between uniform exploration and greedy exploitation as θ concentrates. Knapsack constraints are enforced via a Lagrangian dual λ, giving the update 
+
+θ ← θ + ηlr reff (1At − p), reff = rt + ( λ ⊙ sign) ⊤xt, p = softmax( θ), ηlr = 0 .01 ,
+
+with λ initialized at 0 and updated by subgradient ascent at step size 4 × 10 −4.
+
+• OMD-Approachability (proposed): Algorithm 1. Maintains a distribution q ∈ ∆K
+
+updated every B = 10 rounds via the constrained QP (6), using an importance-weighted bandit gradient with a running-average reward baseline. Arms are drawn M times with replacement from q; no per-arm decomposition is required. The dual wt is updated each round via OGD on the unit ball. Primal proximal parameter η = ηmult 
+
+p2T KM (1 /γ + M − 1) with ηmult = 0 .05, dual step size ηogd = 0 .05, exploration floor γ = 1 /(10 K) = 0 .002. 
+
+Figures and results. Figure 2 reports the time-averaged reward and percentage of feasible runs across four constraint levels in both stochastic and regime-switching environments. Fig-ure 3 shows the per-round rolling-average reward (window size 500) under the tight and loose constraint settings for six representative policies. MoE and Random are omitted from Figure 3 because their substantially higher per-round variance dominates the plotting scale and obscures the comparison among the remaining methods. 
+
+Reward–feasibility trade-off. The main result is that OMD-Approachability is the only policy that simultaneously achieves near-optimal reward and consistently satisfies the expert-cap constraint. Under the tight constraint , OMD-Approachability attains 100% feasibility in both stochastic and regime-switching environments (Figure 2). In the stochastic environment, TS-BwK is also highly feasible (about 95–100%), whereas CBwK achieves only about 40% feasibility. In the regime-switching environment, TS-BwK drops to about 85%, while CBwK reaches about 65%, indicating that the approachability-based controller is substantially more robust to non-stationarity than the Lagrangian dual baselines. Constraint-unaware policies (CUCB, TS, and Greedy) are rarely feasible under the tight constraint because they have no mechanism to regulate cumulative expert usage. 
+
+Effect of constraint relaxation. As the constraint is relaxed from tight to medium, loose, and unconstrained, feasibility increases across all methods and reaches essentially 100% under the loose and unconstrained settings (Figure 2). At the same time, the average rewards of OMD-Approachability, TS, Greedy, TS-BwK, and CUCB remain close to the maximum value of 3 .0, while CBwK is consistently lower. Thus, OMD-Approachability preserves near-optimal reward without sacrificing feasibility, particularly in the constrained regimes where the differences between methods are most pronounced. 
+
+Reward convergence dynamics. Figure 3 highlights the difference between constraint-aware and unconstrained policies. Under the tight constraint , TS and Greedy achieve the highest rewards because they do not enforce the expert-cap constraint and therefore serve as unconstrained upper baselines. Among the constraint-aware methods , OMD-Approachability initially sacrifices reward to regulate expert usage, but it steadily improves and converges to near-optimal reward by the end of the horizon. TS-BwK exhibits reward trajectories that are competitive with OMD-Approachability under the tight constraint, while CBwK converges more slowly and remains consistently below both methods. However, the reward curves must be interpreted together with the feasibility results in Fig-ure 2. Although TS-BwK achieves comparable reward under the tight constraint, it satisfies the constraint in substantially fewer runs, especially in the regime-switching environment, whereas 14 OMD-Approachability maintains 100% feasibility. Thus, OMD-Approachability is the only constraint-aware policy that combines near-optimal reward with consistently reliable constraint satisfaction. The advantage of OMD-Approachability is particularly pronounced in the regime-switching environment . Under both tight and loose constraints, it achieves higher rolling reward than the other constraint-aware methods throughout most of the horizon while maintaining full feasibility. CBwK exhibits a persistent reward gap, and TS-BwK is more sensitive to non-stationarity, leading to lower reward and reduced feasibility under the tight constraint. Under the loose constraint , all methods approach similar reward levels, but OMD-Approachability remains the strongest performing constraint-aware policy. 
+
+Figure 2: Constraint tightness sweep ( K = 50, M = 5, N = 3, T = 10 ,000, 20 seeds). Each row is an environment; columns show mean ± std of time-averaged reward (left) and % of seeds achieving feasibility (right). OMD-Approachability (blue) is the only policy that achieves 100% feasibility under the tight constraint in both environments. 
+
+# References 
+
+[1] M. Achab, S. Cl´ emen¸ con, A. Garivier, A. Sabourin, and C. Vernade. Max k-armed bandit: On the extremehunter algorithm and beyond. In Joint European Conference on Machine Learning and Knowledge Discovery in Databases , pages 389–404. Springer, 2017. [2] S. Agrawal and N. Devanur. Linear contextual bandits with knapsacks. Advances in neural information processing systems , 29, 2016. [3] S. Agrawal and N. R. Devanur. Bandits with concave rewards and convex knapsacks. In 
+
+Proceedings of the fifteenth ACM conference on Economics and computation , pages 989– 1006, 2014. 15 Figure 3: Per-round rolling-average reward (window 5 ,000) for tight (left) and loose (right) constraint configurations, across 20 seeds (MoE and Random excluded due to high variance). Each row is an environment. Under tight constraint, OMD-Approachability (blue) starts lower than constraint-unaware baselines but converges to near-optimal reward while remaining feasible throughout. [4] S. Agrawal, N. R. Devanur, and L. Li. An efficient algorithm for contextual bandits with knapsacks, and an extension to concave objectives. In Conference on Learning Theory ,pages 4–18. PMLR, 2016. [5] F. Bach. Learning with submodular functions: A convex optimization perspective. arXiv preprint arXiv:1111.6453 , 2011. [6] A. Badanidiyuru, R. Kleinberg, and A. Slivkins. Bandits with knapsacks. Journal of the ACM (JACM) , 65(3):1–55, 2018. [7] A. Badanidiyuru and J. Vondr´ ak. Fast algorithms for maximizing submodular functions. In Proceedings of the twenty-fifth annual ACM-SIAM symposium on Discrete algorithms ,pages 1497–1514. SIAM, 2014. [8] A. Bian, K. Levy, A. Krause, and J. M. Buhmann. Continuous dr-submodular maximiza-tion: Structure and algorithms. Advances in Neural Information Processing Systems , 30, 2017. [9] N. Buchbinder, M. Feldman, J. Seffi, and R. Schwartz. A tight linear time (1/2)-approximation for unconstrained submodular maximization. SIAM Journal on Computing ,44(5):1384–1402, 2015. [10] G. Calinescu, C. Chekuri, M. Pal, and J. Vondr´ ak. Maximizing a monotone submodular function subject to a matroid constraint. SIAM Journal on Computing , 40(6):1740–1766, 2011. [11] A. Carpentier and M. Valko. Extreme bandits. Advances in Neural Information Processing Systems , 27, 2014. [12] L. Chen, A. Krause, and A. Karbasi. Interactive submodular bandit. Advances in Neural Information Processing Systems , 30, 2017. [13] L. Chen, M. Zaharia, and J. Zou. Efficient online ml api selection for multi-label classifi-cation tasks. In International conference on machine learning , pages 3716–3746. PMLR, 2022. 16 [14] L. Chen, M. Zaharia, and J. Y. Zou. Frugalml: How to use ml prediction apis more accurately and cheaply. Advances in neural information processing systems , 33:10685– 10696, 2020. [15] S. Chen, W. Jiang, B. Lin, J. Kwok, and Y. Zhang. Routerdc: Query-based router by dual contrastive learning for assembling large language models. Advances in Neural Information Processing Systems , 37:66305–66328, 2024. [16] W. Chen, Y. Wang, Y. Yuan, and Q. Wang. Combinatorial multi-armed bandit and its extension to probabilistically triggered arms. Journal of Machine Learning Research ,17(50):1–33, 2016. [17] Y. Chen, S. Wang, L. Huang, and W. Chen. Continuous k-max bandits. arXiv preprint arXiv:2502.13467 , 2025. [18] V. A. Cicirello and S. F. Smith. The max k-armed bandit: A new model of exploration ap-plied to search heuristic selection. In The Proceedings of the Twentieth National Conference on Artificial Intelligence , volume 3, pages 1355–1361, 2005. [19] R. Deb, M. Ghavamzadeh, and A. Banerjee. Thompson sampling for constrained bandits. In Reinforcement Learning Conference , 2025. [20] R. Deb, A. Saha, and A. Banerjee. Think before you duel: Understanding complexities of preference learning under constrained resources. In International Conference on Artificial Intelligence and Statistics , pages 4546–4554. PMLR, 2024. [21] W. Fedus, B. Zoph, and N. Shazeer. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23(120):1– 39, 2022. [22] T. Feng, Y. Shen, and J. You. Graphrouter: A graph-based router for llm selections. In 
+
+International Conference on Learning Representations , volume 2025, pages 26186–26203, 2025. [23] F. Fourati, C. J. Quinn, M.-S. Alouini, and V. Aggarwal. Combinatorial stochastic-greedy bandit. In Proceedings of the AAAI Conference on Artificial Intelligence , volume 38, pages 12052–12060, 2024. [24] A. Goel, S. Guha, and K. Munagala. Asking the right questions: Model-driven optimiza-tion using probes. In Proceedings of the twenty-fifth ACM SIGMOD-SIGACT-SIGART symposium on Principles of database systems , pages 203–212, 2006. [25] A. Gopalan, S. Mannor, and Y. Mansour. Thompson sampling for complex bandit prob-lems. arXiv preprint arXiv:1311.0466 , 2013. [26] N. Harvey, C. Liaw, and T. Soma. Improved algorithms for online submodular maximiza-tion via first-order regret bounds. Advances in Neural Information Processing Systems ,33:123–133, 2020. [27] E. Hazan. Introduction to online convex optimization. Foundations and Trends ® in Optimization , 2(3-4):157–325, 2016. [28] N. Immorlica, K. Sankararaman, R. Schapire, and A. Slivkins. Adversarial bandits with knapsacks. Journal of the ACM , 69(6):1–47, 2022. [29] R. A. Jacobs, M. I. Jordan, S. J. Nowlan, and G. E. Hinton. Adaptive mixtures of local experts. Neural computation , 3(1):79–87, 1991. 17 [30] B. Kveton, Z. Wen, A. Ashkan, and C. Szepesvari. Tight regret bounds for stochastic combinatorial semi-bandits. In Artificial Intelligence and Statistics , pages 535–543. PMLR, 2015. [31] J. Lee, M. Sviridenko, and J. Vondr´ ak. Submodular maximization over multiple matroids via generalized exchange properties. Mathematics of Operations Research , 35(4):795–806, 2010. [32] Q. Liu, W. Xu, S. Wang, and Z. Fang. Combinatorial bandits with linear constraints: Be-yond knapsacks and fairness. Advances in Neural Information Processing Systems , 35:2997– 3010, 2022. [33] T. Matsuoka, S. Ito, and N. Ohsaka. Tracking regret bounds for online submodular op-timization. In International Conference on Artificial Intelligence and Statistics , pages 3421–3429. PMLR, 2021. [34] G. L. Nemhauser, L. A. Wolsey, and M. L. Fisher. An analysis of approximations for maximizing submodular set functions—i. Mathematical programming , 14(1):265–294, 1978. [35] Q. H. Nguyen, T. Dao, D. C. Hoang, J. Decugis, S. Manchanda, N. V. Chawla, and K. D. Doan. Metallm: A high-performant and cost-efficient dynamic framework for wrapping llms. arXiv preprint arXiv:2407.10834 , 2024. [36] I. Ong, A. Almahairi, V. Wu, W.-L. Chiang, T. Wu, J. E. Gonzalez, M. W. Kadous, and I. Stoica. Routellm: Learning to route llms with preference data. arXiv preprint arXiv:2406.18665 , 2024. [37] S. Pasteris, A. Rumi, F. Vitale, and N. Cesa-Bianchi. Sum-max submodular bandits. arXiv preprint arXiv:2311.05975 , 2023. [38] K. A. Sankararaman and A. Slivkins. Combinatorial semi-bandits with knapsacks. In 
+
+International Conference on Artificial Intelligence and Statistics , pages 1760–1770. PMLR, 2018. [39] K. K. Sarpatwar, B. Schieber, and H. Shachnai. Constrained submodular maximization via greedy local search. Operations Research Letters , 47(1):1–6, 2019. [40] N. Shazeer, A. Mirhoseini, K. Maziarz, A. Davis, Q. Le, G. Hinton, and J. Dean. Outra-geously large neural networks: The sparsely-gated mixture-of-experts layer. arXiv preprint arXiv:1701.06538 , 2017. [41] T. Shnitzer, A. Ou, M. Silva, K. Soule, Y. Sun, J. Solomon, N. Thompson, and M. Yurochkin. Large language model routing with benchmark datasets. arXiv preprint arXiv:2309.15789 , 2023. [42] A. Slivkins, K. A. Sankararaman, and D. J. Foster. Contextual bandits with packing and covering constraints: A modular lagrangian approach via regression. In The Thirty Sixth Annual Conference on Learning Theory , pages 4633–4656. PMLR, 2023. [43] M. Streeter and D. Golovin. An online algorithm for maximizing submodular functions. 
+
+Advances in Neural Information Processing Systems , 21, 2008. [44] S. Takemori, M. Sato, T. Sonoda, J. Singh, and T. Ohkuma. Submodular bandit problem under multiple constraints. In Conference on Uncertainty in Artificial Intelligence , pages 191–200. PMLR, 2020. 18 [45] S. Wang and W. Chen. Thompson sampling for combinatorial semi-bandits. In Interna-tional Conference on Machine Learning , pages 5114–5122. PMLR, 2018. [46] W. Wei, T. Yang, H. Chen, Y. Zhao, F. Dernoncourt, R. A. Rossi, and H. Eldardiry. Learning to route llms from bandit feedback: One policy, many trade-offs. arXiv preprint arXiv:2510.07429 , 2025. [47] Z. Xu, S. S. Garimella, and V. Tzoumas. Communication-and computation-efficient dis-tributed submodular optimization in robot mesh networks. IEEE Transactions on Robotics ,2025. [48] Z. Xu, H. Zhou, and V. Tzoumas. Online submodular coordination with bounded tracking regret: Theory, algorithm, and applications to multi-robot coordination. IEEE Robotics and Automation Letters , 8(4):2261–2268, 2023. [49] B. Yu, M. Fang, and D. Tao. Linear submodular bandits with a knapsack constraint. In 
+
+Proceedings of the AAAI Conference on Artificial Intelligence , volume 30, 2016. [50] Y. Yue and C. Guestrin. Linear submodular bandits and their application to diversified retrieval. Advances in neural information processing systems , 24, 2011. [51] Y. Zhang, X. Chen, D. Zhou, and M. I. Jordan. Spectral methods meet em: a provably optimal algorithm for crowdsourcing. J. Mach. Learn. Res. , 17(1):3537–3580, Jan. 2016. 
+
+# Appendix Contents 
+
+• Appendix A: Auxiliary Lemmas . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 19 
+
+• Appendix B: Proof of Theorem 1 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 20 
+
+• Appendix C: Proof of Theorem 2 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 22 
+
+• Appendix D: Contextual Algorithm and Proof of Corollary 2 . . . . . . . . . . . . . . . . . . . . . . . . 24 
+
+# A Auxiliary Lemmas 
+
+We collect here the supporting lemmas used across the proofs. Let wt be defined in Algorithm 1. We also define the feasible regions used in the analysis: 
+
+F◦ := {q ∈ ∆K : qi ≥ γ; P 
+
+> i
+
+qici ∈ S}Fτ := {q ∈ ∆K : qi ≥ γ; w⊤
+
+> t
+
+P 
+
+> i
+
+qici − hS (wt) ≤ 0, ∀t ∈ [τ ]},
+
+and their per-context analogues F(x) 
+
+> ◦
+
+, F(x) 
+
+> τ
+
+with “ ∀t ∈ [τ ]” replaced by “ ∀t ∈ [τ ] : xt = x”. Note that Fτ and F(x) 
+
+> τ
+
+are random as wt are randomly generated by the algorithm. For the measurability argument, define the filtration, i.e., the history before sampling At
+
+Ht−1 = σ(w1, . . . , w t, q 1, . . . , q t, A 1, r 1(A1), . . . , A t−1, r t−1(At−1)) .
+
+By construction of Algorithm 1, the variables qt and wt are Ht−1-measurable, while gt is Ht-measurable. 
+
+Lemma 3 (Three-point identity) . For any q, q t, q t+1 ∈ RK ,
+
+⟨qt+1 − qt, q − qt+1 ⟩ = 12 ∥q − qt∥2 − 12 ∥q − qt+1 ∥2 − 12 ∥qt+1 − qt∥2.
+
+19 Lemma 4. Let S be a convex and compact set, dist( u, S ) = max ∥w∥≤ 1
+
+w⊤u − hS (w) .
+
+Proof. The proof follows Lemma 13.5 of [27]. Using the definition of the support function, max 
+
+> ∥w∥≤ 1
+
+n
+
+w⊤u − hS (w)
+
+o
+
+= max 
+
+> ∥w∥≤ 1
+
+
+
+w⊤u − max  
+
+> x∈S
+
+w⊤x
+
+
+
+= max  
+
+> ∥w∥≤ 1
+
+min 
+
+> x∈S
+
+n
+
+w⊤u − w⊤x
+
+o
+
+= min  
+
+> x∈S
+
+max 
+
+> ∥w∥≤ 1
+
+n
+
+w⊤u − w⊤x
+
+o
+
+(minimax theorem) = min  
+
+> x∈S
+
+∥x − u∥
+
+= dist( u, S ).
+
+# B Proof of Theorem 1 
+
+Proof of Theorem 1. Let q⋆ ∈ arg max q∈F ◦
+
+PTt=1 Φrt (q). By the definition of OPT in (3) and Assumption 1, TX
+
+> t=1
+
+Φrt (q⋆) ≥ T · OPT . (7) Hence 
+
+T · OPT −
+
+> T
+
+X
+
+> t=1
+
+Φrt (qt) ≤
+
+> T
+
+X
+
+> t=1
+
+ Φrt (q⋆) − Φrt (qt). (8) 
+
+Step 1. By Lemma 4, for every realization of the algorithm, F◦ ⊆ F t, because every wt
+
+generated by Algorithm 1 satisfies ∥wt∥ ≤ 1. Therefore q⋆ ∈ F t almost surely for every t.Since qt+1 is the solution of the proximal optimization problem (6), the first-order optimality condition gives 
+
+⟨gt − η(qt+1 − qt), q − qt+1 ⟩ ≤ 0, ∀q ∈ F t.
+
+Applying this with q = q⋆ and using the three-point identity (Lemma 3), 
+
+⟨gt, q ⋆ − qt⟩ ≤ η
+
+> 2
+
+ ∥q⋆ − qt∥2 − ∥ q⋆ − qt+1 ∥2 − ∥ qt+1 − qt∥2 + ⟨gt, q t+1 − qt⟩.
+
+By concavity of Φ rt ,Φrt (q⋆) − Φrt (qt) ≤ ⟨∇ Φrt (qt), q ⋆ − qt⟩.
+
+Adding and subtracting gt,Φrt (q⋆) − Φrt (qt) ≤ ⟨ gt, q ⋆ − qt⟩ + ⟨∇ Φrt (qt) − gt, q ⋆ − qt⟩≤ η
+
+> 2
+
+ ∥q⋆ − qt∥2 − ∥ q⋆ − qt+1 ∥2 − ∥ qt+1 − qt∥2
+
++ ⟨gt, q t+1 − qt⟩ + ⟨∇ Φrt (qt) − gt, q ⋆ − qt⟩.
+
+Summing over t = 1 , . . . , T and telescoping, 
+
+> T
+
+X
+
+> t=1
+
+ Φrt (q⋆) − Φrt (qt) ≤ η 
+
+> 2
+
+∥q⋆ − q1∥2 +
+
+> T
+
+X
+
+> t=1
+
+⟨gt, q t+1 − qt⟩− η
+
+> 2
+> T
+
+X
+
+> t=1
+
+∥qt+1 − qt∥2
+
++
+
+> T
+
+X
+
+> t=1
+
+⟨∇ Φrt (qt) − gt, q ⋆ − qt⟩.
+
+(9) 20 Step 2. For the last term of (9), by Lemma 6.6 of [37], 
+
+E[gt | H t−1] = ∇Φrt (qt).
+
+Since both q⋆ and qt are Ht−1-measurable, 
+
+E[⟨∇ Φrt (qt) − gt, q ⋆ − qt⟩ | H t−1] = 0 .
+
+Taking expectations and using the tower property, 
+
+E
+
+" TX
+
+> t=1
+
+⟨∇ Φrt (qt) − gt, q ⋆ − qt⟩
+
+#
+
+= 0 .
+
+Step 3. For the first inner-product term of (9), Young’s inequality gives 
+
+⟨gt, q t+1 − qt⟩ ≤ 2 
+
+> η
+
+∥gt∥2 + η 
+
+> 2
+
+∥qt+1 − qt∥2.
+
+Summing over i, the second term on the right-hand side exactly cancels the third term in (9). Again conditioning on Ht−1, Lemma 6.14 of [37] gives 
+
+E[g2 
+
+> t,i
+
+| H t−1] ≤ Mqt,i + M (M − 1) .
+
+Since qt,i ≥ γ almost surely, 
+
+E[g2 
+
+> t,i
+
+| H t−1] ≤ Mγ + M (M − 1) .
+
+Taking expectations and summing over i,
+
+E[∥gt∥2] = 
+
+> K
+
+X
+
+> i=1
+
+E[g2
+
+> t,i
+
+] ≤ KM 
+
+ 1
+
+γ + M − 1
+
+
+
+.
+
+Therefore TX
+
+> t=1
+
+E[∥gt∥2] ≤ T KM 
+
+ 1
+
+γ + M − 1
+
+
+
+.
+
+Step 4. Taking expectations on both sides of (8), and combining (9) with the bounds derived above, together with the Euclidean diameter bound of the simplex, ∥q⋆ − q1∥2 ≤ 2, we obtain 
+
+E
+
+"
+
+T · OPT −
+
+> T
+
+X
+
+> t=1
+
+Φrt (qt)
+
+#
+
+≤ η + 2
+
+> ηT
+
+X
+
+> t=1
+
+E[∥gt∥2]
+
+≤ η + 2 
+
+> η
+
+T KM 
+
+ 1
+
+γ + M − 1
+
+
+
+.
+
+Step 5. Optimizing the upper bound over η gives 
+
+η⋆ =
+
+s
+
+2T KM 
+
+ 1
+
+γ + M − 1
+
+
+
+.
+
+Substituting this value yields 
+
+E
+
+"
+
+T · OPT −
+
+> T
+
+X
+
+> t=1
+
+Φrt (qt)
+
+#
+
+≤ 2
+
+s
+
+2T KM 
+
+ 1
+
+γ + M − 1
+
+
+
+,
+
+which proves the theorem. 21 C Proof of Theorem 2 
+
+The constraint regret could be decomposed as follows: 
+
+R2(T ) = dist 1
+
+> TT
+
+X
+
+> t=1
+
+ℓt, S ori 
+
+!
+
+= dist 1
+
+> TT
+
+X
+
+> t=1
+> K
+
+X
+
+> i=1
+
+1[i ∈ At] ci, S ori 
+
+!
+
+≤ dist 1
+
+> TT
+
+X
+
+> t=1
+> K
+
+X
+
+> i=1
+
+1[i ∈ At] ci, 1
+
+> TT
+
+X
+
+> t=1
+
+E[ℓt]
+
+!
+
++ dist 1
+
+> TT
+
+X
+
+> t=1
+
+E[ℓt], S ori 
+
+!
+
+≤ dist 1
+
+> TT
+
+X
+
+> t=1
+> K
+
+X
+
+> i=1
+
+1[i ∈ At] ci, 1
+
+> TT
+
+X
+
+> t=1
+
+E[ℓt]
+
+!| {z }
+
+> sampling error
+
++M · dist 1
+
+> TT
+
+X
+
+> t=1
+> K
+
+X
+
+> i=1
+
+qt,i ci, S 
+
+!| {z }
+
+> approachability error
+
+,
+
+(10) where the first inequality uses triangle inequality, the second inequality uses Lemma 2. Then, we deal with each term separately. 
+
+Lemma 5 (Approachability error) . Let qt for t ∈ [T ] be the output of Algorithm 1, with input OCO algorithm A. Then the average approachability error is 
+
+dist 1
+
+> TT
+
+X
+
+> t=1
+> K
+
+X
+
+> i=1
+
+qt,i ci, S 
+
+!
+
+≤ Regret T (A) 
+
+> T
+
+.
+
+Proof. The proof follows Theorem 13.7 of [27]. Set ut := PKi=1 qt,i ci. Notice that qt is the solution of the optimization problem (6), such that it satisfies its constraint, i.e., for wt as defined in the algorithm, we have for any t,
+
+ft(wt) = w⊤ 
+
+> t
+
+ut − hS (wt) ≤ 0. (11) Set ¯ uT = 1
+
+> T
+
+PTt=1 ut. Using Lemma 4, dist(¯ uT , S ) = max 
+
+> ∥w∥≤ 1
+
+n
+
+w⊤ ¯uT − hS (w)
+
+o
+
+= max 
+
+> w∗∈B
+> 1
+> TT
+
+X
+
+> t=1
+
+ft(w∗) (definition of ft)
+
+≤ 1
+
+> TT
+
+X
+
+> t=1
+
+ft(wt) + Regret T (A) 
+
+> T
+
+(OCO guarantee of A)
+
+≤ Regret T (A) 
+
+> T
+
+(Equation (11)) .
+
+Lemma 6 (Sampling error) . With probability at least 1 − δ, for each coordinate j ∈ [d],
+
+> 1
+> TT
+
+X
+
+> t=1
+> K
+
+X
+
+> i=1
+
+(1[i ∈ At] − E[1[i ∈ At]]) c(j) 
+
+> i
+
+≤ M ¯c
+
+q 2 log(2 d/δ ) 
+
+> T
+
+.
+
+Therefore, for an absolute constant L > 0,
+
+E dist 1
+
+> TT
+
+X
+
+> t=1
+> K
+
+X
+
+> i=1
+
+1[i ∈ At] ci, 1
+
+> TT
+
+X
+
+> t=1
+
+E[ℓt]
+
+!
+
+≤ M ¯cL 
+
+q d log(2 d) 
+
+> T
+
+.
+
+22 Proof. Step 1: High-probability event. Define Yt := PKi=1 (1[i ∈ At]−E[1[i ∈ At] | H t−1]) ci.For each coordinate j ∈ [d], E[Y (j) 
+
+> t
+
+| H t−1] = 0, so ( Y (j) 
+
+> t
+
+, Ht) is a martingale difference sequence. Moreover, for each coordinate j ∈ [d], E[Y (j) 
+
+> t
+
+| H t−1] = 0 and Y (j) 
+
+> t
+
+∈ [−M ¯c, M ¯c] as c(j) 
+
+> i
+
+∈ [0 , ¯c]and |At| ≤ M . Let ¯Y := 1
+
+> T
+
+PTt=1 Yt ∈ Rd. By Azuma–Hoeffding, Pr 
+
+ ¯Y (j) ≥ ϵ
+
+
+
+≤ 2 exp 
+
+
+
+− T ϵ 2  
+
+> 2M2¯c2
+
+
+
+.
+
+Applying a union bound over j ∈ [d] and setting ϵ = M ¯c
+
+q 2 log(2 d/δ ) 
+
+> T
+
+, with probability at least 1 − δ:
+
+¯Y (j) ≤ M ¯c
+
+q 2 log(2 d/δ ) 
+
+> T
+
+for all j ∈ [d].
+
+Call this event E(δ). 
+
+Step 2: ℓ2 bound. On event E(δ): 
+
+∥ ¯Y ∥2 =
+
+vuut dX
+
+> j=1
+
+( ¯Y (j))2 ≤
+
+q
+
+d · 2M 2 ¯c2 log(2 d/δ ) 
+
+> T
+
+=
+
+q 2dM 2 ¯c2 log(2 d/δ ) 
+
+> T
+
+.
+
+Step 3: Integration. 
+
+E∥ ¯Y ∥2 =
+
+Z ∞
+
+> 0
+
+P ∥ ¯Y ∥2 > u  du. 
+
+Choose δ = δ(u) to make the threshold equal u:
+
+q 2dM 2 ¯c2 log(2 d/δ ) 
+
+> T
+
+= u =⇒ δ(u) = 2 d exp 
+
+
+
+− T u 2  
+
+> 2dM 2¯c2
+
+
+
+.
+
+On E(δ), ∥ ¯Y ∥2 ≤ u, so P(∥ ¯Y ∥2 > u ) ≤ δ(u), giving: 
+
+E∥ ¯Y ∥2 ≤
+
+Z ∞
+
+> 0
+
+min 
+
+
+
+1, 2d exp 
+
+
+
+− T u 2  
+
+> 2dM 2¯c2
+
+ 
+
+du. 
+
+Split at u0 =
+
+q 2dM 2 ¯c2 log(2 d) 
+
+> T
+
+(where 2 d exp  −T u 20/2dM 2¯c2 = 1): 
+
+E∥ ¯Y ∥2 ≤
+
+Z u0
+
+> 0
+
+1 du 
+
+| {z } 
+
+> =u0
+
++
+
+Z ∞
+
+> u0
+
+2d exp 
+
+
+
+− T u 2  
+
+> 2dM 2¯c2
+
+
+
+du. 
+
+Using the Gaussian tail bound R ∞ 
+
+> ν
+
+e−t2/a 2
+
+dt ≤ a2 
+
+> 2ν
+
+e−ν2/a 2
+
+with a2 = 2 dM 2¯c2/T :
+
+Z ∞
+
+> u0
+
+2d e −T u 2/(2 dM 2 ¯c2) du ≤ 2d2M 2 ¯c2 
+
+> T u 0
+
+· e−T u 20/(2 dM 2 ¯c2) = 2d2M 2 ¯c2 
+
+> T u 0
+
+· 12d =
+
+q dM 2 ¯c2  
+
+> 2Tlog(2 d)
+
+.
+
+Combining: 
+
+E∥ ¯Y ∥2 ≤
+
+q 2dM 2 ¯c2 log(2 d) 
+
+> T
+
++
+
+q dM 2 ¯c2  
+
+> 2Tlog(2 d)
+
+≤ M ¯cL 
+
+q d log(2 d)
+
+> T
+
+for an absolute constant L > 0. 
+
+Proof of Theorem 2. Taking expectations on (10) and applying Lemma 5 & 6 gives the result. 23 D Contextual Algorithm and Proof of Corollary 2 
+
+Algorithm 2: Contextual OMD with Approachability Constraints 1. Input: rescaled set S, OCO algorithm A, context set X , step-size constant 
+
+a = 2 
+
+q
+
+KM ( 1 
+
+> γ
+
++ M − 1) 2. Set B ⊂ Rd to be the unit Euclidean ball, as decision set for A
+
+3. For each x ∈ X : set q(x) 
+
+> i
+
+:= 1 /K for i ∈ [K], g(x) := 0, and visit count n(x) := 0 4. For t = 1 , . . . , T :(a) Observe the context x ← xt and increment n(x) ← n(x) + 1 (b) Set ft−1(w) = w⊤ut−1 − hS (w), where ut−1 = PKi=1 q(x) 
+
+> t−1,i
+
+ci
+
+(c) Query A: wt ← A (f1, . . . , f t−1)(d) Set the per-context anytime proximal parameter η ← a√n(x)
+
+(e) Update only the current context’s iterate, using its own stored gradient g(x):
+
+q(x) ← arg max    
+
+> q∈∆K:q≥γ
+
+q⊤g(x) − η 
+
+> 2
+
+q − q(x) 2
+
+s.t. w⊤
+
+> tK
+
+X
+
+> i=1
+
+qi ci − hS (wt) ≤ 0(12) (f) Draw at, 1, . . . , a t,M independently from q(x); set At ← { at,j : j ∈ [M ]}
+
+(g) Observe rt(At)(h) Refresh the current context’s gradient: for each i ∈ [K], 
+
+g(x) 
+
+> i
+
+← rt(At)
+
+> q(x)
+> i
+
+PMj=1 I{at,j = i}
+
+Proof of Corollary 2. Write G2 := KM 
+
+ 1 
+
+> γ
+
++ M − 1
+
+
+
+, so that a = 2 G. Fix a context x ∈ X .Let T (x) be the number of rounds with xt = x, and index these visits by s = 1 , . . . , T (x).The iterates {q(x) 
+
+> s
+
+} evolve exactly as Algorithm 1 restricted to this subsequence, with proximal parameters η(x) 
+
+> s
+
+= a√s.Applying the one-step inequality established in Step 1 of the proof of Theorem 1 (with the filtration argument and conditional expectation taken with respect to the history of the context-
+
+c process), we obtain after summing over s = 1 , . . . , T (x), for any per-context comparator 
+
+q(x) 
+
+> ⋆
+
+∈ F (x)
+
+> ◦
+
+E
+
+ 
+
+> T(x)
+
+X
+
+> s=1
+
+ Φrs (q(x) 
+
+> ⋆
+
+) − Φrs (q(x) 
+
+> s
+
+) ≤ 
+
+> T(x)
+
+X
+
+> s=1
+> η(x)
+> s
+> 2
+
+
+
+∥q(x) 
+
+> ⋆
+
+− q(x) 
+
+> s
+
+∥2 − ∥ q(x) 
+
+> ⋆
+
+− q(x)
+
+> s+1
+
+∥2
+
++ 
+
+> T(x)
+
+X
+
+> s=1 2G2
+> η(x)
+> s
+
+,
+
+where the two inner-product terms disappear exactly as in the proof of Theorem 1. For the first sum, Abel summation with the simplex diameter ∥q(x) 
+
+> ⋆
+
+− q(x) 
+
+> s
+
+∥2 ≤ 2 gives a telescoping bound,  
+
+> T(x)
+
+X
+
+> s=1
+> η(x)
+> s
+> 2
+
+
+
+q(x) 
+
+> ⋆
+
+− q(x) 
+
+> s
+> 2
+
+− q(x) 
+
+> ⋆
+
+− q(x)
+
+> s+1
+> 2
+
+
+
+≤ η(x)1 + 
+
+> T(x)
+
+X
+
+> s=2
+
+ η(x) 
+
+> s
+
+− η(x)
+
+> s−1
+
+ = η(x)  
+
+> T(x)
+
+= a
+
+p
+
+T (x).
+
+24 For the second sum,  
+
+> T(x)
+
+X
+
+> s=1
+
+1
+
+η(x)
+
+> s
+
+= 1
+
+a 
+
+> T(x)
+
+X
+
+> s=1
+
+s−1/2 ≤ 2
+
+> a
+
+p
+
+T (x).
+
+Hence the expected regret for context c satisfies 
+
+E
+
+ 
+
+> T(x)
+
+X
+
+> s=1
+
+ Φrs (q(x) 
+
+> ⋆
+
+) − Φrs (q(x) 
+
+> s
+
+) ≤
+
+
+
+a + 4G2
+
+> a
+
+ p 
+
+T (x) = 4 G
+
+p
+
+T (x),
+
+where the last equality uses a = 2 G.Summing over all contexts and applying Cauchy–Schwarz (i.e., P
+
+> x∈X
+
+√T (x) ≤ p|X | T , ), yields 
+
+T ERctx 1 (T ) ≤ 4G X
+
+> x∈X
+
+p
+
+T (x)
+
+≤ 4Gp|X | T
+
+= 4 
+
+s
+
+|X | T KM 
+
+ 1
+
+γ + M − 1
+
+
+
+,
+
+which proves the result. 25
