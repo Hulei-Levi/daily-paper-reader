@@ -1,0 +1,504 @@
+Title: SPICE: Speculative Prefetching with Low-Rank Expert Surrogates and Heterogeneous Orchestration for MoE Inference Acceleration
+
+URL Source: https://arxiv.org/pdf/2608.21240v1
+
+Published Time: Mon, 24 Aug 2026 01:01:20 GMT
+
+Number of Pages: 8
+
+Markdown Content:
+# SPICE: Speculative Prefetching with Low-Rank Expert Surrogates and Heterogeneous Orchestration for MoE Inference Acceleration 
+
+# Yongxiang Lyu 
+
+North Carolina State University United States ylyu9@ncsu.edu 
+
+# Ning Li 
+
+Tianjin University China ning2022@tju.edu.cn 
+
+# Bonian Jia 
+
+New York University United States bj2536@nyu.edu 
+
+## Abstract 
+
+Mixture-of-Experts (MoE) models are increasingly used in LLMs because sparse activation decouples model capacity from compute cost. However, the large expert parameter footprint often exceeds GPU memory capacity, making inference latency dominated by the host-to-device PCIe transfers for expert loading. To address these challenges, this paper presents SPICE, a speculative prefetch-ing framework for MoE offloading that combines lightweight ex-pert prediction with confidence-aware CPU-GPU orchestration. On one hand, SPICE builds a lightweight draft model aligned with the target MoE architecture, using a confidence-aware adaptive lookahead algorithm to prefetch high-confidence experts. On the other hand, when speculative predictions miss, SPICE switches to a cost-aware CPU-GPU heterogeneous orchestration: low-confidence misses are approximated by the resident shared expert with low rank expert (LoRE) surrogates, while exact residual work is of-floaded to the CPU and executed asynchronously in parallel with ongoing GPU computation. Evaluated on DeepSeek-V2-Lite and Qwen2-57B-A14B across diverse GPU platforms, SPICE achieves up to 3.12 × speedup in Time Per Output Token (TPOT) with min-imal quality loss, showing that effective MoE offloading requires not only predicting future experts, but also deciding which misses deserve approximation, which require exact recovery, and where exact residual work should execute. Our code will be available at https://anonymous.4open.science/r/SPICE. 
+
+## CCS Concepts 
+
+• Computer systems organization → Neural networks ; • Com-puting methodologies → Machine learning ; Natural language processing .
+
+## Keywords 
+
+Mixture-of-Experts, Speculative Prefetching, CPU-GPU Orchestra-tion, LLM Inference 
+
+## 1 Introduction 
+
+Mixture-of-Experts (MoE) [5, 12] has emerged as a key architecture for scaling large language models (LLMs) by substantially increas-ing model capacity through sparse activation. Unlike dense models, MoE activates only a subset of experts per token, allowing the total parameter count to scale without a proportional increase in per-token computation. Despite the computational efficiency of sparse activation, de-ploying MoE models within practical GPU memory budgets is constrained by memory capacity. Fig. 1 (a) quantifies one of the 
+
+Figure 1: The I/O bottleneck in MoE offloading. (a) Latency breakdown for DeepSeek-V2-Lite[11] across different GPUs, illustrating that PCIe weight transfer dominates the end-to-end inference time, fundamentally transforming MoE from compute-bound to I/O-bound. (b) The hardware architecture and data movement pipeline of a single MoE layer during offloading. 
+
+bottlenecks: across three representative GPUs, expert loading la-tency consistently dominates per-layer execution time, accounting for 73–88% of the total latency, while actual computation occupies only 12–27%. As illustrated in Fig. 1 (b), the non-expert parameters reside permanently in GPU memory alongside the KV cache, while the aggregate size of all expert FFN weights vastly exceeds the high-bandwidth memory (HBM) capacity of a single GPU. This necessitates offloading experts to host DRAM and loading them on demand through the PCIe bus during inference. As a result, MoE inference is fundamentally transformed from a compute-bound to an I/O-bound problem[18]. To mitigate this bottleneck, prior work has explored multiple directions. Operator-level and model quantization reduce computa-tional FLOPs and model size[3, 6, 13], yet they do not fundamentally address the memory bandwidth constraint when experts remain off-chip. A natural way to mitigate this stall is expert prefetching: instead of waiting until the router requests an expert, the system predicts likely future experts and transfers their weights from host arXiv:2608.21240v1 [cs.AR] 21 Aug 2026 Figure 2: Architecture of a Mixture-of-Experts. A router se-lects the top-k experts from a pool of routed experts based on the token features. DeepSeek-V2[11] and Qwen-MoE[14] families introduce shared experts in each MoE layer. 
+
+memory to GPU memory ahead of use [7, 8, 17]. When the predic-tion is correct and the transfer completes within the available com-pute window, prefetching overlaps host-to-device communication with GPU execution and hides part of the I/O latency[10, 15, 17]. However, prefetching alone is insufficient for low-latency of-floaded MoE serving. Its benefit depends on three coupled condi-tions that are difficult to satisfy simultaneously. First, the prefetcher must predict future expert usage under token- and layer-dependent routing dynamics; the fixed lookahead depths can either miss useful experts or issue stale transfers. Second, when a predicted expert is wrong, recovery falls back to critical-path I/O, requiring the system to reload the missing expert weights before execution can proceed. This recovery cost can erase the latency benefit that prefetching was meant to provide. Third, aggressive lookahead consumes both PCIe bandwidth and the limited GPU-resident expert cache, so spec-ulative transfers may delay urgent demand transfers or evict useful experts. To address these challenges, we propose SPICE, a novel MoE inference framework designed for inference acceleration. Our contributions are: 
+
+• Structurally aligned speculative expert prefetching. 
+
+SPICE uses a lightweight draft model aligned with the target MoE to predict future expert accesses, and applies confidence-aware adaptive lookahead to prefetch likely ex-perts. 
+
+• Resident low-rank surrogate substitution for low -confidence misses. SPICE uses resident shared experts and Low-Rank Expert (LoRE) surrogates to approximate low-confidence missed experts without stalling on synchronous reloads. 
+
+• CPU-GPU heterogeneous orchestration. For misses re-quiring exact recovery, SPICE chooses between loading the expert onto the GPU and executing it on the CPU using host-resident weights. By overlapping exact CPU execution with asynchronous expert transfers and ongoing GPU com-putation, SPICE reduces the critical-path latency caused by prefetching misses. 
+
+## 2 Background 2.1 Mixture-of-Experts 
+
+As shown in Fig. 2, an MoE block consists of 𝑛 expert networks 
+
+{𝐸 1, 𝐸 2, . . . , 𝐸 𝑛 }. The shared experts are always activated, while the router selects the top-K routed experts for each token. The output of all selected experts is then aggregated and weighted. 
+
+Figure 3: Timeline comparison of memory-constrained MoE execution. Scenario 1 contrasts fully resident execution and on-demand expert loading. Scenario 2 shows how a prefetch miss places recovery on the critical path and motivates our LoRE surrogate recovery. Scenario 3 illustrates SPICE, where missing experts can be handled through surrogate computa-tion or exact CPU-side execution over host-resident expert weights. 
+
+## 2.2 Expert Prefetching 
+
+Given the hidden state h(𝑙 ) 
+
+> 𝑡
+
+, the router selects a sparse expert set 
+
+S (𝑙 ) 
+
+> 𝑡
+
+= TopK 
+
+
+
+Router (𝑙 ) (h(𝑙 ) 
+
+> 𝑡
+
+), 𝐾 
+
+
+
+. (1) If a selected expert in S (𝑙 ) 
+
+> 𝑡
+
+is not resident in GPU memory, its weights must be transferred from host memory before its FFN can execute. The critical path of a cache miss therefore includes routing, expert-weight transfer, expert computation, and output aggregation. Expert prefetching attempts to remove weight transfer from this critical path. A predictor estimates the experts required by future layers, and the runtime transfers their weights while earlier layers are still executing. However, prediction alone does not determine a good transfer schedule: unnecessary prefetches consume PCIe bandwidth and cache capacity, while missed predictions still require recovery on the critical path. The runtime must therefore decide not only which experts to prefetch, but also when to transfer them and where to execute missed expert computation. 
+
+## 2.3 Miss Recovery and CPU–GPU Orchestration 
+
+When prefetching misses a non-resident expert, the runtime must recover its computation without delaying subsequent layers. One option is weight migration, which transfers the expert weights to the GPU and executes the complete expert FFN there. The second is a compute-near-weights path, which transfers the correspond-ing activation slice to the CPU, evaluates the same expert using host-resident weights, and sends the output back to the GPU for aggregation. Both paths preserve the target model semantics; they differ only in the amount of PCIe traffic they create, the compute device they occupy, and where synchronization delay appears [9]. Miss recovery therefore requires a joint scheduling decision: the runtime must determine whether to move weights or computation, while coordinating recovery with prefetching and ongoing GPU execution. SPICE treats this decision as a CPU–GPU orchestration 
+
+> 2
+
+problem. It jointly schedules expert prefetching, GPU computation, and asynchronous CPU recovery. 
+
+## 3 Motivation 
+
+Memory-constrained MoE serving is bottlenecked by expert avail-ability: each layer requires its selected experts before computation, but most expert weights reside in host memory. Fig. 3 illustrates three runtime bottlenecks. 
+
+Scenario 1: memory-constrained MoE serving and the need for prefetching. As shown in Figure 3 scenario 1, keeping all ex-perts GPU-resident provides a latency lower bound but is infeasible for large MoE models, particularly as the KV cache grows. Loading missing experts on demand places PCIe transfers directly on the critical path, motivating prefetching that overlaps transfers with earlier GPU computation. 
+
+Scenario 2: prefetch misses and the need for cache-resident substitution. Prefetching hides latency only when predicted ex-perts arrive before use. A miss instead triggers cache eviction and synchronous expert loading. Because shared experts and light-weight surrogates remain GPU-resident, they can provide immedi-ate approximate recovery, trading controlled error for lower block-ing latency. 
+
+Scenario 3: PCIe Contention Requires Heterogeneous Or-chestration. Aggressive lookahead can saturate PCIe bandwidth, causing even correctly predicted experts to arrive late. Under a limited transfer budget, the runtime must decide how each miss is served. SPICE therefore combines surrogate-based recovery with asynchronous CPU execution over host-resident expert weights, avoiding unnecessary weight transfers while preserving exact exe-cution when required. 
+
+## 4 SPICE: Methodology and System Design 
+
+The preceding analysis motivates SPICE, a memory-constrained MoE serving system designed to keep decoding progress from be-ing serialized by expert availability. The key idea is to combine speculative expert prefetching with cache-resident substitution and CPU–GPU heterogeneous execution. Figure 4 presents the overall workflow of SPICE. SPICE first pre-dicts upcoming expert usage and prefetches expert weights to over-lap PCIe transfers with GPU computation. When prediction fails, instead of synchronously evicting cached experts and reloading the missing weights on the critical path, SPICE exploits same-layer expert similarity and the shared-expert structure of MoE models to construct cache-resident expert surrogates that approximate or prune the missing expert computation. Meanwhile, selected expert computations are executed on the CPU using host-resident weights, allowing CPU execution and GPU surrogate execution to proceed in parallel. Together, these mechanisms reduce blocking stalls caused by memory limits, prefetch misses, and PCIe contention. 
+
+## 4.1 Speculative Prefetching Strategy 
+
+Unlike token-level speculative decoding, this mechanism does not predict future output tokens or alter the decoding trajectory; it only predicts the expert sets that are likely to be activated by intra and inter layers. Specifically, at decoding step 𝑡 , SPICE anchors the 
+
+Figure 4: The system overview of SPICE. 
+
+lightweight draft predictor at the target hidden state of the current layer 𝑙 . It then recursively forecasts expert usage over a bounded lookahead horizon using layer-specific low-rank state transitions. At each prediction depth, the corresponding router combines the predicted hidden state with a compact context accumulated from earlier routing predictions to generate the future Top-𝐾 expert set. These predicted sets trigger speculative prefetches, while the rollout terminates early when prediction confidence falls below a predefined threshold. Let ˆ 𝜋 (𝑙 +𝛿 ) 
+
+> 𝑡
+
+∈ [ 0, 1]𝑁 denote the predicted routing distribution for future layer 𝑙 + 𝛿 , and let ˆS (𝑙 +𝛿 ) 
+
+> 𝑡
+
+= TopK ( ˆ𝜋 (𝑙 +𝛿 ) 
+
+> 𝑡
+
+, 𝐾 ) (2) be the corresponding predicted Top-𝐾 expert set. SPICE converts these predictions into asynchronous prefetch intents: 
+
+Qprefetch =
+
+> 𝐻
+
+Ø
+
+> 𝛿 =1
+
+ˆS (𝑙 +𝛿 ) 
+
+> 𝑡
+
+, (3) where 𝐻 is the speculative lookahead horizon. The runtime issues host-to-device copies for experts in Qprefetch through a bounded-depth, low-priority copy queue, preventing speculative traffic from monopolizing the PCIe copy engine. The remaining question is how far the system should look ahead. A fixed prefetch horizon is poorly matched to MoE decoding: a shallow horizon cannot hide long PCIe transfers, while an overly deep horizon may pollute the limited GPU cache with stale expert predictions when routing uncertainty increases. SPICE therefore adapts the prefetch depth using two signals: the hardware overlap requirement and the predictor confidence. For a prefetch count 𝑃 per layer, the transfer time is 𝑃 · 𝑀 𝑒 /𝐵 PCIe ,where 𝑀 𝑒 is the memory footprint of one expert and 𝐵 PCIe is the measured host-to-device bandwidth. Given the per-layer compute window 𝑇 comp = 𝑇 attn + 𝐾 · 𝑇 expert , the minimum lookahead depth required to hide this transfer is 
+
+𝐻 min =
+
+ 𝑃 · 𝑀 𝑒 
+
+𝐵 PCIe · 𝑇 comp 
+
+
+
+=
+
+ 𝑃 · 𝑀 𝑒 
+
+𝐵 PCIe · ( 𝑇 attn + 𝐾 · 𝑇 expert )
+
+
+
+. (4) 
+
+> 3
+
+This bound specifies how early a reliable prefetch should be issued so that expert migration can proceed as background work instead of becoming a demand-driven stall. SPICE then prevents the horizon from growing beyond what the prediction quality can justify. Let ˆ 𝜋 (𝑙 ) 
+
+> 𝑡
+
+∈ [ 0, 1]𝑁 denote the draft model’s predicted routing distribution for layer 𝑙 at decoding step 
+
+𝑡 , and let ˆS (𝑙 ) 
+
+> 𝑡
+
+be the corresponding Top-𝐾 expert set. We define the prediction confidence as the probability mass assigned to the selected experts: 
+
+C( ˆ𝜋 (𝑙 ) 
+
+> 𝑡
+
+) =∑︁     
+
+> 𝑖 ∈ˆS(𝑙 )
+> 𝑡
+
+ˆ𝜋 (𝑙 ) 
+
+> 𝑡,𝑖
+
+. (5) As shown in Figure 5, prediction confidence varies substantially across layers and workloads, motivating an adaptive rather than fixed lookahead depth. After reaching 𝐻 min , SPICE stops further ex-pansion when 𝐶 ( ˆ𝜋 (𝑙 ) 
+
+> 𝑡
+
+) < 𝜏 ; otherwise, it continues up to 𝐻 max . This limits uncertain prefetches without changing the target routing policy. Misses are handled by the recovery path described in Sec-tion 4.2. Algorithm 1 summarizes this procedure. SPICE combines these two signals into an adaptive halting mechanism (Algorithm 1). The algorithm operates as follows: 
+
+Algorithm 1 Speculative Prefetching in SPICE  
+
+> 1:
+
+Input: Current hidden state 𝑥 (current ) , target-model attention and routers, LoRE surrogates  
+
+> 2:
+
+Parameters: Minimum lookahead depth 𝑙 min , maximum looka-head depth 𝑙 max , confidence threshold 𝜏  
+
+> 3:
+
+Output: Expert prefetch queue Qprefetch  
+
+> 4:
+
+Initialize 𝑙 ← 1 and ˆℎ(0) ← 𝑥 (current ) 
+
+> 5:
+
+Qprefetch ← ∅  
+
+> 6:
+
+while 𝑙 ≤ 𝑙 max do  
+
+> 7:
+
+⊲ Step 1: Predict expert demand  
+
+> 8:
+
+ˆ𝜋 (𝑙 ) ← router (𝑙 ) ( ˆℎ(𝑙 −1) ) 
+
+> 9:
+
+ˆS (𝑙 ) ← TopK ( ˆ𝜋 (𝑙 ) , 𝐾 ) 
+
+> 10:
+
+⊲ Step 2: Enqueue the current prediction  
+
+> 11:
+
+Qprefetch . enqueue ( ˆS (𝑙 ) ) 
+
+> 12:
+
+⊲ Step 3: Determine whether to continue speculation  
+
+> 13:
+
+C (𝑙 ) ← Í     
+
+> 𝑖 ∈ˆS(𝑙 )
+
+ˆ𝜋 (𝑙 ) 
+
+> 𝑖
+> 14:
+
+if 𝑙 ≥ 𝑙 min and C (𝑙 ) < 𝜏 then  
+
+> 15:
+
+break ⊲ Retain the current prefetch and stop deeper speculation  
+
+> 16:
+
+end if  
+
+> 17:
+
+⊲ Step 4: Project the draft state to the next depth  
+
+> 18:
+
+ˆℎ(𝑙 ) ← Attn (𝑙 ) ( ˆℎ(𝑙 −1) ) + ∑︁     
+
+> 𝑖 ∈ˆS(𝑙 )
+
+ˆ𝜋 (𝑙 ) 
+
+> 𝑖
+
+˜𝐸 (𝑙 ) 
+
+> 𝑖
+
+( ˆℎ(𝑙 −1) ) 
+
+> 19:
+
+𝑙 ← 𝑙 + 1 
+
+> 20:
+
+end while  
+
+> 21:
+
+Issue asynchronous PCIe transfers for experts in Qprefetch  
+
+> 22:
+
+Trigger the target-model execution pipeline 
+
+Figure 5: Routing confidence across layers on HumanEval and GSM8K. Each bar represents the mean confidence C( ˆ𝜋 (𝑙 ) )
+
+(Eq. 5), with error bars indicating one standard deviation. Confidence varies substantially across layers and workloads, motivating depth-adaptive halting. 𝜏 denotes the threshold used in Algorithm 1. 
+
+## 4.2 Low-Confidence Substitution with Shared Expert and LoRE Surrogates 
+
+The second component of SPICE handles low-confidence misses through approximate substitution rather than exact expert execu-tion. We focus on target MoE architectures that provide a native shared expert in each MoE layer. In such models, the shared expert is always available on the GPU and provides a stable layer-wise common transformation. SPICE uses this shared expert as the base computation and augments it with a lightweight low-rank expert surrogate, called LoRE, to approximate the missing routed expert when the routed expert has low confidence. For layer 𝑙 , let 𝑆 (𝑙 ) (·) denote the native shared expert and 𝐸 (𝑙 ) 
+
+> 𝑒
+
+(·) 
+
+denote routed expert 𝑒 . Given the token hidden state ℎ(𝑙 ) , the exact routed expert output is 
+
+𝑦 (𝑙 ) 
+
+> 𝑒
+
+= 𝐸 (𝑙 ) 
+
+> 𝑒
+
+(ℎ(𝑙 ) ). (6) Instead of reconstructing the full expert, SPICE learns a low-rank residual correction on top of the shared expert: ˜𝑦 (𝑙 ) 
+
+> 𝑒
+
+= 𝑆 (𝑙 ) (ℎ(𝑙 ) ) + Δ(𝑙 ) 
+
+> 𝑒
+
+(ℎ(𝑙 ) ), (7) where Δ(𝑙 ) 
+
+> 𝑒
+
+(·) is the LoRE surrogate for expert 𝑒 at layer 𝑙 .The LoRE surrogate is obtained offline from target-model traces. During calibration, we run the target MoE on a held- out set and record the hidden states, router decisions, shared expert outputs, and exact routed expert outputs. For each layer-expert pair (𝑙, 𝑒 ),SPICE fits a low-rank residual module to approximate the difference between the routed expert and the shared expert: 
+
+Δ(𝑙 ) 
+
+> 𝑒
+
+(ℎ) ≈ 𝐸 (𝑙 ) 
+
+> 𝑒
+
+(ℎ) − 𝑆 (𝑙 ) (ℎ). (8) In our implementation, this residual module is parameterized as a low-rank transformation, 
+
+Δ(𝑙 ) 
+
+> 𝑒
+
+(ℎ) = 𝐵 (𝑙 ) 
+
+> 𝑒
+
+𝐴 (𝑙 ) 
+
+> 𝑒
+
+ℎ, (9) where 𝐴 (𝑙 ) 
+
+> 𝑒
+
+∈ R𝑟 ×𝑑 and 𝐵 (𝑙 ) 
+
+> 𝑒
+
+∈ R𝑑 ×𝑟 with 𝑟 ≪ 𝑑 . The parameters are trained by minimizing the residual approximation error over calibration tokens routed to expert 𝑒 :min     
+
+> 𝐴 (𝑙 )
+> 𝑒 ,𝐵 (𝑙 )
+> 𝑒
+
+∑︁ ℎ∈ D 𝑙,𝑒 
+
+𝐸 (𝑙 ) 
+
+> 𝑒
+
+(ℎ) − 𝑆 (𝑙 ) (ℎ) − 𝐵 (𝑙 ) 
+
+> 𝑒
+
+𝐴 (𝑙 ) 
+
+> 𝑒
+
+ℎ 22 . (10) 
+
+> 4
+
+This construction makes LoRE a correction term rather than a standalone expert. The shared expert captures the common feed-forward transformation of the layer, while LoRE captures the expert-specific deviation using only a small number of parameters. At runtime, this substitution path is used only for low-confidence missing experts. SPICE first obtains the target router’s selected experts and their gate scores. If a selected expert is already resident on the GPU or has been prefetched, SPICE executes it exactly. If the expert is missing, SPICE checks its routing confidence. Low-confidence misses are substituted by the shared-expert-plus-LoRE output and therefore do not trigger either a host-to-device expert transfer or CPU expert execution: ˜𝑦 (𝑙 ) 
+
+> 𝑒
+
+= 𝑆 (𝑙 ) (ℎ(𝑙 ) ) + 𝐵 (𝑙 ) 
+
+> 𝑒
+
+𝐴 (𝑙 ) 
+
+> 𝑒
+
+ℎ(𝑙 ) . (11) SPICE handles each prefetch miss according to its estimated con-tribution. Low-confidence misses use a resident LoRE surrogate, avoiding synchronous expert loading at a controlled accuracy cost. High-contribution misses require exact recovery: the runtime ei-ther loads the expert onto the GPU or executes it on the CPU using host-resident weights. These paths respectively reduce blocking transfers and preserve exact computation when approximation is unsuitable. 
+
+## 4.3 CPU-GPU Heterogeneous Orchestration 
+
+After speculative prefetching and low-confidence substitution, a residual bottleneck remains: some router-selected experts are still absent from the GPU but cannot be safely approximated. SPICE therefore handles these remaining misses with a CPU–GPU het-erogeneous scheduler, which decides whether each expert should be fetched to the GPU or executed exactly on the CPU using host-resident weights. Let M (𝑙 ) denote the set of non-substituted missed experts at layer 𝑙 . SPICE partitions this set into two disjoint subsets: 
+
+M (𝑙 ) = M (𝑙 ) 
+
+> fetch
+
+∪ M (𝑙 )
+
+> cpu
+
+, M (𝑙 ) 
+
+> fetch
+
+∩ M (𝑙 ) 
+
+> cpu
+
+= ∅. (12) Experts in M (𝑙 ) 
+
+> fetch
+
+are transferred over H2D and executed on the GPU once the copy completes, while experts in M (𝑙 ) 
+
+> cpu
+
+are executed on the CPU using host-resident weights. The CPU path is exact: it uses the same target expert weights and does not invoke surrogate experts, alter routing decisions, or change the target model com-putation graph. The mixed scheduler determines this split using the current PCIe pressure and a per-layer cost table. SPICE assigns a missed expert to GPU fetching only when the residual transfer is expected to reduce end-to-end recovery time despite ongoing prefetch traffic. Otherwise, the expert is assigned to CPU residual execution. In implementation, the scheduler compares all-CPU ser-vice with candidate split plans and selects a GPU-fetch count only when the estimated split cost improves over all-CPU execution by a safety margin. The selected experts are fetched through a high-priority residual stream, while the remaining experts are executed on the CPU. As shown in Fig. 6, SPICE dynamically assigns missed experts to either GPU fetch-and-compute or exact CPU residual execution. Execution proceeds in three steps. First, SPICE stages the current hidden state in pinned host memory, launches CPU residual execution, and issues asynchronous H2D transfers for the selected GPU-fetch experts. Second, CPU expert computation progresses 
+
+Figure 6: CPU–GPU heterogeneous orchestration under PCIe pressure. The cost model maps events 𝐸 1, 𝐸 2, and 𝐸 3 to CPU and GPU resources, while dashed paths expose PCIe transfers and contention that delay 𝐸 2 and 𝐸 3.
+
+in parallel with the copy engine, converting part of the residual miss cost into useful host-side work. Third, after GPU transfers complete, SPICE executes the resident and fetched experts on the GPU and merges their outputs with the CPU expert outputs to form the next-layer hidden state. This organization hides part of the copy latency behind exact CPU computation while preserv-ing target-model semantics for all non-substituted misses. This design separates approximate and exact recovery. Low-confidence substitution is a lossy mode and is evaluated separately through the substitution-rank ablation. By contrast, CPU residual execu-tion preserves exact computation for non-substituted misses when GPU-side weight transfer would be too costly. 
+
+## 5 Experiments and Results 5.1 Experimental Setup 
+
+Hardware and Models. We evaluate SPICE under three GPU configurations: (a) an NVIDIA 5090 with PCIe 4.0 x8 and 128 GB DDR5 host DRAM, (b) an NVIDIA RTX 4060 with PCIe 4.0 x8 and 16 GB DDR4 host DRAM and (c)NVIDIA A800 80GB PCIe GPUs with PCIe 4.0 x16 links and about 512 GB DDR4 host DRAM on an Intel Xeon Gold 5320 platform. We evaluate on two MoE models: DeepSeek-V2-Lite [11] and Qwen2-57B-A14B [14]. 
+
+Baselines. We compare SPICE with several representative MoE inference baselines. MoE-On-Demand (Naive): all experts are stored on the CPU. Experts are dynamically loaded into the GPU when selected for inference. AdapMoE[17] is a GPU-centric scheduling framework that reduces on-demand loading overhead via adaptive expert prefetching and caching. CG-MoE[9] utilizes both CPU and GPU through joint expert scheduling and cache hierarchy manage-ment. 
+
+Datasets. We evaluate inference quality on four benchmarks: MT-Bench [16], LongBench [1], HumanEval [2], and GSM8K [4]. 
+
+Measurement protocol. We measure energy during end-to-end MoE inference, including model computation, expert transfers, draft-model inference, and CPU-side expert recovery. GPU energy is obtained by integrating NVML power samples collected at 10 Hz, while CPU-package and DRAM energy are measured using Intel RAPL counters across all CPU sockets over the same decoding interval. We define measured platform energy as the sum of GPU, 
+
+> 5
+
+Figure 7: End-to-end TPOT speedup relative to AdapMoE across workloads, model–GPU configurations. Speedup is computed as TPOT AdapMoE /TPOT method ; Higher is better. Table 1: Inference quality on GSM8K and HumanEval under different model precisions. †BF16; ‡Q5_K_M.                          
+
+> Model GSM8K (Acc.) HumanEval (Pass@1) Naive SPICE ΔNaive SPICE Δ
+> DeepSeek-V2-Lite †70.8 67.5 −3.355.1 52.7 −2.4Qwen2-57B-A14B †87.6 84.1 −3.574.5 70.6 −3.9Qwen2-57B-A14B ‡83.2 80.2 −3.073.2 70.9 −2.3
+
+CPU-package, and DRAM energy, and report energy per output token by dividing this sum by the number of generated tokens. 
+
+## 5.2 End-to-End Inference Performance 
+
+We compare the end-to-end inference latency of SPICE against baselines across diverse models and configurations, shown in the Fig 7. SPICE achieves 2.04–2.70 × speedup over AdapMoE and con-sistently outperforms CG-MoE. Its speedup remains between 2.44× and 3.12× as the prompt length increases from 64 to 1,024 tokens, demonstrating robust gains across the evaluated context lengths. Across two MoE models in Table 1, SPICE incurs only a 3.0–3.5 percentage-point accuracy drop on GSM8K and a 2.3–3.9 point Pass@1 drop on HumanEval. These results indicate that SPICE’s approximation introduces an acceptable quality trade-off for its inference-efficiency gains. 
+
+## 5.3 Energy and PCIe Traffic Analysis 
+
+Energy analysis. Utilization is measured over the complete decod-ing interval and normalized to the measured peak H2D bandwidth of each GPU. Table 2 shows that lower power does not necessar-ily imply lower energy. MoE-On-Demand (Naive) draws the least power but consumes the most energy comsumption at 5.51 J/token because synchronous loading prolongs execution. The other Poli-cies that reduce energy by 31–41% despite drawing more power. SPICE achieves 3.48 J/token while reducing fallback to 3.0% and H2D traffic to 54.7 GB. 
+
+H2D traffic and fallback. Table 2 reveals a trade-off between transfer volume and expert availability. LRU and CG-MoE minimize H2D traffic at 30.2 GB, but both leave 15.7% of expert accesses to 
+
+Table 2: End-to-end energy and H2D traffic for 256 decoding steps. The evaluated configuration uses Top-𝐾 = 8 routing and allocates a 512-slot expert cache. Best and second-best values are shown in bold and underlined, respectively.                               
+
+> Policy Fallback H2D (GB) Power (W) J/token Norm. Naive 100% 192.0 268.6 5.51 1.00 LRU 15.7% 30.2 418.1 3.25 0.59
+> CG-MoE 15.7% 30.2 558.9 3.53 0.64 AdapMoE 6.1% 75.7 587.0 3.78 0.69 SPICE 3.0% 54.7 573.0 3.48 0.63
+
+fallback. AdapMoE reduces fallback to 6.1% by prefetching more aggressively, increasing traffic to 75.7 GB. SPICE achieves the lowest fallback rate of 3.0% with 54.7 GB of traffic, reducing H2D traffic by 28% and fallback by 51% relative to AdapMoE. Thus, SPICE improves expert availability without incurring proportional transfer overhead. 
+
+PCIe utilization Figure 8 shows that SPICE consistently makes greater use of the available H2D bandwidth across both model pre-cisions and GPU platforms. Its utilization ranges from 82% to 91%, compared with 15–20% for Naive, 21–27% for LRU, 38–45% for Adap-MoE, and 52–61% for CG-MoE. Together with SPICE’s lower fall-back rate, these results are consistent with its multi-layer prefetcher exposing expert transfers early enough to reduce idle PCIe intervals and overlap communication with computation, rather than merely transferring more data. 
+
+Figure 8: Average PCIe H2D bandwidth utilization during end-to-end Qwen2-57B-A14B inference under (a) BF16 and (b) Q5_K_M precision. 
+
+## 5.4 Ablation Study 
+
+Figure 9 reports TPOT for four ablated SPICE variants under the exact-residual setting. The full system achieves 172.5 ms, a 23.9% reduction over the best ablation, showing that cross-layer prediction and confidence-aware transfer scheduling are complementary. 
+
+## 6 Conclusion 
+
+In this work, we investigate the challenges of MoE inference un-der memory constraints. We analyze representative deployment scenarios, discuss the corresponding optimization techniques, and identify their limitations. Building on these insights, we present SPICE, which provides a system-level perspective on efficient MoE inference in resource-constrained environments and sets the stage for future work on efficient MoE deployment. 
+
+> 6
+
+Figure 9: Ablation of SPICE components under the exact-residual setting. We compare four partial variants: (a) deep prediction with fetch-all prefetching; (b) deep prediction with CPU fallback; (c) shallow next-layer prediction with CPU fallback; and (d) shallow next-layer prediction with transfer scheduling. 
+
+> 7
+
+## References 
+
+[1] Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, et al. 2024. LongBench: A bilingual, multitask benchmark for long context understanding. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics .Association for Computational Linguistics, 3119–3137. [2] Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde De Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, et al. 2021. Evaluating large language models trained on code. [3] Zhixuan Chen, Xing Hu, Dawei Yang, Zukang Xu, Zhihang Yuan, Sifan Zhou, et al. 2025. MoEQuant: Enhancing Quantization for Mixture-of-Experts Large Language Models via Expert-Balanced Sampling and Affinity Guidance. In Forty-second International Conference on Machine Learning .[4] Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, et al. 2021. Training verifiers to solve math word problems. [5] William Fedus, Barret Zoph, and Noam Shazeer. 2021. Switch Transformers: Scaling to trillion parameter models with simple and efficient sparsity. [6] Elias Frantar and Dan Alistarh. 2024. QMoE: Sub-1-bit compression of trillion parameter models. Proceedings of Machine Learning and Systems 6 (2024), 439– 451. [7] Xin He, Shunkang Zhang, Yuxin Wang, Haiyan Yin, Zihao Zeng, Shaohuai Shi, Zhenheng Tang, Xiaowen Chu, Ivor Tsang, and Ong Yew Soon. 2024. ExpertFlow: Optimized expert activation and token allocation for efficient Mixture-of-Experts inference. [8] Duc Hoang, Ajay Jaiswal, Mohammad Samragh, and Minsik Cho. 2026. SpecMD: A Comprehensive Study on Speculative Expert Prefetching. arXiv:2602.03921 [cs.LG] [9] En-Ming Huang, Li-Shang Lin, and Chun-Yi Lee. 2026. Efficient CPU-GPU Collaborative Inference for MoE-based LLMs on Memory-Limited Systems. In 
+
+2026 31st Asia and South Pacific Design Automation Conference (ASP-DAC) . IEEE, 333–340. [10] Jiamin Li, Yimin Jiang, Yibo Zhu, Cong Wang, and Hong Xu. 2023. Accelerating distributed MoE training and inference with Lina. In Proceedings of the 2023 USENIX Annual Technical Conference (USENIX ATC ’23) . USENIX Association, 945–959. [11] Aixin Liu, Bei Feng, Bin Wang, Bingxuan Wang, Bo Liu, Chenggang Zhao, Chengqi Dengr, Chong Ruan, Damai Dai, Daya Guo, et al. 2024. DeepSeek-V2: A strong, economical, and efficient Mixture-of-Experts language model. [12] Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. 2017. Outrageously large neural networks: The sparsely-gated Mixture-of-Experts layer. In Proceedings of the 5th International Conference on Learning Representations (ICLR ’17) .[13] Ying Sheng, Lianmin Zheng, Binhang Yuan, Zhuohan Li, Max Ryabinin, Beidi Chen, Percy Liang, Christopher Ré, Ion Stoica, and Ce Zhang. 2023. FlexGen: High-throughput generative inference of large language models with a single GPU. In Proceedings of the 40th International Conference on Machine Learning (ICML ’23) . PMLR, 31094–31116. [14] An Yang, Baosong Yang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Zhou, Cheng-peng Li, Chengyuan Li, Dayiheng Liu, Fei Huang, Guanting Dong, Haoran Wei, Huan Lin, Jialong Tang, Jialin Wang, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Ma, Jianxin Yang, Jin Xu, Jingren Zhou, Jinze Bai, Jinzheng He, Jun-yang Lin, Kai Dang, Keming Lu, Keqin Chen, Kexin Yang, Mei Li, Mingfeng Xue, Na Ni, Pei Zhang, Peng Wang, Ru Peng, Rui Men, Ruize Gao, Runji Lin, Shijie Wang, Shuai Bai, Sinan Tan, Tianhang Zhu, Tianhao Li, Tianyu Liu, Wenbin Ge, Xiaodong Deng, Xiaohuan Zhou, Xingzhang Ren, Xinyu Zhang, Xipin Wei, Xuancheng Ren, Xuejing Liu, Yang Fan, Yang Yao, Yichang Zhang, Yu Wan, Yunfei Chu, Yuqiong Liu, Zeyu Cui, Zhenru Zhang, Zhifang Guo, and Zhihao Fan. 2024. Qwen2 Technical Report. arXiv:2407.10671 [cs.CL] https://arxiv.org/abs/2407.10671 [15] Junyi Zhang, Chuanhu Ma, Xiong Wang, Yuntao Nie, Yuqing Li, Yuedong Xu, Xiaofei Liao, Bo Li, and Hai Jin. 2025. PopFetcher: Towards accelerated Mixture-of-Experts training via popularity based expert-wise prefetch. In Proceedings of the 2025 USENIX Annual Technical Conference (USENIX ATC ’25) . USENIX Association, 1053–1069. [16] Lianmin Zheng, Wei-Lin Chiang, Ying Sheng, Siyuan Zhuang, Zhanghao Wu, Yonghao Zhuang, Zi Lin, Zhuohan Li, Dacheng Li, Eric P. Xing, Hao Zhang, Joseph E. Gonzalez, and Ion Stoica. 2023. Judging LLM-as-a-judge with MT-bench and Chatbot Arena. In Advances in Neural Information Processing Systems 
+
+(New Orleans, LA, USA) (NeurIPS ’23) . Curran Associates Inc., Red Hook, NY, USA, Article 2020, 29 pages. [17] Shuzhang Zhong, Ling Liang, Yuan Wang, Runsheng Wang, Ru Huang, and Meng Li. 2024. AdapMoE: Adaptive sensitivity-based expert gating and management for efficient MoE inference. In Proceedings of the 43rd IEEE/ACM International Conference on Computer-Aided Design (ICCAD ’24) . ACM, 1–9. [18] Yuxin Zhou, Zheng Li, Jun Zhang, Jue Wang, Yiping Wang, Zhongle Xie, Ke Chen, and Lidan Shou. 2025. FloE: On-the-Fly MoE Inference on Memory-constrained GPU. In International Conference on Machine Learning . PMLR, 78859–78882.
