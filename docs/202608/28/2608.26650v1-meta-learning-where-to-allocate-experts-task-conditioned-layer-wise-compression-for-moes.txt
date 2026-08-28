@@ -1,0 +1,627 @@
+Title: Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs
+
+URL Source: https://arxiv.org/pdf/2608.26650v1
+
+Published Time: Fri, 28 Aug 2026 00:33:31 GMT
+
+Number of Pages: 18
+
+Markdown Content:
+> 2026-8-28
+
+# Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs 
+
+Wang Rongfeng 1,2,3,* Shichao Weng 6,* Zhiqiang Wang 6,* Xinyu Liu 1  
+
+> Yang Yi 1Peilong Zhou 1,5Tang Hongwei 1,2,3,4,†
+> 1Institute of Computing Technology, Chinese Academy of Sciences, Beijing, China
+> 2Nanjing College, University of Chinese Academy of Sciences, Nanjing, China
+> 3Nanjing Institute of Information Superbahn, Nanjing, China
+> 4University of Chinese Academy of Sciences, Beijing, China
+> 5School of Advanced Interdisciplinary Sciences, University of Chinese Academy of Sciences, Beijing, China
+> 6Dobot Robotics, Shenzhen, China
+
+# Abstract 
+
+Mixture-of-Experts (MoE) models route each token to a subset of expert networks, increasing capacity while keeping per-token computation sparse. In many deployed MoEs, the number of active experts is fixed across layers and tasks, although layer roles and expert redundancy vary with depth [1–3] and demand varies with difficulty [4–6]. Existing approaches address only part of this setting: layer-wise allocations are usually determined offline and reused for all tasks [2, 3], while token-level methods vary expert activation using local routing signals without task-level context [4–6]. We propose MetaNet, a support-set controller that predicts, for each layer, an expert-retention threshold and a bounded routing bias. The backbone, experts, and router remain frozen. On DeepSeek-MoE-16B-Chat, MetaNet provides a tunable accuracy–expert-activation trade-off. Relative to fixed 𝑘 =6 , a conservative setting activates 3.61 experts on average ( 40% fewer) and achieves comparable MMLU accuracy ( 0.489 vs. 0.474 ), whereas an aggressive setting activates 2.28 experts on average ( 62% fewer) with accuracy approximately 
+
+3.7 percentage points lower. The MMLU-trained controller also transfers to C-Eval without retraining, activating 2.90 experts on average ( 52% fewer than fixed 𝑘 =6 ) at 0.386 accuracy. 
+
+# 1. Introduction 
+
+Serving large language models (LLMs) at scale is expensive [7–9]. Mixture-of-Experts (MoE) architectures [10, 11] reduce per-step compute by routing each token to a small subset of expert subnetworks, enabling large total capacity without activating it all at once. This design is used in recent MoE language models such as DeepSeekMoE [12] and Mixtral [13]. Yet standard pretrained MoE inference typically uses the same number of experts at every layer for every token and every task [10–12]. This contrasts with evidence that layer-wise capacity demands differ. In dense Transformers, layers have distinct functional roles [1, 14] and contribute differently to task performance [15, 16]. In MoE models, lower layers exhibit higher expert redundancy than upper layers [2], and this cross-layer redundancy pattern shifts across tasks [17, 18]. Some works exploit depth heterogeneity through layer-wise capacity allocation—OpenELM [19] places fewer parameters in shallow layers, while AlphaLoRA [3] and LExI [20] assign layer-specific expert budgets—but these allocations are fixed offline and shared across tasks. Token-level dynamic routing [4, 5] lets each token activate a variable number of experts, but decisions are made from per-token routing confidence alone, with no access to task context. Expert pruning [17, 18, 21, 22] fixes the retained set at deployment and cannot adapt to novel tasks. Router-modification or construction methods [23, 24] alter the gating mechanism rather than preserving the original router. This paper studies task-conditioned layer-wise expert allocation for frozen MoE inference. Given a small support set for the current task, MetaNet predicts a per-layer expert activation policy: a retention threshold 𝜌 𝜏,𝑙 , which determines how many experts are needed to cover the required routing mass at layer 𝑙 , and a bounded routing bias b𝜏,𝑙 , whose magnitude is much smaller than typical gate logits and therefore only weakly perturbs the frozen router. The backbone, original router, and full expert set remain unchanged. On DeepSeek-MoE-16B-  
+
+> *Equal contribution.
+> †Corresponding author: tanghongwei@ict.ac.cn arXiv:2608.26650v1 [cs.CL] 27 Aug 2026 Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs
+
+Chat, MetaNet reduces the mean number of activated experts by 62% relative to fixed 𝑘 =6 (from 6.00 to 2.28 )with a 3.7 pp accuracy drop on MMLU, and transfers to C-Eval without retraining with a similar reduction in activated experts. With a weaker budget penalty, it keeps 3.61 mean experts, achieves comparable accuracy to fixed 𝑘 =6 , and reduces the mean activated-expert count by 40% .
+
+Contributions. 
+
+• We formulate task-conditioned per-layer expert allocation for frozen MoE inference: infer per-layer active expert counts from a small support set, without modifying backbone parameters. • We design MetaNet, a small two-branch controller that predicts a retention threshold 𝜌 𝜏,𝑙 and a bounded routing bias b𝜏,𝑙 per layer from support-set routing statistics, keeping the backbone, original router, and full expert pool frozen. • We show through component ablations that the budget and prior branches are complementary: the prior branch helps maintain gate-consistent expert selection under tight budgets, and deep layers are more compressible than shallow layers in our setting. 
+
+# 2. Related Work 
+
+# Token Router Expert 1 Expert 2 Expert 3 Expert 4 Expert 5 Expert 6 Output 
+
+Figure 1: An MoE layer: the router activates 2 of 6 experts per token; inactive experts grayed out. 
+
+Mixture-of-Experts and inference compression. 
+
+MoE architectures [10, 11] route each input token to 𝑘 out of 𝐸 expert FFNs via a gating network (Figure 1), keeping per-step compute proportional to 𝑘 while allowing large total capacity. DeepSeekMoE [12] refines this with fine-grained expert segmentation, and Mixtral [13] shows the effectiveness of sparse expert activation in open LLMs. In these models, however, the active expert count is typically fixed by architecture or inference configuration rather than adapted to the task. 
+
+Compressing the inference cost of frozen MoEs. 
+
+Existing work on MoE inference compression can be grouped into four lines. (i) Expert pruning and merging. 
+
+NAEE [21], MoE-I 2 [22], and STUN [25] prune experts based on calibration-data importance. HC-SMoE [26] merges experts through hierarchical clustering, whereas ResMoE [27] approximates experts using a Wasserstein 
+
+> 2Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs
+
+Support phase Query phase (per MoE layer 𝑙 )
+
+## 𝑥 1 𝑥 2
+
+## 𝑥 3 𝑥 4
+
+Support set 𝑆 𝜏 
+
+## Frozen MoE backbone 
+
+Layer routing stats 
+
+s𝜏,𝑙 , 𝐻 𝜏,𝑙 , 𝑚 𝜏,𝑙 , 𝑐 (𝑅 )
+
+> 𝜏,𝑙
+
+## MetaNet 𝑔 𝜑 
+
+## 𝜌 𝜏,𝑙 
+
+activation ratio 
+
+## p𝜏,𝑙 
+
+prior logit 
+
+## Query 𝑡 
+
+## (1) Gate logit 𝑟 𝑙,𝑡,𝑒 
+
+## (2) ˜𝑟 𝑙,𝑡,𝑒 = 𝑟 𝑙,𝑡,𝑒 + 𝑏 𝜏,𝑙,𝑒 
+
+𝑏 𝜏,𝑙,𝑒 = 𝜏 𝑏 tanh (︀ 𝛼 (1 −𝛽 ) ^ 𝑝 𝜏,𝑙,𝑒 
+
+> 𝜏 𝑏
+
+)︀ 
+
+## (3) 𝑘 𝜏,𝑙 = clip (︀ ˜𝑘 𝜏,𝑙 , 𝑘 min , 𝑘 max )︀ 
+
+˜𝑘 𝜏,𝑙 = 1 + ∑︀ 𝑚 I[𝐴 𝜏,𝑙,𝑚 < 𝜌 𝜏,𝑙 𝑀 (𝑅 ) 
+
+> 𝜏,𝑙
+
+]
+
+## (4) ℰ𝑙,𝑡 = TopK 𝑘 𝜏,𝑙 (˜ 𝑟 𝑙,𝑡, :)
+
+## Expert 1
+
+## Expert 2
+
+## Expert 3
+
+## Expert 4
+
+## Expert 5
+
+## Expert 6
+
+## Output 
+
+𝜌 𝜏,𝑙 
+
+p𝜏,𝑙 
+
+Figure 2: Overview of MetaNet. Left: support examples 𝑆 𝜏 pass through the frozen backbone; routing statistics are fed to MetaNet 𝑔 𝜑 , producing a per-layer retention threshold 𝜌 𝜏,𝑙 and prior score p𝜏,𝑙 . Right: at query time, the corresponding bounded bias is added to gate logits (2) ; cumulative-mass thresholding with 𝜌 𝜏,𝑙 determines 
+
+𝑘 𝜏,𝑙 (3) ; TopK 𝑘 𝜏,𝑙 selects experts (4) . Orange: activated; gray: skipped. Backbone parameters are unchanged. barycenter and compressed residuals. These methods determine the compressed expert representation before deployment. (ii) Input-adaptive computation. Huang et al. [4], Dynamic MoE [5], and AdaMoE [6] vary expert activation using token-level signals. Probe Pruning [28] is a related batch-wise dynamic structured-pruning method based on model probing rather than MoE router confidence. These approaches make local input-conditioned decisions rather than assigning task-conditioned per-layer capacity from a support set. (iii) Layer-wise heterogeneous allocation. MoLA [2], AlphaLoRA [3], and LExI [20] assign different expert counts to different layers, but the allocation is determined offline and reused across tasks. (iv) Router modification or construction. HyperRouter [24] and Pre-gated MoE [23] change the routing mechanism, while Read-ME [29] refactorizes a pretrained dense LLM into an MoE with a decoupled pre-gating router. MetaNet instead keeps the original MoE router frozen and adds only a bounded task-conditioned bias. 
+
+Systems support for sparse MoE inference. 
+
+Routing sparsity does not by itself guarantee a proportional end-to-end speedup. DeepSpeed-MoE [30] uses a specialized inference stack, Tutel [31] adapts parallelism and pipelining to dynamic expert workloads, and Lina [32] addresses all-to-all communication and skewed expert popularity. MetaNet changes the routing policy rather than the runtime and is complementary to these system optimizations. 
+
+Meta-learning and task-conditioned controllers. 
+
+MetaNet follows the support-query paradigm [33, 34]: a controller infers a task representation from a small support set and uses it during query-time inference. Unlike MAML [33], hypernetworks [35], or soft-prompt methods [36, 37], the controller does not generate or update backbone parameters. It outputs a routing policy—a per-layer retention threshold 𝜌 ℓ and bounded bias bℓ—that acts on expert selection (Figure 2). 
+
+> 3Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs
+
+# 3. Method 
+
+MetaNet derives a per-layer expert-activation policy from a support set while keeping the MoE backbone frozen. Figure 2 illustrates the full pipeline. 
+
+## 3.1. Problem setup and support profiling 
+
+Let 𝑓 𝜃 be a pretrained MoE model with 𝐿 routed layers, each containing 𝐸 expert FFNs and a router that activates the top 𝐾 nat experts per token ( 𝐾 nat = 6 for DeepSeek-MoE-16B-Chat, 8 for OLMoE). Following the support-query paradigm [33, 34], each task 𝜏 has a support set 𝑆 𝜏 = {(𝑥 𝑖 , 𝑦 𝑖 )}𝑁 𝑠  
+
+> 𝑖 =1
+
+(used to infer the task policy) and a query set 𝑄 𝜏 (used for evaluation). MetaNet 𝑔 𝜑 maps 𝑆 𝜏 to a per-layer routing policy Π𝜏 = 𝑔 𝜑 (𝑆 𝜏 ), replacing the fixed top-𝐾 nat with layer-wise activation counts k𝜏 = ( 𝑘 𝜏, 1, . . . , 𝑘 𝜏,𝐿 ), 𝑘 𝜏,𝑙 ∈ { 𝑘 min , . . . , 𝑘 max }. We set 𝑘 min = 1 and 𝑘 max = 12 (= 2 𝐾 nat for DeepSeek-MoE), so the controller can reduce the budget in redundant layers and retain more experts in layers whose support routing is diffuse. Let 𝑟 (𝑥 ) 
+
+> 𝑙,𝑡,𝑒
+
+be the gate logit at layer 𝑙 , expert 𝑒 , token 𝑡 of sample 𝑥 . The per-layer expert score is the token-and-sample average of softmax probabilities: 
+
+𝑠 𝜏,𝑙,𝑒 = 1
+
+|𝑆 𝜏 |∑︁ 𝑥 ∈𝑆 𝜏 
+
+1
+
+𝑇 𝑥 𝑇 𝑥 ∑︁ 
+
+> 𝑡 =1
+
+softmax (︀ 𝑟 (𝑥 )
+
+> 𝑙,𝑡
+
+)︀ 𝑒 , (1) giving a distribution s𝜏,𝑙 ∈ ∆𝐸 −1 that summarizes which experts the task favors at each layer. Three scalar statistics capture routing concentration and serve as compressibility signals: 
+
+𝐻 𝜏,𝑙 = − 1log 𝐸 
+
+> 𝐸
+
+∑︁ 
+
+> 𝑒 =1
+
+𝑠 𝜏,𝑙,𝑒 log 𝑠 𝜏,𝑙,𝑒 ,𝑚 𝜏,𝑙 = max  
+
+> 𝑒
+
+𝑠 𝜏,𝑙,𝑒 , 𝑐 (𝑅 ) 
+
+> 𝜏,𝑙
+
+=∑︁   
+
+> 𝑒 ∈TopKIdx 𝑅 (s𝜏,𝑙 )
+
+𝑠 𝜏,𝑙,𝑒 .
+
+(2) Here 𝐻 𝜏,𝑙 ∈ [0 , 1] is normalized routing entropy ( 𝐻 = 0 : single expert, 𝐻 = 1 : uniform), 𝑚 𝜏,𝑙 is the maximum expert probability, 𝑐 (𝑅 ) 
+
+> 𝜏,𝑙
+
+is the fraction of routing mass in the top-𝑅 experts, and TopKIdx 𝑅 returns the index set of top-𝑅 entries. Layers with low 𝐻 𝜏,𝑙 , high 𝑚 𝜏,𝑙 , and high 𝑐 (𝑅 ) 
+
+> 𝜏,𝑙
+
+are concentrated and thus amenable to budget reduction. The support profile uses only quantities produced by the frozen router and does not require gradients through the backbone during policy inference. The same profile is reused for all query examples from the task, so the profiling cost is amortized over the query set. MetaNet therefore acts as a task-level allocator: it chooses how much expert capacity each layer receives, while the original router still ranks experts for individual tokens. 
+
+## 3.2. MetaNet controller and inference strategy 
+
+MetaNet 𝑔 𝜑 processes the per-layer routing statistics through two independent branches and outputs two per-layer signals: 
+
+Π𝜏 = 𝑔 𝜑 (︁{︀ s𝜏,𝑙 , 𝐻 𝜏,𝑙 , 𝑚 𝜏,𝑙 , 𝑐 (𝑅 )
+
+> 𝜏,𝑙
+
+}︀ 𝐿 𝑙 =1 )︁ ={︀ 𝜌 𝜏,𝑙 ∈ (0 , 1] , p𝜏,𝑙 ∈ R𝐸 }︀ 𝐿 𝑙 =1 . (3) Both branches share a task encoder: a two-layer MLP that mean-pools [s𝜏,𝑙 ; 𝐻 𝜏,𝑙 ; 𝑚 𝜏,𝑙 ; 𝑐 (𝑅 ) 
+
+> 𝜏,𝑙
+
+] ∈ R𝐸 +3 over support examples to produce z𝜏 ∈ R𝑑 ; each layer has a learned embedding e𝑙 ∈ R𝑑 (𝑑 =2048 ). The budget branch encodes s𝜏,𝑙 and the scalar statistics via two-layer MLPs, concatenates with [z𝜏 ; e𝑙 ], and produces discrete budget logits whose soft weighted sum gives the retention threshold 𝜌 𝜏,𝑙 . The prior branch uses only the scalar-statistics projection (not s𝜏,𝑙 , to avoid a trivial copy) concatenated with [z𝜏 ; e𝑙 ] to produce a per-expert score p𝜏,𝑙 , mapped to the bounded routing bias b𝜏,𝑙 via scaled tanh .When multiple experts have similar gate scores, top-𝑘 selection is sensitive to small perturbations. The role of p𝜏,𝑙 is to provide a weak task-level preference among such experts. We standardize p𝜏,𝑙 within each layer 
+
+> 4Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs
+
+(ˆ𝑝 𝜏,𝑙,𝑒 = ( 𝑝 𝜏,𝑙,𝑒 − 𝜇 )/(𝜎 + 𝜀 )) and map it to a bounded routing bias: 
+
+𝑏 𝜏,𝑙,𝑒 = 𝜏 𝑏 tanh (︁ 𝛼 (1 − 𝛽 ) ˆ 𝑝 𝜏,𝑙,𝑒 
+
+𝜏 𝑏 )︁ , (4) where 𝜏 𝑏 > 0 is the maximum bias magnitude, 𝛼 ∈ (0 , 1) is a global scale, and 𝛽 ∈ [0 , 1) is a shrinkage coefficient. Because |𝑏 𝜏,𝑙,𝑒 | ≤ 𝜏 𝑏 and 𝜏 𝑏 is much smaller than typical gate logit magnitudes, the pretrained router remains the main source of expert ordering. In our main configuration 𝛼 (1 − 𝛽 ) = 0 .005 .Rather than learning 𝑘 𝜏,𝑙 directly (which entangles the budget decision with the shape of the routing distri-bution), we reformulate budget learning in terms of cumulative probability mass. We combine the support routing distribution with the bounded bias to obtain an adjusted distribution ¯q𝜏,𝑙 = softmax(log s𝜏,𝑙 + b𝜏,𝑙 ),used only for budget computation (not for query-phase routing). Here log s𝜏,𝑙 converts the probability vector back to an unnormalized score before adding the bias. Let 𝑀 (𝑅 ) 
+
+> 𝜏,𝑙
+
+=∑︀ 𝑒 ∈TopKIdx 𝑅 (¯ q) ¯𝑞 𝜏,𝑙,𝑒 be the routing mass covered by the top-𝑅 reference experts (here 𝑅 = 𝑘 max = 12 , matching the reference budget). Let ¯𝑞 ↓ 
+
+> 𝜏,𝑙,𝑗
+
+denote the 𝑗 -th largest entry of ¯q𝜏,𝑙 and 𝐴 𝜏,𝑙,𝑚 =∑︀ 𝑚 𝑗 =1 ¯𝑞 ↓ 
+
+> 𝜏,𝑙,𝑗
+
+its prefix sum. The hard activation count is: 
+
+˜𝑘 𝜏,𝑙 = 1 + 
+
+> 𝐸
+
+∑︁ 
+
+> 𝑚 =1
+
+I[︀ 𝐴 𝜏,𝑙,𝑚 < 𝜌 𝜏,𝑙 𝑀 (𝑅 )
+
+> 𝜏,𝑙
+
+]︀ , 𝑘 𝜏,𝑙 = clip (︀ ˜𝑘 𝜏,𝑙 , 𝑘 min , 𝑘 max )︀ . (5) Intuitively, layers with concentrated routing (low 𝐻 𝜏,𝑙 ) reach any given mass threshold with fewer experts and receive a smaller budget. For training, the non-differentiable indicator is replaced by a sigmoid with temperature 𝑇 bud [38–40]: 
+
+𝑘 soft  
+
+> 𝜏,𝑙
+
+= 1 + 
+
+> 𝐸
+
+∑︁ 
+
+> 𝑚 =1
+
+𝜎 (︁ 𝜌 𝜏,𝑙 𝑀 (𝑅 ) 
+
+> 𝜏,𝑙
+
+− 𝐴 𝜏,𝑙,𝑚 
+
+𝑇 bud )︁ . (6) At query time, the task-level bias is added to the original gate logit and top-𝑘 𝜏,𝑙 selection is applied: 
+
+˜𝑟 𝜏,𝑙,𝑡,𝑒 = 𝑟 𝑙,𝑡,𝑒 + 𝑏 𝜏,𝑙,𝑒 , ℰ𝜏,𝑙,𝑡 = TopKIdx 𝑘 𝜏,𝑙 (︀ ˜𝑟 𝜏,𝑙,𝑡, :)︀ . (7) The policy {𝜌 𝜏,𝑙 , b𝜏,𝑙 }𝐿 𝑙 =1 is computed once from 𝑆 𝜏 and reused across all queries; no backbone parameter is modified. The formulation separates two decisions. The retention threshold controls how many experts are active in a layer, whereas the bounded bias weakly influences which experts are preferred when gate scores are close. Fixed top-𝑘 baselines keep the first decision constant for all layers and tasks. Token-adaptive methods change 
+
+𝑘 independently for each token, but they do not use a task-level support set. MetaNet keeps the pretrained token router as the fine-grained selector while letting the task profile choose a layer-wise budget before query inference begins. 
+
+## 3.3. Training objective 
+
+Training follows an episodic support-query protocol [33, 34]: each episode samples a task 𝜏 , generates Π𝜏 ,and evaluates all loss terms on 𝑄 𝜏 . Only MetaNet parameters 𝜑 are updated. The total loss is: 
+
+ℒtotal = 𝜆 task ℒtask + 𝜆 pp ℒpp + 𝜆 budget ℒbudget + 𝜆 align ℒalign 
+
++ 𝜆 cons ℒcons + 𝜆 aux ℒaux . (8) 
+
+Task loss ℒtask .
+
+Standard cross-entropy on 𝑄 𝜏 under the dynamic routing policy of Eq. (7): 
+
+ℒtask = − 1
+
+|𝑄 𝜏 |∑︁ (𝑥,𝑦 )∈𝑄 𝜏 
+
+log 𝑝 (𝑦 | 𝑥 ; Π 𝜏 ). (9) 
+
+> 5Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs
+
+Performance-preserving penalty ℒpp .
+
+We compute a detached reference loss ℒref by evaluating 𝑄 𝜏 under the original router at native top-𝐾 nat . Let 
+
+∆ = ℒtask − ℒ ref − 𝑚 pp , where 𝑚 pp ≥ 0 is a tolerance margin. The penalty is a one-sided Huber loss: ℒpp = 0 
+
+when ∆ ≤ 0, and 
+
+ℒpp ={︃ ∆2/(2 𝛿 𝐻 ) if 0 < ∆ ≤ 𝛿 𝐻 ,
+
+∆ − 𝛿 𝐻 /2 if ∆ > 𝛿 𝐻 , (10) where 𝛿 𝐻 > 0 is the Huber transition point (quadratic below 𝛿 𝐻 , linear above). 
+
+Budget loss ℒbudget .
+
+Let ¯𝑘 𝜏,𝑙 = ( 𝑘 soft  
+
+> 𝜏,𝑙
+
+− 𝑘 min )/(𝑘 max − 𝑘 min ) be the normalized soft budget, 𝑢 𝜏,𝑙 = 𝑢 0 + (1 − 𝑢 0)𝐻 𝜏,𝑙 be the per-layer compression target (high-entropy layers get a relaxed target; 𝑢 0 = 0 .2), and 𝑠 safe = 𝜎 (−∆/𝑇 𝑞 ) be a soft safety gate (with temperature 𝑇 𝑞 > 0) that suppresses compression pressure when quality degrades. The budget loss combines compression and rescue objectives: 
+
+ℒbudget = 𝑤 cmp 𝑠 safe [︁ 1
+
+> 𝐿
+
+∑︁ 𝑙 
+
+ReLU( ¯𝑘 𝜏,𝑙 − 𝑢 𝜏,𝑙 ) + 𝑤 compute 1
+
+> 𝐿
+
+∑︁ 𝑙 
+
+¯𝑘 𝜏,𝑙 ]︁ 
+
++ 𝑤 rescue (1 − 𝑠 safe ) · 1
+
+> 𝐿
+
+∑︁ 𝑙 
+
+ReLU( 𝑢 𝜏,𝑙 − ¯𝑘 𝜏,𝑙 ).
+
+(11) When quality is safe ( 𝑠 safe ≈ 1) the compression term dominates; when quality degrades ( 𝑠 safe ≈ 0) the rescue term takes over and increases the budget. 
+
+Alignment and consistency losses. 
+
+ℒalign constrains the routing bias to remain anchored to the support routing distribution, preventing the prior branch from inverting the original gate ordering: ℒalign = 1
+
+> 𝐿
+
+∑︀ 𝑙 KL( s𝜏,𝑙 ‖softmax( b𝜏,𝑙 )) , where the KL is computed with the support distribution as the target so that the learned bias is penalized for deviating from it. 
+
+ℒcons encourages policy stability: a second policy (𝜌 ′
+
+> 𝜏,𝑙
+
+, p′
+
+> 𝜏,𝑙
+
+) is computed from a random half-split of 𝑆 𝜏 , and the loss penalizes disagreement with the full-set policy: ℒcons = 1
+
+> 𝐿
+
+∑︀ 𝑙 [( 𝜌 𝜏,𝑙 − 𝜌 ′
+
+> 𝜏,𝑙
+
+)2 + ‖p𝜏,𝑙 − p′
+
+> 𝜏,𝑙
+
+‖2].
+
+Auxiliary regularizers ℒaux .
+
+Three small-weight terms stabilize training: a budget-diversity term ℒres = 1
+
+> 𝐿
+
+∑︀ 𝑙 (¯𝑘 𝜏,𝑙 − ¯𝑢 )2 (suppresses constant-budget solutions); a negative-entropy reward ℒent on softmax( p𝜏,𝑙 ) (prevents prior collapse); and a rank loss ℒrank that enforces soft monotonicity between routing entropy and budget: 
+
+ℒrank = 1
+
+|𝒫| ∑︁ (𝑙,𝑙 ′)∈𝒫 
+
+ReLU (︀ ¯𝑘 𝜏,𝑙 − ¯𝑘 𝜏,𝑙 ′ + 𝑚 r)︀ , (12) where 𝒫 = {(𝑙, 𝑙 ′) : 𝐻 𝜏,𝑙 < 𝐻 𝜏,𝑙 ′ } and 𝑚 r = 0 .05 . Full hyperparameter values are in Table 6. 
+
+# 4. Experimental setup 
+
+## 4.1. Models and evaluation 
+
+The main backbone is DeepSeek-MoE-16B-Chat [12] ( 27 routed MoE layers, 64 sparse experts per layer, native top-𝑘 𝐾 nat =6 ); all backbone parameters are frozen and only MetaNet 𝑔 𝜑 is updated. Experiments run on three NVIDIA RTX 4090 24 GB GPUs (bfloat16, device_map=auto ). MMLU episodes use 𝑁 𝑠 = 8 support and 
+
+𝑁 𝑞 = 16 disjoint query examples. For C-Eval, all five labeled development examples per subject form the support set and up to 16 labeled validation examples form the query set. MetaNet is trained for 450 episodic steps on MMLU [41] meta-train subjects; the checkpoint with highest meta-validation accuracy is selected and evaluated on held-out meta-test subjects. We run four experiments: (1) Main —MMLU [41] meta-test ( 12 subtasks) vs. fixed top-𝑘 and HyperRouter-style; C-Eval [42] as zero-shot transfer. (2) Cross-backbone —the MMLU-trained checkpoint applied zero-shot 
+
+> 6Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs
+
+to OLMoE-1B-7B [43]. (3) Cross-architecture —GoogLeNet [44] (frozen) as backbone on two synthetic episodic vision tasks ( syn-pattern /syn-pattern-shift ), selecting a 3-of-4 branch policy (active ratio 0.75 ). 
+
+(4) Ablations —component (budget-only, prior-only, full) and layer-position (shallow/middle/deep/all). 
+
+Synthetic vision episodes. syn-pattern and syn-pattern-shift are procedural episodic tasks used only as a cross-architecture check. Each class is generated from a simple visual prototype, including color blocks, vertical or horizontal stripes, diagonal patterns, and ring-like structures, with random noise added to each image. The shifted split, syn-pattern-shift , additionally applies horizontal flipping and mild color-statistic perturbation. Within each episode, support and query images are sampled from the same synthetic class distribution. The support set is used to infer the branch policy, and the query set evaluates whether this policy transfers to unseen samples from the same episode. This experiment tests whether support-conditioned structural control can be applied outside MoE routing. For MMLU [41] and C-Eval [42], each subject is treated as a task. The fixed MMLU split contains 34 meta-train, 
+
+11 meta-validation, and 12 meta-test subjects. Subject identities are disjoint across the three partitions, so the main MMLU result contains 12 × 16 = 192 held-out query predictions rather than additional samples from training subjects. Within each episode, support examples are used only to construct the routing profile and query examples are used for the reported metric. 
+
+Evaluation scopes. 
+
+We distinguish the main transfer evaluation from the additional analyses. C-Eval-Full applies the MMLU-trained controller to all 52 C-Eval subjects without parameter updates and contains 828 labeled query examples. The expanded baselines and operating-point sweep use a fixed 10 -subject subset with 16 query examples per subject ( 160 in total), denoted C-Eval-10. Results from C-Eval-Full and C-Eval-10 are reported in separate panels and are not compared directly. The ten subjects are listed in Appendix B. 
+
+Sampling seeds. 
+
+Unless stated otherwise, results use one episode per subject. In the repeated-sampling check, the subject split remains fixed and the seed changes only support/query example sampling; support and query examples remain disjoint. Two seeds and two episodes per held-out MMLU subject yield 384 query predictions per seed. Fixed 
+
+𝑘 =6 , fixed 𝑘 =12 , and both MetaNet profiles are evaluated under both seeds. Appendix C.2 reports each run and the mean with sample standard deviation. 
+
+## 4.2. Baselines and metrics 
+
+Baselines. Fixed top-𝑘 uses 𝑘 ∈ { 1, . . . , 6, 12 }; 𝑘 =6 is the native router budget and 𝑘 =12 is an upper-budget reference rather than a compute-matched baseline. HyperRouter-style [24] uses a linear head over the same support statistics while keeping top-𝑘 fixed at 6. The expanded comparison also includes inference-compatible adaptations inspired by AdaMoE [6], Dynamic MoE [5], and Probe Pruning [28]. The rows are labeled “adapted” because they place the corresponding decision rule in the same frozen DeepSeek harness rather than reproduce each method’s original architecture and training procedure. 
+
+Metrics. For each task 𝜏 , accuracy is the exact-match rate on the query set 𝑄 𝜏 ; reported accuracies average this value over evaluation tasks. The mean dynamic top-𝑘 is ¯𝑘 = 1
+
+> |𝒯 | 𝐿
+
+∑︀ 𝜏 ∈𝒯 ∑︀ 𝐿 𝑙 =1 𝑘 𝜏,𝑙 , where 𝑘 𝜏,𝑙 is the layer budget selected from the support set. The active expert ratio is ¯𝑘/𝐸 and serves as a routed-expert workload proxy rather than a measurement of total model FLOPs; for a fixed top-𝑘 baseline it reduces to 𝑘/𝐸 (e.g., 
+
+6/64 = 0 .094 ). Latency is the measured wall-clock time per query in the common three-GPU harness used for the additional experiments. It characterizes the current implementation rather than an optimized MoE serving stack and is reported separately from active ratio because dispatch, dense layers, device communication, and runtime overhead are not represented by ¯𝑘/𝐸 . Ablations additionally report gate agreement , the Jaccard similarity between the expert set selected with MetaNet’s biased gate and the set selected by the original unbiased gate, averaged over layers and query examples, and low-use selection , the fraction of activated experts whose support-set routing mass lies in the bottom quartile of all experts at the same layer.                                                  
+
+> 7Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs Method Accuracy Act. ratio Mean 𝑘
+> MMLU (meta-test, 12 tasks ×16 queries)
+> Fixed 𝑘 =6 0.474 0.094 6.00 Fixed 𝑘 =12 0.495 0.188 12.00 Fixed 𝑘 =4 0.432 0.063 4.00 Fixed 𝑘 =3 0.417 0.047 3.00 HyperRouter-style 0.406 0.094 6.00 MetaNet (aggressive) 0.438 0.036 2.28
+> MetaNet (conservative) 0.489 0.056 3.61
+> C-Eval-Full (52 subjects, 828 queries; zero-shot transfer)
+> Fixed 𝑘 =6 0.444 0.094 6.00 Fixed 𝑘 =2 0.377 0.031 2.00
+> Fixed 𝑘 =4 0.443 0.063 4.00 MetaNet (aggressive) 0.386 0.045 2.90 MetaNet (conservative) 0.452 0.056 3.61
+
+Table 1: Main results on MMLU and C-Eval-Full. Bold accuracy marks the stronger MetaNet setting at or below the native 𝑘 =6 budget; bold active-ratio and mean-𝑘 values mark the minimum routed-expert workload in each panel. In the MMLU panel, fixed 𝑘 =12 is an upper-budget reference and is excluded from the bold accuracy comparison. The C-Eval fixed-𝑘 =12 result was measured only on C-Eval-10 and is reported separately in Table 7. The conservative setting uses a lower budget penalty weight 𝜆 budget .
+
+# 5. Results 
+
+## 5.1. Main results 
+
+Table 1 summarizes MMLU and C-Eval-Full results. Compression vs. accuracy. MetaNet reaches accuracy 
+
+0.438 at mean top-𝑘 2.28 (ratio 0.036 , 62% fewer activated experts than fixed 𝑘 =6 ); fixed 𝑘 =3 has lower accuracy ( 0.417 ) and a larger active ratio ( 0.047 ), indicating that a uniform budget does not match the layer-wise allocation learned by MetaNet. Effect of support-conditioned routing. The HyperRouter-style baseline, matched to ratio 0.094 , loses 6.8 points relative to fixed 𝑘 =6 (0.406 vs. 0.474 ), showing that support conditioning alone is insufficient here without budget control and a bounded interaction with the frozen gate. Transfer to C-Eval. The MMLU-trained controller transfers to C-Eval-Full without retraining ( 2.90 mean experts, ratio 
+
+0.045 , 52% fewer activated experts than fixed 𝑘 =6 ), outperforming the closest fixed baseline ( 𝑘 =2 , ratio 0.031 ,acc. 0.377 ) at a nearby expert budget. Table 2 reports cross-backbone transfer. Applied to OLMoE-1B-7B [43] without updating weights, MetaNet exceeds fixed 𝑘 =8 on both MMLU ( 0.573 vs. 0.521 ) and C-Eval ( 0.375 vs. 0.363 ) with mean top-𝑘 =7 .52 . Since this budget is close to OLMoE’s native 𝑘 =8 , the improvement may reflect the bounded routing bias rather than expert-count reduction alone (Section 5.4). Table 3 gives the GoogLeNet cross-architecture check: MetaNet reaches 0.66 on syn-pattern-shift vs. 0.58 for static 3/4-branch selection at the same active ratio. The conservative and aggressive settings show how the objective controls the operating point. The aggressive objective favors smaller budgets and indicates that many layers can operate below the native 𝑘 =6 budget, at the cost of some accuracy. The conservative objective lowers the compression pressure and keeps more experts active when the quality guard predicts risk; this reduces the MMLU gap while still lowering the average active-expert count from 6.0 to 3.61 . The two settings use the same controller family under different deployment budgets. 
+
+## 5.2. Expanded baselines and operating points 
+
+Table 7 reports the additional comparisons under a common frozen-inference harness and restores the fixed 
+
+𝑘 =12 reference in the C-Eval-10 panel. The MMLU panel retains the 12 -subject, 192 -query scope, whereas the C-Eval panel uses C-Eval-10 ( 10 subjects, 160 queries). The AdaMoE and Dynamic MoE adaptations remain close to six experts on average. MetaNet provides operating points with lower routed-expert workload; the Probe Pruning adaptation is faster but loses substantial accuracy. Section 4 states the different deployment assumptions. Table 8 gives the denser operating-point sweep. The tags bt0p3 , bt0p4 , bt0p5 , and bt0p8 encode nominal                                    
+
+> 8Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs Backbone Method MMLU C-Eval Mean 𝑘
+> DeepSeek-MoE 16B-Chat (𝐾 nat =6 , 64 exp.) Fixed 𝑘 =6 0.474 0.444 6.00 Fixed 𝑘 =4 0.432 0.443 4.00 Fixed 𝑘 =2 0.365 0.377 2.00 MetaNet 0.438 0.386 2.28 OLMoE-1B-7B (𝐾 nat =8 , 64 exp.) Fixed 𝑘 =8 0.521 0.363 8.00 Fixed 𝑘 =4 0.479 0.350 4.00 Fixed 𝑘 =2 0.417 0.350 2.00 MetaNet 0.573 0.375 7.52
+
+Table 2: Cross-backbone generalization (Exp. II). MetaNet trained on DeepSeek and evaluated zero-shot on OLMoE-1B-7B [43]. Fixed-𝑘 rows report each backbone’s native and lower budgets; the final column reports mean 𝑘 on MMLU.                
+
+> Dataset Method Accuracy Act. ratio
+> syn-pattern
+> Original 1.00 1.00 Static 1.00 0.75 MetaNet 0.98 0.75
+> syn-pattern-shift
+> Original 0.99 1.00 Static 0.58 0.75 MetaNet 0.66 0.75
+
+Table 3: Cross-architecture proof-of-concept results (Experiment III, GoogLeNet backbone).                            
+
+> Variant Acc. Act. ratio Mean 𝑘 Gate agr. Low-use Fixed 𝑘 =6 0.474 0.094 6.00 ––Budget-only 0.375 0.045 2.89 0.038 0.734 Prior-only 0.484 0.188 12.00 0.622 0.318 Full method 0.438 0.036 2.28 0.943 0.004
+
+Table 4: Method-component ablation on MMLU. Dashes denote controller diagnostics omitted for fixed routing. base budget targets 𝑢 0 ∈ { 0.3, 0.4, 0.5, 0.8} for independently trained controllers in the same family; they are not achieved active ratios. The resulting points are not strictly monotonic, so we report the achieved mean top-𝑘 and active ratio for every run rather than describe every candidate as Pareto-optimal. Appendix C.2 reports matched seed-0/seed-1 runs. Conservative MetaNet obtains 0.506 ± 0.022 accuracy, and aggressive MetaNet obtains 0.477 ± 0.022 (mean ± sample standard deviation). 
+
+## 5.3. Ablation studies 
+
+Method components. 
+
+Table 4 ablates the two branches. Removing the prior branch (Budget-only) drops accuracy to 0.375 and gate agreement to 0.038 : the budget branch alone selects expert sets with little overlap with the original gate. Removing the budget branch (Prior-only) uses 𝑘 =12 throughout and recovers the highest accuracy ( 0.484 ), but at the full 𝑘 =12 routing budget. With both branches, gate agreement rises to 0.943 and low-use selection drops to 0.004 , indicating that the prior branch keeps expert selection close to the original gate while the budget branch reduces active experts. 
+
+Layer position. 
+
+Table 5 restricts compression to different layer ranges, holding all other layers at fixed 𝑘 =6 . Compressing only the deep layers (layers 18 –26 ) costs 0.005 accuracy points relative to the uncompressed baseline while reaching ratio 0.069 , the best efficiency–accuracy trade-off in this sweep. Compressing only the shallow layers (layers 
+
+0–8) loses 0.078 accuracy points at ratio 0.087 , indicating that early-layer expert selection is less redundant. Middle, FrontBack-10, and Random-9 configurations all reach 0.427 . Full-layer compression pushes ratio down to 0.036 and achieves 0.438 accuracy, showing that joint optimization across all layers can partially compensate                            
+
+> 9Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs Variant Acc. Act. ratio Mean 𝑘
+> Fixed 𝑘 =6 (all layers) 0.474 0.094 6.00 All layers 0.438 0.036 2.28 Shallow-9 (0–8) 0.396 0.087 5.59 Middle-9 0.427 0.074 4.75 Deep-9 (18–26) 0.469 0.069 4.40
+> FrontBack-10 0.427 0.081 5.16 Random-9 0.427 0.077 4.94
+
+Table 5: Layer-mask ablation on MMLU. 
+
+Figure 3: Support-derived layer–expert routing profile for the selected MMLU checkpoint ( 27 routed layers ×
+
+64 experts; color denotes mean normalized routing mass). for the harder shallow-layer budget. 
+
+## 5.4. Mechanistic analysis 
+
+Figure 3 visualizes the support-derived routing mass over 27 layers and 64 experts. Expert use changes substantially with depth rather than following one layer-invariant profile. The mean cross-layer Jaccard overlap of activated expert sets is 0.10 (max 0.26 ), computed by averaging pairwise Jaccard similarity between layer-level activated expert sets within each task; low overlap indicates that different layers often select different expert subsets. Both latency harnesses show modest reductions. In the original harness, MetaNet runs in 
+
+491 .1 ms per query vs. 508 .5 ms for fixed 𝑘 =6 (3.4% lower). In the separate common three-GPU harness, aggressive MetaNet reduces latency from 542 .94 to 516 .52 ms ( 4.9% ) while reducing mean top-𝑘 from 6.00 to 
+
+2.28 (62 .0% fewer activated experts). Measurements from the two harnesses are not pooled. The gap between the reductions in mean top-𝑘 and latency indicates that the current inference stack does not convert routing sparsity proportionally into end-to-end speedup: MetaNet changes routed-expert execution, whereas dense attention, token dispatch and permutation, synchronization, and inter-device communication remain. This distinction is consistent with system-level MoE work that introduces specialized kernels, adaptive execution, or communication scheduling [30–32]. The support-profiling pass is computed once per episode and reused across all queries. On OLMoE, MetaNet exceeds fixed 𝑘 =8 by 5.2 points ( 0.573 vs. 0.521 ); because its mean top-𝑘 is close to the native 𝑘 =8 , this experiment supports cross-backbone transfer but provides only weak evidence for compression. The bounded bias is a plausible contributor, but the experiment does not isolate that mechanism. The nonuniform support profile helps explain why one fixed top-𝑘 can be inefficient, while the layer-position ablation supplies the direct budget evidence: deep-layer compression is relatively safe, but optimizing all layers jointly gives a more compressed operating point. MetaNet uses the task support set to construct this layer-wise policy rather than relying on one handcrafted layer mask. 
+
+> 10 Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs
+
+# 6. Conclusion 
+
+MetaNet is a support-set controller for frozen MoE inference. It predicts per-layer expert budgets and a bounded routing bias without updating backbone parameters. Across MMLU, C-Eval, a second MoE backbone, and a vision backbone, the results show that expert demand varies by task and depth. Modeling this variation gives better accuracy–expert-activation trade-offs than uniform fixed-𝑘 routing. 
+
+# Limitations 
+
+MetaNet reduces activated-expert workload rather than model storage or total end-to-end computation. The active ratio is a routing-level proxy, not a measurement of total model FLOPs, and the full expert pool remains resident in memory. The method therefore does not provide proportional parameter-storage or peak-memory savings in the current implementation. Wall-clock speedup depends on whether the runtime can exploit the smaller routed-expert set; without specialized dispatch and communication support, latency need not decrease in proportion to mean top-𝑘 . Integrating MetaNet with optimized MoE runtimes is left for future work. The main MMLU result uses 192 held-out queries, and the repeated-sampling check contains only two seeds. We report both runs and their sample standard deviation for the fixed-budget and MetaNet profiles, but two seeds do not support a reliable confidence interval or significance test. C-Eval-Full and C-Eval-10 have different scopes and are reported separately. The adapted baselines share our frozen inference harness but are not exact reproductions of methods that require different training or architectures. In addition, the controller is evaluated mainly on academic multiple-choice benchmarks; open-ended generation, long-context tasks, and safety-sensitive downstream applications may exhibit different routing patterns. Finally, the best layer-wise budget location is treated as a learned outcome rather than a fully characterized principle. 
+
+# Ethical Considerations 
+
+This work studies inference-time efficiency for released MoE models and does not introduce a new pretrained language model, dataset, or user-facing deployment system. Lower activated-expert workload can reduce hardware cost and energy use when paired with suitable sparse dispatch kernels. Potential risks are indirect: cheaper inference may make existing LLM misuse scenarios easier to scale. The method does not add new generative capabilities, collect personal data, or rely on human-subject experiments. We use publicly available research benchmarks and model checkpoints according to their release terms, report aggregate evaluation metrics only, and will release code and controller artifacts for research reproducibility. 
+
+> 11 Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs
+
+# Acknowledgments 
+
+This work was supported by the Major Science and Technology Project of Henan Province, China, entitled 
+
+Research and Industrialization of Key Technologies for Intelligent Computing in Large-Scale Video Scenarios under Digital Social Governance (Grant No. 241100210100). 
+
+# References 
+
+[1] Mingyu Jin, Qinkai Yu, Jingyuan Huang, Qingcheng Zeng, Zhenting Wang, Wenyue Hua, Haiyan Zhao, Kai Mei, Yanda Meng, Kaize Ding, Fan Yang, Mengnan Du, and Yongfeng Zhang. Exploring concept depth: How large language models acquire knowledge and concept at different layers? In Proceedings of the 31st International Conference on Computational Linguistics , pages 558–573. Association for Computational Linguistics, 2025. URL 
+
+https://aclanthology.org/2025.coling-main.37/ . 1 [2] Chongyang Gao, Kezhen Chen, Jinmeng Rao, Ruibo Liu, Baochen Sun, Yawen Zhang, Daiyi Peng, Xiaoyuan Guo, and V. S. Subrahmanian. MoLA: MoE LoRA with layer-wise expert allocation. In Findings of the Association for Computational Linguistics: NAACL 2025 , pages 5112–5127. Association for Computational Linguistics, 2025. doi: 10.18653/v1/2025.findings-naacl.284. URL https://aclanthology.org/2025.findings-naacl.284/ . 1, 3 [3] Peijun Qing, Chongyang Gao, Yefan Zhou, Xingjian Diao, Yaoqing Yang, and Soroush Vosoughi. AlphaLoRA: Assigning LoRA experts based on layer training quality. In Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing , pages 20511–20523. Association for Computational Linguistics, 2024. doi: 10.18653/v1/2024. emnlp-main.1141. URL https://aclanthology.org/2024.emnlp-main.1141/ . 1, 3 [4] Quzhe Huang, Zhenwei An, Nan Zhuang, Mingxu Tao, Chen Zhang, Yang Jin, Kun Xu, Liwei Chen, Songfang Huang, and Yansong Feng. Harder task needs more experts: Dynamic routing in MoE models. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 12883–12895. Association for Computational Linguistics, 2024. doi: 10.18653/v1/2024.acl-long.696. URL https://aclanthology. org/2024.acl-long.696/ . 1, 3 [5] Yongxin Guo, Zhenglin Cheng, Xiaoying Tang, Zhaopeng Tu, and Tao Lin. Dynamic mixture of experts: An auto-tuning approach for efficient transformer models. In The Thirteenth International Conference on Learning Rep-resentations , pages 79643–79672, 2025. URL https://proceedings.iclr.cc/paper_files/paper/2025/hash/ c63ff34c163bca3055d39490f6d1aaf7-Abstract-Conference.html . 1, 3, 7, 17 [6] Zihao Zeng, Yibo Miao, Hongcheng Gao, Hao Zhang, and Zhijie Deng. AdaMoE: Token-adaptive routing with null experts for mixture-of-experts language models. In Findings of the Association for Computational Linguistics: EMNLP 2024 , pages 6223–6235. Association for Computational Linguistics, 2024. doi: 10.18653/v1/2024.findings-emnlp. 361. URL https://aclanthology.org/2024.findings-emnlp.361/ . 1, 3, 7 [7] Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timothée Lacroix, Baptiste Rozière, Naman Goyal, Eric Hambro, Faisal Azhar, Aurélien Rodriguez, Armand Joulin, Edouard Grave, and Guillaume Lample. LLaMA: Open and efficient foundation language models. arXiv preprint arXiv:2302.13971 , 2023. URL 
+
+https://arxiv.org/abs/2302.13971 . 1 [8] OpenAI. GPT-4 technical report. arXiv preprint arXiv:2303.08774 , 2023. URL https://arxiv.org/abs/2303.08774 .[9] Xinyin Ma, Gongfan Fang, and Xinchao Wang. LLM-Pruner: On the structural pruning of large lan-guage models. In Advances in Neural Information Processing Systems , volume 36, pages 21702–21720, 2023. doi: 10.52202/075280-0950. URL https://proceedings.neurips.cc/paper_files/paper/2023/hash/ 44956951349095f74492a5471128a7e0-Abstract-Conference.html . 1 [10] Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. Outra-geously large neural networks: The sparsely-gated mixture-of-experts layer. In International Conference on Learning Representations , 2017. URL https://openreview.net/forum?id=B1ckMDqlg . 1, 2 [11] William Fedus, Barret Zoph, and Noam Shazeer. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23(120):1–39, 2022. URL https://www.jmlr. org/papers/v23/21-0998.html . 1, 2 [12] Damai Dai, Chengqi Deng, Chenggang Zhao, R. X. Xu, Huazuo Gao, Deli Chen, Jiashi Li, Wangding Zeng, Xingkai Yu, Y. Wu, Zhenda Xie, Y. K. Li, Panpan Huang, Fuli Luo, Chong Ruan, Zhifang Sui, and Wenfeng Liang. DeepSeekMoE: Towards ultimate expert specialization in mixture-of-experts language models. In Proceedings of the 62nd Annual 
+
+> 12 Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs
+
+Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 1280–1297. Association for Computational Linguistics, 2024. doi: 10.18653/v1/2024.acl-long.70. URL https://aclanthology.org/2024. acl-long.70/ . 1, 2, 6 [13] Albert Q. Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch, Blanche Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Emma Bou Hanna, Florian Bressand, Gianna Lengyel, Guillaume Bour, Guillaume Lample, Lélio Renard Lavaud, Lucile Saulnier, Marie-Anne Lachaux, Pierre Stock, Sandeep Subramanian, Sophia Yang, Szymon Antoniak, Teven Le Scao, Théophile Gervet, Thibaut Lavril, Thomas Wang, Timothée Lacroix, and William El Sayed. Mixtral of experts. arXiv preprint arXiv:2401.04088 , 2024. URL https://arxiv.org/abs/2401.04088 . 1, 2 [14] Ian Tenney, Dipanjan Das, and Ellie Pavlick. BERT rediscovers the classical NLP pipeline. In Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics , pages 4593–4601. Association for Computational Linguistics, 2019. doi: 10.18653/v1/P19-1452. URL https://aclanthology.org/P19-1452/ . 1 [15] Xin Men, Mingyu Xu, Qingyu Zhang, Qianhao Yuan, Bingning Wang, Hongyu Lin, Yaojie Lu, Xianpei Han, and Weipeng Chen. ShortGPT: Layers in large language models are more redundant than you expect. In Findings of the Association for Computational Linguistics: ACL 2025 , pages 20192–20204. Association for Computational Linguistics, 2025. doi: 10.18653/v1/2025.findings-acl.1035. URL https://aclanthology.org/2025.findings-acl.1035/ . 1 [16] Vedang Lad, Jin Hwa Lee, Wes Gurnee, and Max Tegmark. Remarkable robustness of LLMs: Stages of inference? In Advances in Neural Information Processing Systems , volume 38, pages 130050–130083, 2025. doi: 10.52202/085713-4332. URL https://proceedings.neurips.cc/paper_files/paper/2025/hash/ bcad07d4bfab51243efaa08b8ed475b3-Abstract-Conference.html . 1 [17] Zeliang Zhang, Nikhil Ghosh, Jiani Liu, Bin Yu, and Xiaodong Liu. Does a global perspective help prune sparse MoEs elegantly? arXiv preprint arXiv:2604.06542 , 2026. URL https://arxiv.org/abs/2604.06542 . 1 [18] Juntao Yao, Huiyuan Zheng, Boyang Wang, Xiaohu Yu, Yibo Li, Shaosheng Cao, Donglin Di, Boyan Wang, Haoyun Zheng, Jinze Yu, Anjie Le, and Hongcheng Guo. Domain-specific expert pruning for mixture-of-experts LLMs. In 
+
+Proceedings of the Second AAAI Bridge Program on AI for Medicine and Healthcare , volume 317 of Proceedings of Machine Learning Research , pages 313–321. PMLR, 2026. URL https://proceedings.mlr.press/v317/yao26a.html . 1 [19] Sachin Mehta, Mohammad Hossein Sekhavat, Qingqing Cao, Maxwell Horton, Yanzi Jin, Chenfan Sun, Iman Mirzadeh, Mahyar Najibi, Dmitry Belenko, Peter Zatloukal, and Mohammad Rastegari. OpenELM: An efficient language model family with open training and inference framework. In Proceedings of the 2nd Workshop on Efficient Systems for Foundation Models at ICML 2024 , 2024. URL https://openreview.net/forum?id=XNMbTkxroF . 1 [20] Krishna Teja Chitty-Venkata and Murali Emani. LExI: Layer-adaptive active experts for efficient MoE inference. In AdaptFM: Resource-Adaptive Foundation Model Inference , 2026. URL https://openreview.net/forum?id= oYiauQToKN . 1, 3 [21] Xudong Lu, Qi Liu, Yuhui Xu, Aojun Zhou, Siyuan Huang, Bo Zhang, Junchi Yan, and Hongsheng Li. Not all experts are equal: Efficient expert pruning and skipping for mixture-of-experts large language models. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 6159–6172. Association for Computational Linguistics, 2024. doi: 10.18653/v1/2024.acl-long.334. URL https://aclanthology. org/2024.acl-long.334/ . 1, 2 [22] Cheng Yang, Yang Sui, Jinqi Xiao, Lingyi Huang, Yu Gong, Yuanlin Duan, Wenqi Jia, Miao Yin, Yu Cheng, and Bo Yuan. MoE-I 2: Compressing mixture of experts models through inter-expert pruning and intra-expert low-rank decomposition. In Findings of the Association for Computational Linguistics: EMNLP 2024 , pages 10456– 10466. Association for Computational Linguistics, 2024. doi: 10.18653/v1/2024.findings-emnlp.612. URL https: //aclanthology.org/2024.findings-emnlp.612/ . 1, 2 [23] Ranggi Hwang, Jianyu Wei, Shijie Cao, Changho Hwang, Xiaohu Tang, Ting Cao, and Mao Yang. Pre-gated MoE: An algorithm–system co-design for fast and scalable mixture-of-expert inference. In 2024 ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA) , pages 1018–1031. IEEE, 2024. doi: 10.1109/ISCA59077. 2024.00078. URL https://ieeexplore.ieee.org/document/10609634 . 1, 3 [24] Truong Giang Do, Le Khiem, Quang Pham, TrungTin Nguyen, Thanh-Nam Doan, Binh Nguyen, Chenghao Liu, Savitha Ramasamy, Xiaoli Li, and Steven Hoi. HyperRouter: Towards efficient training and inference of sparse mixture of experts. In Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing ,pages 5754–5765. Association for Computational Linguistics, 2023. doi: 10.18653/v1/2023.emnlp-main.351. URL 
+
+https://aclanthology.org/2023.emnlp-main.351/ . 1, 3, 7 
+
+> 13 Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs
+
+[25] Jaeseong Lee, Seung-won Hwang, Aurick Qiao, Daniel F. Campos, Zhewei Yao, and Yuxiong He. STUN: Structured-then-unstructured pruning for scalable MoE pruning. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 13660–13676. Association for Computational Linguistics, 2025. doi: 10.18653/v1/2025.acl-long.671. URL https://aclanthology.org/2025.acl-long.671/ . 2 [26] I-Chun Chen, Hsu-Shen Liu, Wei-Fang Sun, Chen-Hao Chao, Yen-Chang Hsu, and Chun-Yi Lee. Retraining-free merging of sparse MoE via hierarchical clustering. In Proceedings of the 42nd International Conference on Machine Learning , volume 267 of Proceedings of Machine Learning Research , pages 8594–8620. PMLR, 2025. URL https: //proceedings.mlr.press/v267/chen25aq.html . 2 [27] Mengting Ai, Tianxin Wei, Yifan Chen, Zhichen Zeng, Ritchie Zhao, Girish Varatkar, Bita Darvish Rouhani, Xianfeng Tang, Hanghang Tong, and Jingrui He. ResMoE: Space-efficient compression of mixture of experts LLMs via residual restoration. In Proceedings of the 31st ACM SIGKDD Conference on Knowledge Discovery and Data Mining V.1 , pages 1–12. Association for Computing Machinery, 2025. doi: 10.1145/3690624.3709196. URL https: //doi.org/10.1145/3690624.3709196 . 2 [28] Qi Le, Enmao Diao, Ziyan Wang, Xinran Wang, Jie Ding, Li Yang, and Ali Anwar. Probe pruning: Accelerating LLMs through dynamic pruning via model-probing. In The Thirteenth International Conference on Learning Rep-resentations , pages 72494–72513, 2025. URL https://proceedings.iclr.cc/paper_files/paper/2025/hash/ b44efaa3b7a389ea56c7ee9d6589e800-Abstract-Conference.html . 3, 7 [29] Ruisi Cai, Yeonju Ro, Geon-Woo Kim, Peihao Wang, Babak Ehteshami Bejnordi, Aditya Akella, and Zhangyang Wang. Read-ME: Refactorizing LLMs as router-decoupled mixture of experts with system co-design. In Advances in Neural Information Processing Systems , volume 37, pages 116126–116148, 2024. doi: 10.52202/079017-3687. URL https://proceedings.neurips.cc/paper_files/paper/2024/hash/ d298cf34e4539f9134db7f38b42f69fe-Abstract-Conference.html . 3 [30] Samyam Rajbhandari, Conglong Li, Zhewei Yao, Minjia Zhang, Reza Yazdani Aminabadi, Ammar Ahmad Awan, Jeff Rasley, and Yuxiong He. DeepSpeed-MoE: Advancing mixture-of-experts inference and training to power next-generation AI scale. In Proceedings of the 39th International Conference on Machine Learning , volume 162 of Proceedings of Machine Learning Research , pages 18332–18346. PMLR, 2022. URL https://proceedings.mlr.press/v162/ rajbhandari22a.html . 3, 10 [31] Changho Hwang, Wei Cui, Yifan Xiong, Ziyue Yang, Ze Liu, Han Hu, Zilong Wang, Rafael Salas, Jithin Jose, Prabhat Ram, HoYuen Chau, Peng Cheng, Fan Yang, Mao Yang, and Yongqiang Xiong. Tutel: Adaptive mixture-of-experts at scale. In Proceedings of Machine Learning and Systems , vol-ume 5, pages 269–287, 2023. URL https://proceedings.mlsys.org/paper_files/paper/2023/hash/ 5616d34cf8ff73942cfd5aa922842556-Abstract-mlsys2023.html . 3 [32] Jiamin Li, Yimin Jiang, Yibo Zhu, Cong Wang, and Hong Xu. Accelerating distributed MoE training and inference with Lina. In 2023 USENIX Annual Technical Conference (USENIX ATC 23) , pages 945–959. USENIX Association, 2023. URL https://www.usenix.org/conference/atc23/presentation/li-jiamin . 3, 10 [33] Chelsea Finn, Pieter Abbeel, and Sergey Levine. Model-agnostic meta-learning for fast adaptation of deep networks. In Proceedings of the 34th International Conference on Machine Learning , volume 70 of Proceedings of Machine Learning Research , pages 1126–1135. PMLR, 2017. URL https://proceedings.mlr.press/v70/finn17a.html . 3, 4, 5 [34] Oriol Vinyals, Charles Blundell, Timothy Lillicrap, Koray Kavukcuoglu, and Daan Wierstra. Match-ing networks for one shot learning. In Advances in Neural Information Processing Systems , vol-ume 29, pages 3630–3638, 2016. URL https://proceedings.neurips.cc/paper_files/paper/2016/hash/ 90e1357833654983612fb05e3ec9148c-Abstract.html . 3, 4, 5 [35] David Ha, Andrew Dai, and Quoc V. Le. HyperNetworks. In International Conference on Learning Representations ,2017. URL https://openreview.net/forum?id=rkpACe1lx . 3 [36] Haokun Liu, Derek Tam, Mohammed Muqeeth, Jay Mohta, Tenghao Huang, Mohit Bansal, and Colin A. Raffel. Few-shot parameter-efficient fine-tuning is better and cheaper than in-context learn-ing. In Advances in Neural Information Processing Systems , volume 35, pages 1950–1965, 2022. doi: 10.52202/068431-0142. URL https://proceedings.neurips.cc/paper_files/paper/2022/hash/ 0cde695b83bd186c1fd456302888454c-Abstract-Conference.html . 3 [37] Brian Lester, Rami Al-Rfou, and Noah Constant. The power of scale for parameter-efficient prompt tuning. In 
+
+Proceedings of the 2021 Conference on Empirical Methods in Natural Language Processing , pages 3045–3059. Association for Computational Linguistics, 2021. doi: 10.18653/v1/2021.emnlp-main.243. URL https://aclanthology.org/ 2021.emnlp-main.243/ . 3 
+
+> 14 Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs
+
+[38] Chris J. Maddison, Andriy Mnih, and Yee Whye Teh. The concrete distribution: A continuous relaxation of discrete random variables. In International Conference on Learning Representations , 2017. URL https://openreview.net/ forum?id=S1jE5L5gl . 5 [39] Eric Jang, Shixiang Gu, and Ben Poole. Categorical reparameterization with Gumbel-Softmax. In International Conference on Learning Representations , 2017. URL https://openreview.net/forum?id=rkE3y85ee .[40] Christos Louizos, Max Welling, and Diederik P. Kingma. Learning sparse neural networks through 𝑙 0 regularization. In 
+
+International Conference on Learning Representations , 2018. URL https://openreview.net/forum?id=H1Y8hhg0b .5[41] Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. Measuring massive multitask language understanding. In International Conference on Learning Representations , 2021. URL 
+
+https://openreview.net/forum?id=d7KBjmI3GmQ . 6, 7 [42] Yuzhen Huang, Yuzhuo Bai, Zhihao Zhu, Junlei Zhang, Jinghan Zhang, Tangjun Su, Junteng Liu, Chuancheng Lv, Yikai Zhang, Jiayi Lei, Yao Fu, Maosong Sun, and Junxian He. C-Eval: A multi-level multi-discipline chinese evaluation suite for foundation models. In Advances in Neural Information Processing Systems , volume 36, pages 62991–63010, 2023. doi: 10.52202/075280-2749. URL https://proceedings.neurips.cc/paper_files/paper/2023/hash/ c6ec1844bec96d6d32ae95ae694e23d8-Abstract-Datasets_and_Benchmarks.html . 6, 7 [43] Niklas Muennighoff, Luca Soldaini, Dirk Groeneveld, Kyle Lo, Jacob Morrison, Sewon Min, Weijia Shi, Pete Walsh, Oyvind Tafjord, Nathan Lambert, Yuling Gu, Shane Arora, Akshita Bhagia, Dustin Schwenk, David Wadden, Alexander Wettig, Binyuan Hui, Tim Dettmers, Douwe Kiela, Ali Farhadi, Noah A. Smith, Pang Wei Koh, Amanpreet Singh, and Hannaneh Hajishirzi. OLMoE: Open mixture-of-experts language models. In The Thirteenth International Conference on Learning Representations , pages 62061–62121, 2025. URL https://proceedings.iclr.cc/paper_files/paper/ 2025/hash/9b224ace8963c9385ad5e2b5c9039b97-Abstract-Conference.html . 7, 8, 9 [44] Christian Szegedy, Wei Liu, Yangqing Jia, Pierre Sermanet, Scott Reed, Dragomir Anguelov, Dumitru Erhan, Vincent Vanhoucke, and Andrew Rabinovich. Going deeper with convolutions. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition , pages 1–9, 2015. doi: 10.1109/CVPR.2015.7298594. URL https:// openaccess.thecvf.com/content_cvpr_2015/html/Szegedy_Going_Deeper_With_2015_CVPR_paper.html . 7 
+
+> 15 Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs
+
+# A. Hyperparameters                                  
+
+> Parameter Value
+> Backbone & modules
+> Model DeepSeek-MoE-16B-Chat
+> Frozen backbone, experts, original gate Trainable MetaNet only Routed experts / layer; native top-𝑘 (𝐾 nat )64; 6
+> Retention profile
+> Reference top-𝑘 (𝑅 ); routing strategy 12; retention_mass
+> 𝑘 min ;𝑘 max 1; 12
+> MetaNet training
+> Steps; learning rate 450; 5×10 −4
+> Weak prior
+> 𝛼 ;𝛽 ; max bias 𝜏 𝑏 0.05; 0.90; 0.05
+> Objective
+> Budget loss mode quality_first
+> Rescue 𝑤 rescue ; compute 𝑤 compute 6.0; 0.12 Task scale; layer scale 0.12; 0.18 Overshoot weight; upper tolerance 2.5; 0.05 Base compression target 𝑢 00.2 Safety gate temperature 𝑇 𝑞 0.05 Budget sigmoid temperature 𝑇 bud 0.05 Perf.-preserving margin 𝑚 pp ; Huber 𝛿 𝐻 0.01; 0.10
+
+Table 6: Hyperparameter configuration ( 𝑅 = 12 ) used in the main experiments. 
+
+# B. Additional experimental details 
+
+MMLU subject split. 
+
+The fixed split contains 34 meta-train, 11 meta-validation, and 12 meta-test subjects. The meta-train subjects are: abstract_algebra, anatomy, astronomy, business_ethics, clinical_knowledge, college_biology, college_chemistry, college_computer_science, college_mathematics, college_medicine, computer_security, conceptual_physics, econometrics, elementary_mathematics, formal_logic, high_school_biology, high_school_chemistry, high_school_computer_science, high_school_geography, high_school_macroeconomics, high_school_mathematics, high_school_physics, high_school_statistics, human_aging, international_law, logical_fallacies, machine_learning, management, marketing, medical_genetics, miscellaneous, nutrition, sociology, us_foreign_policy. 
+
+The meta-validation subjects are: college_physics, electrical_engineering, global_facts, high_school_european_history, high_school_government_and_politics, high_school_microeconomics, high_school_psychology, human_sexuality, jurisprudence, moral_disputes, professional_accounting. 
+
+The meta-test subjects are: high_school_us_history, high_school_world_history, philosophy, prehistory, moral_scenarios, world_religions, professional_law, professional_medicine, professional_psychology, public_relations, security_studies, virology. 
+
+The split is fixed across all sampling seeds. 
+
+C-Eval scopes. 
+
+C-Eval-Full uses all 52 subjects and contains 828 labeled queries. Because public test labels are unavailable, all five development examples in each subject are used as support and up to 16 labeled validation examples are used as queries. C-Eval-10 contains: middle_school_mathematics, middle_school_physics, middle_school_politics, modern_chinese_history, plant_protection, professional_tour_guide, sports_science, teacher_qualification, urban_and_rural_planner, veterinary_medicine. 
+
+Every C-Eval-10 subject contributes 16 queries. MetaNet receives no C-Eval parameter updates in either scope. 
+
+> 16 Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs
+
+Adapted-baseline scope. 
+
+All adapted rows preserve the DeepSeek backbone and original router. HyperRouter-style uses a support-conditioned linear head at fixed 𝑘 =6 ; AdaMoE adapted uses the top-score margin; Dynamic MoE adapted uses a variable-𝑘 rule inspired by Guo et al. [5]; and Probe Pruning adapted uses a support-conditioned expert mask. These are inference-compatible adaptations, not exact reproductions of methods whose original versions require different training or pruning procedures; Probe Pruning latency therefore reflects a different execution path. 
+
+# C. Additional experimental results                                                                      
+
+> Method Acc. Act. ratio Mean 𝑘 Lat. (ms)
+> MMLU: 12 subjects, 192 queries
+> Fixed 𝑘 =6 0.474 0.094 6.00 542.94 Fixed 𝑘 =12 0.495 0.188 12.00 557.65 HyperRouter-style *0.406 0.094 6.00 539.32 Probe Pruning adapted 0.188 0.094 6.00 180.45 AdaMoE adapted *0.479 0.090 5.76 577.90 Dynamic MoE adapted *0.453 0.094 6.00 572.18 MetaNet (aggressive) 0.438 0.036 2.28 516.52 MetaNet (conservative) 0.489 0.056 3.61 536.34
+> C-Eval-10: 10 subjects, 160 queries
+> Fixed 𝑘 =6 0.493 0.094 6.00 532.35 Fixed 𝑘 =12 0.581 0.188 12.00 531.36 HyperRouter-style *0.443 0.094 6.00 487.80 Probe Pruning adapted 0.281 0.094 6.00 146.15 AdaMoE adapted *0.513 0.090 5.76 526.39 Dynamic MoE adapted *0.519 0.094 6.00 541.96 MetaNet 0.487 0.065 4.16 474.53
+
+Table 7: Expanded comparison under the common inference harness. “Adapted” denotes an inference-compatible decision rule rather than an exact reproduction. C-Eval-10 is separate from C-Eval-Full in Table 1. * The original method requires training or replacement of routing components. 
+
+## C.1. Operating-point sweep 
+
+Table 8 reports four independently trained controller profiles. The bt0p3 , bt0p4 , bt0p5 , and bt0p8 tags denote nominal base budget targets 𝑢 0 = 0 .3, 0.4, 0.5, and 0.8, respectively, while the other shared settings follow Table 6. These targets configure the training objective; they are not achieved active ratios. We therefore report the realized metrics and do not claim that every row is Pareto-optimal.                                       
+
+> Scope Profile Acc. Act. ratio Mean 𝑘 Lat. (ms) MMLU
+> bt0p3 0.460 0.027 1.75 527.07
+> bt0p4 0.472 0.031 1.98 527.96
+> bt0p5 0.477 0.040 2.55 516.02
+> bt0p8 0.494 0.045 2.88 502.15 C-Eval-10
+> bt0p3 0.375 0.036 2.30 457.05
+> bt0p4 0.487 0.102 6.50 457.41
+> bt0p5 0.434 0.114 7.30 457.64
+> bt0p8 0.490 0.145 9.30 443.84
+
+Table 8: Additional operating-point sweep. Active ratio is the realized mean top-𝑘 divided by 64 . Latency is measured in the same three-GPU harness. 
+
+## C.2. Sensitivity to episode sampling 
+
+The subject split is fixed in this check; the seed changes support/query sampling only. Each seed contains two episodes per subject and 384 query predictions.                                                   
+
+> 17 Meta-Learning Where to Allocate Experts: Task-Conditioned Layer-Wise Compression for MoEs Method Seed Acc. Act. ratio Mean 𝑘 Lat. (ms) Fixed 𝑘 =6 00.484 0.094 6.00 537.83 Fixed 𝑘 =6 10.526 0.094 6.00 538.22 Fixed 𝑘 =12 00.503 0.188 12.00 538.69 Fixed 𝑘 =12 10.531 0.188 12.00 540.36 MetaNet (conservative) 00.490 0.080 5.13 514.58 MetaNet (conservative) 10.521 0.074 4.75 511.83 MetaNet (aggressive) 00.461 0.070 4.47 535.72 MetaNet (aggressive) 10.492 0.060 3.82 496.27
+
+Table 9: Repeated MMLU evaluation. Active ratio is mean top-𝑘 divided by 64 .Across the two seeds, accuracy is 0.505 ± 0.030 for fixed 𝑘 =6 , 0.517 ± 0.020 for fixed 𝑘 =12 , 0.506 ± 0.022 for conservative MetaNet, and 0.477 ± 0.022 for aggressive MetaNet (mean ± sample standard deviation). The corresponding mean top-𝑘 values are 6.00 ± 0.00 , 12 .00 ± 0.00 , 4.94 ± 0.27 , and 4.15 ± 0.46 . With only two seeds, these results measure sampling sensitivity rather than establish statistical significance.

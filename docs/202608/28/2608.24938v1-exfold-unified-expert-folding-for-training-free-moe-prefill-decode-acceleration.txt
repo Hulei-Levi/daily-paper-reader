@@ -1,0 +1,1487 @@
+Title: ExFold: Unified Expert Folding for Training-Free MoE Prefill-Decode Acceleration
+
+URL Source: https://arxiv.org/pdf/2608.24938v1
+
+Published Time: Thu, 27 Aug 2026 00:01:58 GMT
+
+Number of Pages: 23
+
+Markdown Content:
+# ExFold: Unified Expert Folding for Training-Free MoE Prefill-Decode Acceleration 
+
+Juntong Wu 1, 2 ∗, Yifei Liu 1, 3 ∗, Junyi Chen 1, 3 , Siqi Fan 1, 4 , Chaoran Feng 2
+
+Minghao Li 1, Liujie Zhang 1, Weihang Cheng 1†, Li Yuan 2† 
+
+> 1
+
+Xiaohongshu Inc.  
+
+> 2
+
+Shenzhen Graduate School, Peking University  
+
+> 3
+
+Shanghai Jiao Tong University  
+
+> 4
+
+University of Electronic Science and Technology of China 
+
+Correspondence: chenjinzhi@xiaohongshu.com, yuanli-ece@pku.edu.cn 
+
+Abstract 
+
+Mixture-of-Experts (MoE) models scale capacity for strong quality while keeping per-token compute bounded through sparse expert activation. Yet low-latency MoE serving is in-creasingly challenging, because it spans two inference phases with fundamentally different bottlenecks: prefill is dominated by token-wise expert computation, whereas decode is con-strained by memory traffic from the batch-wise activated ex-pert set. However, existing training-free acceleration methods optimize only a single resource proxy—either the experts each token executes or the experts a batch activates—and, either discard the excluded experts’ contribution or leave it only im-plicitly approximated. In this paper, we propose ExFold, a unified training-free expert-folding framework for jointly ac-celerating MoE prefill and decode. ExFold casts both prefill and decode as one budgeted output-approximation problem: execute only a phase-specific constrained expert set while projecting the contribution of budget-excluded experts onto retained experts using calibrated scalar projectors. Motivated by the observation that many expert outputs are directionally aligned but differ in magnitude, ExFold calibrates a pairwise scalar-projector matrix on unlabeled data and uses it at infer-ence time to fold excluded expert contributions into retained experts. Under this view, prefill acceleration becomes token-level Top-K folding, and decode acceleration becomes batch-level expert-pool folding. The two phases differ only in how retained experts are selected, while excluded contributions are recovered by one shared folding mechanism. We implement ExFold as a plug-and-play plugin in vLLM, with a lightweight expert-folding CUDA kernel, delivering up to 1.41 × TTFT and 2.45 × TPOT speedups while retaining about 99% of the original average quality. Code of ExFold can be seen in https://github.com/Time-Rune/ExFold-MoE. 
+
+Introduction 
+
+Mixture-of-Experts (MoE) scales model parameters by or-ders of magnitude while keeping the compute budget bounded by activating only a sparse subset of parameters per token (Fedus, Zoph, and Shazeer 2022; Jiang, Bressand et al. 2024). This property has made MoE the mainstream de-sign of choice for many recent large models seeking higher capability (Jiang, Bressand et al. 2024; Qwen Team 2025; Z.ai 2025) . At the same time, it places stringent demands 
+
+> ∗
+
+Equal contribution. 
+
+> †
+
+Corresponding author. 8 16 24 32 48 64 80 96 112 128 
+
+Activated experts in the batch 
+
+> 0.05 0.1 0.2 0.5 12510
+> MoE latency (ms, log scale)
+> Decode: 3.7x latency from 8 to 64 experts Prefill: only 2.9% variation from 8 to 128 experts
+> Tokens per MoE layer
+> 8128 1024 4096 8192 16384
+
+Figure 1: MoE prefill and decode have different bottlenecks. TTFT speedup (x) quality retained (%) 
+
+(a) Prefill acceleration      
+
+> 1.0 1.1 1.2 1.3 1.4 70 80 90 100 Baseline TopK=6 TopK=4 MC-MoE-K4 MoDES-K4 ExFold-P4
+> TPOT speedup (x) quality retained (%)
+
+(b) Decode acceleration    
+
+> 2.5 1.0 1.5 2.0 025 50 75 100 Baseline SERE-K2 REAP-D32 ExFold-D64 ExFold-D32 Top-K=4 Top-K=6
+
+Figure 2: Quality–speed trade-offs for ExFold prefill and decode acceleration. on low-latency serving (Chen et al. 2026, 2025b; Du et al. 2026) in production: both the prefill latency (time-to-first-token, TTFT) and the decode latency (time-per-output-token, TPOT) matter, and the two exhibit distinct computational characteristics. As shown in Fig. 1, prefill is dominated by token-level expert computation, whereas decode is domi-nated by batch-level expert memory traffic. Existing training-free MoE acceleration methods fall into arXiv:2608.24938v1 [cs.LG] 24 Aug 2026 two families, according to which of these two budgets they optimize. Token-wise expert sparsification reduces the num-ber of experts each token executes, including Dynamic-MoE (Huang et al. 2024), MoDES (Huang et al. 2025), NAEE (Lu et al. 2024), and MC-MoE (Li et al. 2024). 
+
+Expert-set consolidation instead shrinks the active expert set, through static pruning and merging such as REAP (Lasby et al. 2025), HC-SMoE (Chen et al. 2025a), and Sub-MoE (Li et al. 2025), and dynamic batch-level restriction such as Lynx (Gupta et al. 2024) and SERE (Wu et al. 2026). Yet both families frame acceleration as a resource-reduction problem: they answer only which experts to execute, and leave the harder question unaddressed— what becomes of the experts they cut . Their treatment of the excluded contribution is, at best, incidental. Pruning and skipping discard it outright (Lu et al. 2024). Static merging bakes it into a single, permanently compressed model that can no longer adapt to the per-token or per-batch budget it actually faces at inference (Li et al. 2024). Similarity-based re-routing swaps an excluded expert for a nearby one, but never calibrates how far the substitute’s output strays from the contribution it replaces (Wu et al. 2026). Lost, frozen, or only implicitly approximated, the excluded expert mass is never explicitly reconstructed—so the approximation error compounds as the budget is tightest and these methods are pushed hardest. We introduce Expert Folding , which projects every budget-excluded expert contribution onto an executed ex-pert instead of discarding it, and build ExFold around it. This design follows two empirical observations (Figure 3): many source experts have at least one target with directionally aligned outputs, while output magnitudes differ substantially across experts. The former makes expert substitution possi-ble; the latter explains why direct re-routing is insufficient and motivates a directed scalar projector that corrects the source–target scale mismatch. Concretely, a single frozen forward pass over unlabeled text calibrates two per-layer matrices—a scalar-projector matrix and a projection-loss matrix : at inference, the loss matrix routes each excluded expert to its minimum-loss target, and the scalar matrix folds each excluded contribution into that target’s router weight. Since folding is defined at the level of individual excluded experts, it applies unchanged in both phases. Prefill selects 
+
+Kpre dominant experts per token, and decode selects D dom-inant experts per batch—both reuse the same scalar matrix, loss matrix, and folding operator to recover whatever falls outside the retained set. This is the central design of Ex-Fold: the two phases differ only in how retained experts are selected, while excluded contributions are recovered by one shared mechanism. We implement ExFold as a plug-and-play plugin in vLLM, with a lightweight expert-folding CUDA kernel, delivering up to 1.41 × TTFT and 2.45 × TPOT speedups while retain-ing about 99% of the original average quality. Our contribu-tions are as follows: 
+
+• Phase-aware formulation. We characterize the distinct expert budgets of prefill and decode and unify both as a single output-approximation problem under phase-specific selection constraints. 
+
+• Expert Folding. We propose a training-free folding mechanism that projects budget-excluded expert contri-butions onto retained experts via a directional projector and a reconstruction-loss matrix, whose scalar form is absorbed directly into the router weight. 
+
+• Evaluation. We validate near-lossless prefill, decode, and joint acceleration across multiple MoE architectures on real vLLM serving workloads. 
+
+Background and Motivation 
+
+MoE Inference 
+
+Sparse MoE layers. A sparse MoE layer replaces the dense FFN of a Transformer block with N gated-FFN experts and a router (Fedus, Zoph, and Shazeer 2022; Jiang, Bressand et al. 2024). For a hidden state x of dimension d, expert e
+
+computes 
+
+Ee(x) = W (e)down 
+
+
+
+ϕ
+
+
+
+W (e)gate x
+
+
+
+⊙ W (e)up x
+
+
+
+, (1) where ϕ(·) is typically SiLU and ⊙ denotes element-wise multiplication. The router produces logits r(x) = Wr x over 
+
+N routed experts, selects the Top-K set SK (x), and normal-izes the gate weights within it: 
+
+αe(x) = exp( re(x)) 
+
+P  
+
+> j∈SK(x)
+
+exp( rj (x)) , e ∈ SK (x). (2) The MoE output is then 
+
+MoE( x) = X 
+
+> e∈SK(x)
+
+αe(x)Ee(x), (3) possibly with additional shared experts. This computation makes the FFN path sparse per token, but it also introduces dynamic routing, expert dispatch, and expert-output aggre-gation. 
+
+Phase-specific budgets. Although the same MoE layer (Eq. 3) runs in both phases, its bottleneck shifts with the shape of the token batch (Figure 1). Prefill processes a prompt of T tokens at once, and each token independently acti-vates its own support SK (x), so the layer performs O(T K )
+
+expert-FFN evaluations. When T is large, every loaded ex-pert is reused across many tokens, so weight-loading is amor-tized and the phase is compute-bound on token-wise expert FLOPs; reducing K directly cuts this cost. Decode advances each of B batched requests by a single token per step, is-suing only B tokens, yet their supports S 
+
+> x
+
+SK (x) typically cover most of the N experts. The layer must therefore load this batch-wise expert union to serve very few tokens each, yielding low arithmetic intensity and a memory-bound phase whose cost tracks the number of distinct activated experts rather than FLOPs. Efficient serving is thus governed by two different budgets: experts per token in prefill, and experts per batch in decode. 
+
+MoE Acceleration Methods 
+
+Depending on which budget they optimize, existing training-free MoE acceleration methods fall into two families: token-wise expert sparsification and expert-set consolidation. Layer 17  Layer 5                     
+
+> Original Normalized
+> (c) Layer-wise Similarity
+> Average Frobenius Distance
+> 012 24 36 47 0.0 0.2 0.4 0.6 0.8 1.0
+> Raw output Normalized output
+> (a) PCA Visualization
+> Original
+> 064 127 064 127
+> Normalized
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> 0.335 0.529
+> (b) Expert-wise Similarity
+> 0.251 0.471 Expert-output L2 norm
+> 25 50 75 100 125 Max: E33 104.0 Min: E4 34.2
+> 0max/min = 3.04×
+> (d) Expert-wise Variance
+> 032 64 96 127
+> 030 60 90 120
+> Max: E69 125.1
+> Min: E9 38.3 max/min = 3.27×
+
+Figure 3: (a-c) MoE expert outputs can be aligned across experts and layers, and (d) their L2 norms vary substantially . 
+
+Token-wise expert sparsification. This family reduces the experts each token executes. Dynamic-MoE keeps per token the smallest expert set with cumulative router probability above p, so easier tokens use fewer experts (Huang et al. 2024). MoDES skips experts per token by a calibration-estimated importance (Huang et al. 2025), NAEE prunes low-importance executions from router or activation statis-tics (Lu et al. 2024), and MC-MoE merges co-activated experts identified from calibration (Li et al. 2024). These methods relieve the prefill computation budget, but leave the decode-time expert union uncontrolled. 
+
+Expert-set consolidation. This family shrinks the active expert set. Static methods score every expert from calibra-tion signals and permanently reduce the global pool: REAP prunes the least important experts by router weight and ac-tivation norm (Lasby et al. 2025), while HC-SMoE (Chen et al. 2025a), REAM (Jha et al. 2026), and Sub-MoE (Li et al. 2025) merge similar experts. Dynamic methods restrict the expert union within a decoding batch: Lynx re-routes secondary requests to active experts (Gupta et al. 2024), and SERE calibrates pairwise expert similarity offline and sub-stitutes each excluded expert with a similar retained one at decode (Wu et al. 2026). These methods relieve decode-side traffic, but their static transformations do not match the per-token prefill budget. 
+
+Gap. Both families decide which experts to execute, but neither preserves the contribution of the experts they exclude: pruning discards it, static merging bakes it into a permanently compressed model, and similarity re-routing changes an ex-pert’s destination without calibrating how far the substitute strays. As the budget tightens, this error grows within each phase and compounds across prefill and decode, which are approximated against two different targets rather than one shared objective. 
+
+Key Question 
+
+How can we design a unified framework to accelerate the prefill and decode of MoE models with minimal loss? 
+
+Design Insight 
+
+The gap makes recovery look hard from both sides—prefill and decode pull toward conflicting budgets, and faithfully restoring each excluded expert seems to require either recom-putation or blind substitution—yet two observations dissolve both difficulties. 
+
+The excluded contributions share one recovery target. 
+
+Prefill and decode are constrained by different budgets— experts per token versus experts per batch—yet whichever experts a budget excludes, the residual it leaves behind has the identical form αe(x)Ee(x) in the MoE output (Eq. 3). The two phases therefore pose a single problem—reconstruct the excluded contributions from the retained experts—and differ only in the constraint that selects the retained set, not in what must be recovered. 
+
+Expert redundancy is magnitude-separable. Figure 3 shows that the redundancy across experts is concentrated in one cheaply correctable degree of freedom—output scale. In a two-component PCA projection (a), raw expert out-puts form a diffuse cloud, but normalizing each to unit scale collapses them onto a thin shared axis: once scale is removed, experts point in nearly the same direction. Pair-wise similarity confirms this—normalization lifts the aver-age expert-to-expert similarity from 0.335 to 0.529 at layer 5 and from 0.251 to 0.471 at layer 17 (b)—and the same gap persists across all 48 layers (c), so the alignment is struc-tural rather than a few-layer artifact. Yet the discarded scale is large: raw output norms span over 3× within a layer (max / min = 3 .04 × and 3.27 × for the two shown, d). The mismatch between an excluded and a retained expert is therefore almost purely radial—a compatible direction is already available, only its magnitude is off. A single per-pair scalar that rescales the retained expert—not a reconstructed vector or a blind substitution—thus bounds how far the sub-stitute strays and makes faithful recovery cheap in principle. Full-layer visualization is provided in Appendix D. Together these give the motivating question an affirmative answer: one recovery target, reached by a cheap per-pair scalar correction and shared across both phases, with each phase changing only how the retained set is selected. ExFold turns this into a concrete mechanism in the next section. 1. Offline calibration 
+
+Calibration set 𝑪 
+
+token xᵢ 
+
+𝑬 𝒕     
+
+> uᵢ = 𝑬 𝒔 (xᵢ) vᵢ = 𝑬 𝒕 (xᵢ)
+> Closed-form directed scalar ( 𝐬 →𝒕 )
+
+2. Prefill: token-level folding  
+
+> FusedMoE
+> 𝑲′ = 2
+
+3. Decode: batch-level folding  
+
+> (2) Minimum-loss Remap (3) Compacted Expert Union
+
+Frozen MoE Model 
+
+𝑬 𝒔 
+
+> TopK-Router
+
+𝑬 𝒕 𝑬 𝒔                                   
+
+> TopK-Router
+> Router Score 𝒘 𝒊
+> Expert L2 Norm 𝒉 𝒊
+> target source
+> 𝒙 𝟏
+> 𝒙 𝟐
+> 𝒙 𝟑
+> 𝒙 𝟒
+> 𝒙 𝑩
+> …
+> 𝒆 𝟏 𝒆 𝟐 𝒆 𝟑 𝒆 𝟒 𝒆 𝟓 𝒆 𝟔 𝒆 𝟕 𝒆 𝟖 𝒆 𝟏
+> 𝒆 𝟐
+> 𝒆 𝟑
+> 𝒆 𝟒
+> 𝒆 𝟓
+> 𝒆 𝟔
+> 𝒆 𝟕
+> 𝒆 𝟖
+> Scalar Matrix 𝑺 (𝒍)
+> e₁ e₂
+> ⋮
+> eₘ
+> ⋯eₘ e₂ e₁
+> Select Top 𝑲 ∗
+> by 𝒘 𝒊 ∗ 𝒉 𝒊
+> Projection loss 𝑳 (𝒍)
+> e₁ e₂
+> ⋮
+> eₘ
+> ⋯eₘ e₂ e₁
+> (1) Primary Expert Selection
+> Prune 𝑬 𝜶 ; 𝒘 𝜷 = 𝒘 𝜷 + 𝒘 𝜶 ∗ 𝑺 𝜶→𝜷 𝑬 𝟏
+> 𝑬 𝟑
+> 𝑬 𝟐
+> 𝑬 𝟒
+> 𝑬 𝟏
+> 𝑬 𝟑
+> 𝒘 𝟏 /
+> 𝒘 𝟑 /
+> 𝑳 𝒔→𝒕 ∗=
+> 𝒖 𝒊 − 𝑺 𝒔→𝒕 ∗𝒗 𝒊
+> 𝜮 𝒊 𝒘 𝒊 𝒗 𝒊 , 𝒖 𝒊 1𝜮 𝒊 𝒘 𝒊 𝒗 𝒊 𝟐 𝜮 𝒊 𝒘 𝒊 𝒖 𝒊 − 𝒔𝒗 𝒊 𝟐 23
+
+𝑬 𝟏 … … …     
+
+> 𝟑𝟐 𝒔𝒆𝒒𝒔 × 𝟒𝟎𝟗𝟔 𝒕𝒐𝒌𝒆𝒏𝒔
+> 𝒔 𝒔→𝒕 ∗=𝜮 𝒊 𝒘 𝒊 𝒗 𝒊 , 𝒖 𝒊
+> 𝜮 𝒊 𝒘 𝒊 𝒗 𝒊 𝟐
+
++ λ vᵢ uᵢ             
+
+> 𝑺 𝒔→𝒕 ∗
+> Weighted by 𝒘 𝒊 =𝒖 𝒊 𝟐
+> 𝑬 𝜶 → 𝑬 𝜷 ; 𝒘 𝜶 = 𝒘 𝜶 ∗ 𝑺 𝜶→𝜷
+> Compact batch expert matrix in 𝑫 :
+> 𝒆 𝟏 𝒆 𝟐 𝒆 𝟑 𝒆 𝟒
+> 𝑫′ ≤ 𝑫
+> FusedMoE
+> 𝑫′ = 𝟒
+
+Figure 4: Overview of ExFold : training-free projector calibration and unified expert folding. 
+
+Method 
+
+Unified Expert Folding 
+
+ExFold treats MoE acceleration as constrained output ap-proximation rather than phase-specific expert dropping. Let 
+
+xi denote the i-th input token and SK (xi) its original Top-K
+
+support. We extend the router weight by αe(xi) = 0 for e / ∈
+
+SK (xi). Under phase ϕ ∈ { pre , dec }, Bϕ(xi) denotes the retained target set and Oϕ(xi) = SK (xi) \ Bϕ(xi) the omit-ted source experts. We use Es for an omitted source expert and Et for its retained target, with t = πϕ(s, x i) ∈ Bϕ(xi).Let s⋆s→t be a directed scalar projector such that Es(xi) ≈
+
+s⋆s→tEt(xi), and write ts = πϕ(s, x i) for the target assigned to source s. The approximated MoE output separates the retained contributions from the projected contributions of omitted experts: 
+
+byϕ(xi) = X 
+
+> t∈SK(xi)∩Bϕ(xi)
+
+αt(xi)Et(xi)
+
+| {z }
+
+> retained
+
++ X
+
+> s∈Oϕ(xi)
+
+αs(xi)s⋆s→ts Ets (xi)
+
+| {z }
+
+> folded
+
+. (4) Thus, omitted experts are not executed, while their calibrated contributions remain in the MoE output. Routes folded into the same target are coalesced before expert computation, so each retained target is evaluated only once. Unlike static expert merging, folding changes neither expert parameters nor the original router (Li et al. 2024; Chen et al. 2025a). For the tokens Xϕ processed together in one layer, both phases share the objective 
+
+min 
+
+> Bϕ,π ϕ,S
+
+X
+
+> xi∈X ϕ
+
+∥MoE( xi) − byϕ(xi)∥22 s.t. cϕ(Bϕ) ≤ τϕ,
+
+(5) where S = [ s⋆s→t] is the scalar-projector table. The prefill cost counts retained experts per token, whereas the decode cost counts distinct experts retained for a batch. We next calibrate S once and then solve the two budget constraints with the same folding rule. 
+
+Training-Free Projector Calibration 
+
+Figure 4 summarizes the offline calibration. For each ordered, co-routed source-target pair (s, t ), we collect their outputs on 
+
+m calibration tokens: 
+
+ui = Es(xi), vi = Et(xi), i = 1 , . . . , m. (6) Here ui, vi ∈ Rd, and each token is weighted by wi = ∥ui∥2
+
+in the main method. Given a projector family P, calibration solves the weighted output-reconstruction problem 
+
+P⋆s→t = arg min 
+
+> P∈P
+> m
+
+X
+
+> i=1
+
+wi∥ui − viP∥22 + λΩ( P), (7) where Ω regularizes the parameters of the selected projector family. For the scalar parameterization P = sI, the solution is 
+
+s⋆s→t =
+
+Pmi=1 wi⟨vi, ui⟩
+
+Pmi=1 wi∥vi∥22 + λ . (8) Besides the scalar form, we evaluate diagonal and scalar-plus-low-rank projectors in Table 3. The deployed method uses the scalar solution because it can be folded into router weights without an online vector transform. We specify these alternatives, parameterization, and closed-form calibration in Appendix B. Finally, scalar transfer error is stored as 
+
+ℓs→t =
+
+Pmi=1 wi∥ui − s⋆s→tvi∥22
+
+Pmi=1 wi∥ui∥22
+
+. (9) Calibration therefore returns one directed scalar table S(l) =[s⋆s→t] and loss table L(l) = [ ℓs→t] per MoE layer, without labels, gradients, or model updates. Detailed settings, matrix, and collections are provided in Appendices A and D. 
+
+Phase-Specific Selection and Unified Folding 
+
+At inference time, prefill and decode use phase-specific retained-expert selectors but share the same transfer crite-rion and folding operator, parameterized by the calibrated scalar table S(l) and loss table L(l). Below, we omit the layer index, denote the router weight by wi,e = αe(xi), and use 
+
+he for the cached output-norm estimate of expert e.Method Prefill Decode MATH 500 AIME24 IFEval IFBench GPQA LCB (P/A.@8) Eval+ MMLU pro Avg. Baseline 
+
+Original TopK=8 100% 100% 97.40 64.48 83.73 29.31 63.13 68.26 / 56.89 77.44 68.57 69.04 
+
+Prefill-Only Acceleration 
+
+Prefill TopK=6 75% 100% 95.80 64.79 83.18 26.27 64.14 69.46 / 57.34 75.61 66.33 68.20 Prefill TopK=4 50% 100% 96.00 66.56 76.00 29.02 60.61 66.47 / 57.63 73.17 65.28 66.64 MC-MoE-P4 50% 100% 96.00 64.58 79.85 26.48 45.45 68.26 / 57.11 77.44 65.44 65.44 MoDES-P4 50% 100% 95.40 67.08 82.26 30.26 43.06 69.46 / 57.71 78.66 66.53 66.59 
+
+ExFold-P4 50% 100% 97.00 66.46 84.00 29.53 62.63 70.66 / 57.86 76.83 66.94 69.26 Decode-Only Acceleration 
+
+REAP-D64 100% 50.0% 94.80 65.73 71.16 31.29 35.35 67.07 / 52.99 75.00 51.61 61.50 REAP-D32 100% 25.0% 70.00 23.02 33.83 24.74 11.62 8.00 / 2.50 9.76 5.04 22.25 SERE-K4 ( ρ=0 .0) 100% S=4 ∗ 94.00 57.08 83.55 29.16 55.56 65.27 / 50.97 64.63 63.93 64.15 SERE-K2 ( ρ=0 .1) 100% S=2 ∗ 88.20 49.17 73.75 23.20 50.00 16.77 / 5.24 42.07 60.28 50.65 
+
+ExFold-D64 100% 50.0% 97.00 65.31 83.92 28.12 63.64 71.26 / 58.76 74.39 66.36 68.75 
+
+ExFold-D32 100% 25.0% 96.80 67.29 84.47 28.03 63.64 70.06 / 57.19 75.00 66.45 68.97 Prefill & Decode Acceleration 
+
+All TopK=6 75% 75.0% 95.60 65.31 81.52 27.66 59.09 68.86 / 57.11 67.68 64.60 66.29 All TopK=4 50% 50.0% 93.60 56.88 74.31 25.37 56.31 58.08 / 42.07 26.83 57.97 56.17 MC-MoE K=4 50% 50.0% 93.40 57.08 74.86 25.20 39.52 57.49 / 42.51 52.44 58.44 57.30 MoDES K=4 50% 50.0% 96.20 63.75 81.52 28.29 42.93 70.66 / 56.59 76.22 66.16 65.72 
+
+ExFold P4+D64 50% 50.0% 97.00 67.29 82.44 28.60 62.12 71.26 / 57.26 74.39 64.89 68.50 ExFold P4+D32 50% 25.0% 96.40 65.83 79.48 28.14 58.08 69.46 / 56.29 74.39 65.00 67.10 
+
+Table 1: Qwen3-30B-A3B quality. Bold marks the best result per setting. P4 denotes 4 experts per token in prefill, D m means a decode pool with size m, and S∗ means SERE’s dynamic set. P/A.@8 means the score of Pass@8 and Avg@8. 
+
+1. Select phase-specific primary experts. As illustrated in Figure 4, prefill selects Kpre primary experts independently for each token, whereas decode selects a shared set of at most 
+
+D experts for the current batch Xq :
+
+Bpre (xi) = TopK e∈SK (xi)
+
+ wi,e he, K pre 
+
+, (10) 
+
+Bdec (Xq ) = TopK e∈∪ iSK (xi)
+
+ X
+
+> xi∈X q
+
+wi,e he, D 
+
+ . (11) The score wi,e he estimates the magnitude of each routed contribution. Prefill applies it locally to reduce token-level computation; decode aggregates it across tokens to reduce the batch-level expert union. 
+
+2. Choose minimum-loss transfers. For either phase, each omitted source expert Es selects the retained target with the smallest calibrated reconstruction loss: 
+
+πϕ(s) = arg min 
+
+> t∈Bϕ
+
+ℓs→t, (12) where Bϕ is the token-level set Bpre (xi) or the batch-level set Bdec (Xq ). The two phases therefore share the same loss lookup and differ only in the candidate target set. 
+
+3. Fold router metadata. Let Ss→t = s⋆s→t denote the scalar-table lookup. In prefill, omitted routes mapped to the same target are coalesced by updating the target weight: 
+
+ewi,t = wi,t + X 
+
+> s∈SK(xi)\Bpre (xi)
+> πpre (s)= t
+
+wi,s Ss→t, t ∈ Bpre (xi).
+
+(13)                                                               
+
+> Method AIME24 IFEval GPQA Eval+ MMLU pro Avg. Baseline
+> Original Top-8 48.75 83.55 76.26 71.34 58.98 67.78
+> Prefill-Only Acceleration
+> Prefill TopK=6 46.67 83.55 75.25 73.78 56.53 67.16
+> Prefill TopK=4 45.00 80.59 69.19 75.61 40.41 62.16
+> ExFold-P4 48.75 80.78 73.74 67.68 58.57 65.90
+> Decode-Only Acceleration
+> REAP-D64 40.42 69.13 69.70 42.07 55.92 55.45
+> ExFold-D64 47.50 83.73 71.21 73.17 57.96 66.71 Prefill & Decode Acceleration
+> All TopK=6 46.67 80.96 72.22 66.46 41.43 61.55 All TopK=4 36.67 75.60 71.21 70.73 38.78 58.60
+> ExFold P4+D64 44.17 80.22 72.73 67.68 58.98 64.76
+> ExFold P4+D32 50.00 81.70 71.21 67.68 57.14 65.55
+
+Table 2: GLM-4.5-Air quality. Bold for the best per setting. The fused MoE kernel consequently executes only Kpre 
+
+routes. In decode, each omitted route is instead remapped in place: 
+
+(Es, w i,s ) 7 −→  Eπdec (s), w i,s Ss→πdec (s)
+
+ . (14) Retained routes remain unchanged, while every remapped expert belongs to Bdec (Xq ); hence the batch touches at most 
+
+D distinct experts without changing the regular Top-K rout-ing layout. Both transformations modify only router metadata before the existing fused MoE kernel. 
+
+Experiments 
+
+Experimental Setup 
+
+Models. We evaluate Qwen3-30B-A3B as the primary model and GLM-4.5-Air, DeepSeek-V2-Lite, DeepSeek-Original (K=8) MC-MoE (K=4) Decode (K=4) MoDES (K=4) REAP (D=32) ExFold (P4+D32) Decode (K=6) SERE (K=2) 1 2 3 4 5 6 7 8  
+
+> Request rate (QPS) TTFT speedup
+> 1.0 1.1 1.2 1.3 1.4 283ms (1.41x ↑)Baseline: 397ms
+
+(a) Prefill acceleration. Request rate (QPS)        
+
+> 246810 1.00 1.25 1.50 1.75 2.00 2.25 2.50 9.58ms (2.45x ↑)Baseline: 23.5ms (QPS=8)
+
+(b) Decode acceleration 0.8 0.9 1.0 1.1 1.2 
+
+> K=8
+> 1.00x
+> 2.07
+> req/s
+> K=6
+> 1.04x
+> 2.15
+> req/s
+> K=4
+> 1.11x
+> 2.29
+> req/s
+> ExFold
+> 1.20x
+> 2.48
+> req/s
+
+Offline throughput (c) Offline acceleration 
+
+Figure 5: Online TTFT/TPOT speedups and offline serving throughput. 
+
+Method MATH 500 AIME24 IFEval IFBench GPQA Eval+ MMLU pro PPL ↓ ∆Storage ∆Token Cost Kernel 
+
+Original TopK=8 97.40 64.48 83.73 29.31 63.13 77.44 68.57 3.020 0 O(4 LC FFN ) FusedMoE Prefill TopK=4 96.00 66.56 76.00 29.02 60.61 73.17 65.28 3.470 0 0 FusedMoE Global scalar 96.00 65.21 80.96 25.73 59.60 75.00 65.60 3.373 4 B O(4 L) FusedMoE Layer scalar 96.60 67.60 82.44 26.30 61.11 74.39 64.70 3.350 192 B O(4 L) FusedMoE 
+
+Expert scalar 97.00 66.46 84.00 29.53 62.63 76.83 66.94 3.352 6.00 MiB O(4 L) FusedMoE Diagonal 96.60 67.50 83.92 27.63 60.61 72.56 65.87 3.308 316.7 MiB O(4 LH ) Unfused Low-rank R8 95.60 65.00 83.92 27.35 60.10 74.39 67.35 3.341 2.44 GiB O(64 LH ) Unfused Low-rank R16 95.20 62.50 83.55 27.65 61.62 75.61 66.60 3.342 4.87 GiB O(128 LH ) Unfused Table 3: Projector ablation under Top-4 prefill. Overheads use FP32 state and are relative to Prefill TopK=4. Here ∆K = 4 ;R8/R16 incur 2∆ KR = 64 /128 operations per hidden dimension. L, H, C FFN : layers, hidden size, and one expert-call time. V4-Flash, Qwen3.5-35B-A3B (in Appendix C) for cross-architecture generalization. 
+
+Benchmarks. We evaluate mathematical reasoning with MATH500 and AIME24, code generation with Live-CodeBenchV5 and HumanEval+, instruction following with IFEval and IFBench, and knowledge reasoning with GPQA-Diamond and MMLU-Pro (Hendrycks et al. 2021; Jain et al. 2024; Liu et al. 2023; Zhou et al. 2023; Pyatkin et al. 2025; Rein et al. 2023; Wang et al. 2024). For efficiency, we report TTFT under prefill-dominated serving, TPOT un-der generation-dominated serving, and offline throughput in vLLM (Kwon et al. 2023). Metric and workload details are deferred to Appendix A. 
+
+Baselines. For prefill, we compare with direct Top-K re-duction, MC-MoE, and MoDES under matched token-wise expert budgets. For decode, we compare with static expert pruning (REAP) and dynamic expert skipping (SERE). We report prefill-only, decode-only, and joint acceleration to dis-tinguish phase-specific quality loss from errors accumulated across both phases (Huang et al. 2024; Lasby et al. 2025; Wu et al. 2026). 
+
+Hyperparameters. We calibrate ExFold on 32 unlabeled sequences of at most 4096 tokens, use source-output-norm weighting, and set the ridge coefficient to λ = 10 −3. PX de-notes X retained experts per prefill token, while DX denotes at most X active experts per decode batch. We implement ExFold with a custom Triton operator in vLLM and run effi-ciency experiments in BF16 on NVIDIA H800 GPUs (Tillet, Kung, and Cox 2019); complete calibration, hardware, and serving configurations are provided in Appendix A. 
+
+Main Quality Results 
+
+Tables 1 and 2 compare ExFold with phase-specific base-lines under matched execution budgets. We focus on whether quality is preserved, rather than treating a lower expert count alone as an improvement. 
+
+Prefill-only acceleration. At the P4 budget, ExFold pre-serves the original Qwen3 average and outperforms all compute-matched baselines (69.26 versus 66.64 for Direct Top-4). The gains are most pronounced on instruction fol-lowing and code generation, where hard dropping loses im-portant routed contributions. Thus, folding can halve prefill expert computation without the quality loss of direct sparsi-fication. 
+
+Decode-only acceleration. The advantage of ExFold widens as the batch-level expert budget becomes tighter. At D32, it remains within 0.07 points of the original model; SERE-K2 recovers part of the quality lost by static pruning but remains substantially lower. This trend shows that re-covering omitted expert contributions becomes increasingly important when the active expert pool is aggressively con-strained. 
+
+Joint prefill and decode acceleration. Applying Direct Top-4 to both phases compounds approximation error and HumanEval+ | layer 19 | token 1234: 'with' | MoE Visualization             
+
+> Original Top8 Top4 only: err=1.83 REAP (D64): err=0.16
+> E₆ E₅
+> Full y E₄ E₁ E₂ E₃ E₇ E₈
+> ExFold K=4: err=0.07
+> 𝑬 𝟕 "
+> 𝑬 𝟒 "
+> 𝑬 𝟑 ′
+> 𝑬 𝟐 "
+> 𝒚 #𝑬 𝟓 "
+> 𝑬 𝟖 "
+> 𝑬 𝟔 "
+> 𝑬 𝟏 "
+> Full y Full y
+> E₃ E₁ E₂ E₄ 𝒚 #
+> E₃
+> 𝟏 + 𝑺 𝟐,𝟏 𝑬 𝟐 + 𝑺 𝟕,𝟏 𝑬 𝟕 𝑬 𝟏
+> Full y 𝟏 + 𝑺 𝟖,𝟓 𝑬 𝟖 𝑬 𝟓
+> 𝟏 + 𝑺 𝟔,𝟒 𝑬 𝟔 𝑬 𝟒
+> 𝒚 #
+> Full y
+> E₁ E₂ E₄ E₃ E₅
+> 𝒚 #
+> MoDES K=5:err=0.54
+
+Figure 6: Per-token MoE output reconstruction under expert reduction. Error denotes ∥by − y∥2.reduces the average to 56.17, while ExFold P4+D64 retains 68.50. ExFold also remains stronger than MoDES when both phases are accelerated. The shared projector therefore avoids stacking two independent dropping errors and supports both phase-specific budgets under one approximation objective. 
+
+Cross-architecture generalization. On GLM-4.5-Air, ExFold retains 97.2% and 98.4% of the original average quality under prefill-only P4 and decode-only D64, respec-tively. When both phases are compressed, P4+D32 still re-tains 96.7%. These results confirm that ExFold preserves quality beyond the primary model. Additional DeepSeek-V2-Lite and Qwen3.5 results can be seen in Appendix C.                               
+
+> Calibration MATH 500 GPQA LCB (P/A.@8) Eval+ Avg.
+> GPQA 96.40 65.15 70.06 / 56.96 71.95 72.10 MATH 96.40 60.10 69.46 / 56.36 73.17 71.10 CODE 96.60 59.09 70.06 / 56.74 75.61 71.62 PRETRAIN 97.00 63.13 69.46 / 57.34 76.83 72.75 MIXED 97.00 62.63 70.66 / 57.86 76.83 73.00
+
+Table 4: Calibration-corpus ablation for ExFold-P4.                                                
+
+> Selection criterion MATH 500 IFEval GPQA Eval+ Avg. Prefill (ExFold-P4)
+> rank by Si97.00 82.62 64.65 73.17 79.36 rank by Hi97.00 67.47 57.58 75.61 74.42
+> rank by Si×Hi(Ours) 97.00 84.00 62.63 76.83 80.11 Decode (ExFold-D64)
+> rank by Si97.00 83.92 60.10 73.17 78.55 rank by Hi96.40 84.10 63.13 71.34 78.74
+> rank by Si×Hi(Ours) 97.00 83.92 63.64 74.39 79.74
+
+Table 5: Retained-expert selection on Qwen3-30B-A3B. 
+
+Efficiency Evaluation 
+
+Online prefill latency. Figure 5(a) shows that reducing token-level expert computation translates directly into lower TTFT. ExFold reaches a 1.41 × speedup at 8 QPS and closely tracks compute-matched Top-4 methods, indicating little overhead from scalar folding. Unlike direct reduction, it realizes this compute benefit while preserving model quality. 
+
+Online decode latency. Figure 5(b) reveals a different scal-ing trend in decode: token-wise Top-4 and Top-6 lose their benefit as QPS increases because the batch activates a broader expert union. By bounding this union, ExFold reaches a 
+
+2.45 × TPOT speedup at 8 QPS and sustains about 2.4×
+
+through 12 QPS. This confirms that reducing batch-level weight traffic, rather than token-wise FLOPs alone, is essen-tial for efficient decode. 
+
+Offline serving throughput. Figure 5(c) shows that the online gains transfer to throughput-oriented serving: ExFold improves offline throughput by 1.20 × and exceeds Direct Top-4. This result also confirms that the Triton folding oper-ator adds little runtime overhead under large batches. 
+
+Scaling to DeepSeek-V4-Flash 
+
+DeepSeek-V4-Flash is a 284B-parameter MoE with 256 routed experts and Top-6 routing (DeepSeek-AI 2026). It provides a substantially larger expert space than the models above and therefore tests whether folding remains effective when both the number of candidate experts and the batch-level expert union grow. We use P3 to retain three routed experts per prefill token and D128/D64 to cap the decode expert pool at 50%/25% of the routed experts. All quality rows use the same full-suite evaluator protocol; Appendix reports the task sizes and sampling rules. Table 6 shows that direct all-stage K=3 reduction retains only 88.17% of the original average, with the largest losses on AIME25/26. ExFold P3+D64 instead retains 97.68%, a 9.51-point retention gain under the same three-expert prefill budget, while P3+D128 retains 99.32%. Decode-only D64 and D128 remain within 0.2 average points of Original. These results support a quality frontier rather than one universal budget: D128 is the near-lossless setting, whereas D64 trades 1.64 additional quality-retention points for a tighter expert pool. Figure 7 follows the same online/offline structure as Fig-ure 5. P3 improves mean 8K TTFT across QPS 1–8, reaching 1.32 × at QPS 8. In decode, D64 stabilizes near 1.15 × TPOT speedup once the batch is saturated, while D128 remains the quality-first operating point. Under the saturated throughput workload, D64 raises output throughput from 5.22k to 6.72k tokens/s (1.29 ×), ahead of Direct K=3, REAP-D128, and D128. The code release exposes both budgets as serving ar-guments and includes the calibrated matrix used by these runs. Method Prefill Decode MATH 500 AIME25 AIME26 IFEval IFBench GPQA LCB Eval+ MMLU pro Avg. Baseline 
+
+Original TopK=6 100% 100% 93.40 70.42 72.50 82.44 36.23 73.23 54.90 89.25 81.76 72.68 
+
+Prefill-Only Acceleration 
+
+Prefill TopK=3 50% 100% 92.00 69.17 69.17 80.22 35.67 69.70 54.12 85.59 79.20 70.54 
+
+ExFold-P3 50% 100% 93.20 65.83 70.42 82.99 35.28 72.22 55.67 87.65 80.48 71.53 Decode-Only Acceleration 
+
+Decode TopK=3 100% 50% 88.80 47.08 49.17 79.48 32.01 73.23 49.74 82.09 80.68 64.70 REAP-D128 100% 50% 93.20 70.00 74.58 71.16 34.30 72.73 52.58 89.86 80.73 71.02 
+
+ExFold-D128 100% 50% 94.20 70.83 72.50 81.15 35.67 75.76 54.12 88.41 81.82 72.72 ExFold-D64 100% 25% 94.80 70.83 71.25 81.33 37.52 72.73 53.87 88.72 81.79 72.54 
+
+Prefill & Decode Acceleration 
+
+All TopK=3 50% 50% 87.40 52.08 51.25 75.97 28.10 68.18 47.94 85.98 79.85 64.08 
+
+ExFold P3+D128 50% 50% 92.80 72.50 72.50 81.52 35.45 68.69 55.41 90.17 80.61 72.18 ExFold P3+D64 50% 25% 92.60 66.67 70.83 80.96 31.56 74.75 54.38 86.97 80.21 70.99 
+
+Table 6: DeepSeek-V4-Flash quality. Bold marks the best result per setting. P3 denotes 3 experts per token in prefill, and D m
+
+means a decode pool with size m.1 2 4 6 8
+
+> Request rate (QPS)
+> 1.0 1.2 1.4 1.6 1.8
+> TTFT speedup
+> 1.32x
+
+(a) 8K prefill     
+
+> 2816 24 32
+> Request rate (QPS)
+> 1.00 1.05 1.10 1.15
+> TPOT speedup  1.15x
+
+(b) 256-token decode   
+
+> Orig. K=3 REAP D128 D64 0.9 1.0 1.1 1.2 1.3
+> Speedup
+> 1.00x
+> 5.22
+> 1.22x
+> 6.37
+> 1.20x
+> 6.27
+> 1.16x
+> 6.04
+> 1.29x
+> 6.72
+> Output tok/s
+
+(c) Offline throughput    
+
+> Original Top-6 ExFold P3 ExFold-D128 ExFold-D64
+
+Figure 7: DeepSeek-V4-Flash speedups on H800: (a) 8K TTFT, (b) 256-token TPOT, and (c) offline throughput. 
+
+Ablations and Analysis 
+
+Which projector parameterization is practical? Table 3 compares projector families under the same Top-4 budget. Pairwise scalars outperform global and layer-wise scaling, while diagonal and low-rank projectors require substantially more state and unfused vector transforms. Although the diag-onal projector lowers perplexity, the pairwise scalar performs better on six of seven downstream metrics; low-rank variants further add 2.44–4.87 GiB of state without consistent gains. Pairwise scalars give the best trade-off. In appendix B, we detail each implementation. 
+
+Does ExFold require task-specific calibration? Table 4 varies only the calibration domain. Mixed calibration achieves the best average (73.00), but all domains remain within 1.9 points and task-matched data is not consistently optimal. This stability suggests that calibration captures expert geometry rather than benchmark-specific behavior. No task-specific calibration is required. 
+
+How should ExFold select retained experts? Table 5 compares router score Si, output magnitude Hi, and their product under fixed budgets. Router score omits output scale, while magnitude alone omits routing relevance; their prod-uct approximates contribution magnitude and yields the best average in both phases. Rank retained experts by Si × Hi.
+
+Why does expert folding preserve quality? Figure 6 vi-sualizes the routed expert contributions and resulting MoE output for a representative token. Direct Top-4 and MoDES omit routed vectors and produce large reconstruction errors of 1.83 and 0.54, respectively. REAP reduces the global ex-pert pool and lowers the error to 0.16 by selecting Top-8 within the retained pool, but it still executes eight experts per token and therefore does not reduce expert FLOPs (Huang et al. 2025; Lasby et al. 2025). ExFold instead transfers omitted contributions to directionally aligned retained ex-perts and folds their calibrated scales into the gate weights, achieving the smallest error of 0.07 with only four executed experts. Folding recovers omitted contributions. Additional token-level cases are shown in Appendix E. 
+
+Conclusion 
+
+We presented ExFold, a training-free framework for jointly accelerating MoE prefill and decode. It combines phase-specific retained-set selectors with a shared directed projec-tor that folds excluded contributions into router metadata. Across MoE architectures, ExFold improves TTFT, TPOT, and serving throughput while preserving more quality than expert dropping. Because folding changes only router meta-data, it remains complementary to kernel, scheduling, and parallelism optimizations. These results establish output re-covery as a practical basis for unified MoE inference accel-eration. References 
+
+Cao, M.; Chen, K.; Duan, H.; Fang, Y.; Fei, Z.; Gao, T.; Ge Jiaye; Li, M.; Liu, H.; Liu, J.; Liu, Y.; et al. 2026. OpenCom-pass: A Universal Evaluation Platform for Large Language Models. arXiv preprint arXiv:2605.19276 .Chen, I.-C.; Liu, H.-S.; Sun, W.-F.; Chao, C.-H.; Hsu, Y.-C.; and Lee, C.-Y. 2025a. Retraining-Free Merging of Sparse Mixture-of-Experts via Hierarchical Clustering. In Interna-tional Conference on Machine Learning .Chen, J.; Bai, S.; Wang, Z.; Wu, S.; Du, C.; Yang, H.; Gong, R.; Liu, S.; Wu, F.; and Chen, G. 2025b. Pre 3: Enabling deterministic pushdown automata for faster structured LLM generation. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , 11253–11267. Chen, J.; Du, C.; Liu, R.; Yao, S.; Yan, D.; Liao, J.; Liu, S.; Wu, F.; and Chen, G. 2026. TokenFlow: Responsive LLM Text Streaming Serving under Request Burst via Preemptive Scheduling. In Proceedings of the 21st European Conference on Computer Systems , 497–513. DeepSeek-AI. 2024. DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model. arXiv preprint arXiv:2405.04434 .DeepSeek-AI. 2026. DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence. arXiv:2606.19348. Du, C.; Chen, J.; Tang, H.; Liu, K.; Lan, T.; Qu, L.; Niu, C.; Liu, S.; Chen, G.; and Wu, F. 2026. C 2KV: Compressed and Composable KV Cache Reuse for Efficient LLM Inference. 
+
+arXiv preprint arXiv:2607.17715 .Fedus, W.; Zoph, B.; and Shazeer, N. 2022. Switch Trans-formers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity. Journal of Machine Learning Re-search .Gupta, V.; Ju, J. H.; Sinha, K.; Gavrilovska, A.; and Iyer, A. P. 2024. Lynx: Enabling efficient moe inference through dynamic batch-aware expert selection. arXiv preprint arXiv:2411.08982 .Hendrycks, D.; Burns, C.; Kadavath, S.; Arora, A.; Basart, S.; Tang, E.; Song, D.; and Steinhardt, J. 2021. Measuring Mathematical Problem Solving with the MATH Dataset. In 
+
+Advances in Neural Information Processing Systems .Huang, Q.; An, Z.; Zhuang, N.; Tao, M.; Zhang, C.; Jin, Y.; Xu, K.; Xu, K.; Chen, L.; Huang, S.; and Feng, Y. 2024. Harder Tasks Need More Experts: Dynamic Routing in MoE Models. arXiv preprint arXiv:2403.07652 .Huang, Y.; Wang, Z.; Yuan, Z.; Ding, Y.; Gong, R.; Guo, J.; Liu, X.; and Zhang, J. 2025. MoDES: Accelerating Mixture-of-Experts Multimodal Large Language Models via Dy-namic Expert Skipping. arXiv preprint arXiv:2511.15690 .Hugging Face H4 Team. 2024. MATH-500. https: //huggingface.co/datasets/HuggingFaceH4/MATH-500. Benchmark dataset. Jain, N.; Han, K.; Gu, A.; Li, W.-D.; Yan, F.; Zhang, T.; Wang, S.; Solar-Lezama, A.; Sen, K.; and Stoica, I. 2024. LiveCodeBench: Holistic and Contamination Free Evalua-tion of Large Language Models for Code. arXiv preprint arXiv:2403.07974 .Jha, S.; Hashemzadeh, M.; Saheb Pasand, A.; Parviz, A.; Lee, M.-J.; and Knyazev, B. 2026. REAM: Merging Improves Pruning of Experts in LLMs. arXiv preprint arXiv:2604.04356 .Jiang, A. Q.; Bressand, F.; et al. 2024. Mixtral of experts. 
+
+arXiv preprint arXiv:2401.04088 .Kwon, W.; Li, Z.; Zhuang, S.; Sheng, Y.; Zheng, L.; Yu, C. H.; Gonzalez, J. E.; Zhang, H.; and Stoica, I. 2023. Effi-cient Memory Management for Large Language Model Serv-ing with PagedAttention. In ACM Symposium on Operating Systems Principles .Lasby, M.; Lazarevich, I.; Sinnadurai, N.; Lie, S.; Ioannou, Y.; and Thangarasa, V. 2025. REAP the Experts: Why Prun-ing Prevails for One-Shot MoE Compression. arXiv preprint arXiv:2510.13999 .Li, L.; Zhu, Q.; Wang, J.; Li, W.; Gu, H.; Han, S.; and Guo, Y. 2025. Sub-MoE: Efficient Mixture-of-Expert LLMs Compression via Subspace Expert Merging. arXiv preprint arXiv:2506.23266 .Li, P.; Zhang, Z.; Yadav, P.; Sung, Y.-L.; Cheng, Y.; Bansal, M.; and Chen, T. 2024. Merge, Then Compress: Demystify Efficient SMoE with Hints from Its Routing Policy. In The Twelfth International Conference on Learning Representa-tions .Liu, J.; Xia, C. S.; Wang, Y.; and Zhang, L. 2023. Is Your Code Generated by ChatGPT Really Correct? Rigorous Eval-uation of Large Language Models for Code Generation. In 
+
+Advances in Neural Information Processing Systems .Lu, X.; Liu, Q.; Xu, Y.; Zhou, A.; Huang, S.; Zhang, B.; Yan, J.; and Li, H. 2024. Not All Experts are Equal: Effi-cient Expert Pruning and Skipping for Mixture-of-Experts Large Language Models. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics .Math-AI Team. 2024. American Invitational Mathematics Examination (AIME) 2024. https://huggingface.co/datasets/ math-ai/aime24. Benchmark dataset. NVIDIA. 2025. NVIDIA Nemotron Post-Training Dataset v1. https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v1. Dataset card. Pyatkin, V.; Malik, S.; Graf, V.; Ivison, H.; Huang, S.; Dasigi, P.; Lambert, N.; and Hajishirzi, H. 2025. Gen-eralizing Verifiable Instruction Following. arXiv preprint arXiv:2507.02833 .Qwen Team. 2025. Qwen3-30B-A3B. https://huggingface. co/Qwen/Qwen3-30B-A3B. Model card. Qwen Team. 2026. Qwen3.5-35B-A3B. https://huggingface. co/Qwen/Qwen3.5-35B-A3B. Model card. Rein, D.; Hou, B. L.; Stickland, A. C.; Petty, J.; Pang, R. Y.; Dirani, J.; Michael, J.; and Bowman, S. R. 2023. GPQA: A Graduate-Level Google-Proof Q&A Benchmark. arXiv preprint arXiv:2311.12022 .Tillet, P.; Kung, H. T.; and Cox, D. 2019. Triton: An Inter-mediate Language and Compiler for Tiled Neural Network Computations. In Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Program-ming Languages .Wang, Y.; Ma, X.; Zhang, G.; Ni, Y.; Chandra, A.; Guo, S.; Ren, W.; Arulraj, A.; He, X.; Jiang, Z.; Li, T.; Ku, M.; Wang, K.; Zhuang, A.; Fan, R.; Yue, X.; and Chen, W. 2024. MMLU-Pro: A More Robust and Challenging Multi-Task Language Understanding Benchmark. arXiv preprint arXiv:2406.01574 .Wu, J.; Cheng, J.; Lv, F.; Ou, D.; and Yuan, L. 2026. SERE: Similarity-based Expert Re-routing for Efficient Batch De-coding in MoE Models. In The Fourteenth International Conference on Learning Representations .Z.ai. 2025. GLM-4.5-Air. https://huggingface.co/zai-org/ GLM-4.5-Air. Model card. Zhou, J.; Lu, T.; Mishra, S.; Brahma, S.; Basu, S.; Luan, Y.; Zhou, D.; and Hou, L. 2023. Instruction-Following Evaluation for Large Language Models. arXiv preprint arXiv:2311.07911 .Reproducibility Details 
+
+Model architectures. Table 7 summarizes the evaluated released checkpoints. We report the architecture exposed by each checkpoint configuration; shared experts are executed in addition to the routed Top-K experts. “Expert FFN” is the hidden width of each expert feed-forward network. 
+
+Benchmarks and metrics. Table 8 lists the evaluated benchmarks. “Cases” is the number of problems in the eval-uated benchmark snapshot, and “Samples” is the number of generations per problem. The GLM-4.5-Air MMLU-Pro comparison uses a fixed 490-case subset containing the first 35 examples from each of 14 categories. For IFBench, we evaluate the 294-case OpenCompass snapshot and average prompt- and instruction-level accuracy under strict and loose checking. For LiveCodeBench v5, we use the same fixed 167-problem subset for every method and generate eight solutions per problem. The Qwen3-30B-A3B evaluation uses 32 sam-ples for each AIME 2024 problem, whereas the GLM-4.5-Air evaluation uses eight. LiveCodeBench reports pass@8 and mean correctness over the eight samples; pass@8 is its primary score in aggregate comparisons. 
+
+Calibration protocol. For the primary Qwen3 configura-tion, we calibrate once on 32 unlabeled sequences of at most 4,096 tokens and keep the resulting projector fixed across downstream tasks. DeepSeek-V2-Lite uses the same calibra-tion size and token limit; Qwen3.5 aggregates four disjoint eight-sequence calibration shards. GLM-4.5-Air uses a sep-arate 16-sequence capture with at most 1,024 tokens per sequence. The 32-sequence pool is drawn from the chat, code, and science, technology, engineering, and mathemat-ics (STEM) portions of the public NVIDIA Nemotron Post-Training Dataset (NVIDIA 2025). All calibrations accumu-late only forward activations, without task labels, gradients, or evaluator feedback. For each ordered co-routed expert pair, we accumulate the sufficient statistics in Eq. 15 with source-output-norm weighting and λ = 10 −3. Scalar coefficients are clipped to [−4, 4] , self-pair coefficients are fixed to one, and unobserved pairs receive loss 10 30 so that an observed target is preferred whenever one exists. 
+
+Quality evaluation. Generation is orchestrated by an OpenCompass-compatible pipeline (Cao et al. 2026). IFE-val disables thinking and uses prompt-level strict scoring, while IFBench uses the four-way composite defined above. LiveCodeBench and HumanEval+ are scored by executing generated programs against their benchmark test suites with the LiveCodeBench and EvalPlus evaluators (Jain et al. 2024; Liu et al. 2023). Within each model–benchmark comparison, prompts, decoding parameters, sample counts, and scoring code are fixed. Repeated generations are scored individu-ally before aggregation. All reported scores are percentages, and “Avg.” is the arithmetic mean of the displayed primary metrics. 
+
+System and serving configuration. Efficiency experi-ments run on eight-GPU NVIDIA H800 80GB servers. The primary H800 runtime uses Ubuntu 24.04.2 LTS, NVIDIA driver 550.163.01, vLLM 0.10.2 (Kwon et al. 2023), PyTorch 2.8.0, CUDA 12.8, and Triton 3.4.0 (Tillet, Kung, and Cox 2019). Prefill serving uses tensor parallelism four, sweeps 1–8 queries per second (QPS) with 8,192-token prompts and one generated token, and reports mean time to first to-ken (TTFT). The matched decode comparison uses vLLM 0.11.0 and tensor parallelism one; it sweeps 2–12 QPS over 512 requests with one input token and 256 generated tokens and reports mean time per output token (TPOT). Offline serving uses tensor parallelism eight and reports completed-request throughput for 512 requests with 2,048-token inputs and 512 generated tokens. ExFold speedups are normalized to an Original run with the same hardware, engine configura-tion, requests, and decoding parameters. DeepSeek-V2-Lite and Qwen3.5 quality generation use bfloat16 (BF16) and tensor parallelism one on H800 or H20 GPUs; GLM-4.5-Air uses tensor parallelism four on H800 GPUs. 
+
+Projector Parameterizations and Implementation 
+
+Let L, E, and H denote the number of MoE layers, routed experts per layer, and hidden dimensions. For a calibration token xi that co-routes a source expert Es and target expert 
+
+Et, we write ui = Es(xi) and vi = Et(xi); l, s, and t index the layer, source expert, and target expert. For the projector-family ablation, every family uses the same fixed calibration sequences, source-output-norm weighting, and prefill Top-4 budget. Each sharing pattern computes its own reconstruction losses for target assignment. The diagonal and low-rank al-ternatives execute through a custom unfused reconstruction path. Table 9 counts transformation parameters and omits the per-pair assignment-loss table. Let P ≤ LE 2 denote the number of materialized directed source–target pairs. 
+
+Scalar sharing patterns. Let G denote a group of calibra-tion tuples (l, s, t, i ). A scalar shared by that group is fitted by 
+
+s⋆ 
+
+> G
+
+=
+
+P 
+
+> (l,s,t,i )∈G
+
+wi u⊤ 
+
+> i
+
+vi
+
+P 
+
+> (l,s,t,i )∈G
+
+wi ∥vi∥22 + λ . (15) Here wi = ∥ui∥2 is the source-output-norm weight used by the calibration implementation. The global variant uses one group for the entire model, the layer-wise variant uses one group per MoE layer, and the pairwise variant uses one group for each directed source–target pair in each layer. Only the pairwise form preserves directed expert-level differences while remaining a scalar metadata update. For target assign-ment, we use the normalized reconstruction loss 
+
+ℓs→t =
+
+P 
+
+> i
+
+wi∥ui − s⋆s→tvi∥22
+
+P 
+
+> i
+
+wi∥ui∥22 + ϵ , (16) where ϵ > 0 prevents division by zero. Lower loss indicates that Et better reconstructs the contribution of Es.
+
+Diagonal projector. The diagonal alternative fits one co-efficient per hidden dimension. Its element-wise weighted ridge solution is 
+
+d⋆s→t =
+
+P 
+
+> i
+
+wi(vi ⊙ ui)
+
+P 
+
+> i
+
+wi(vi ⊙ vi) + λ1 , (17) Model Layers MoE Layers Routed Experts Shared Experts Top-K Hidden Size Expert FFN 
+
+Qwen3-30B-A3B (Qwen Team 2025) 48 48 128 0 8 2048 768 GLM-4.5-Air (Z.ai 2025) 46 45 128 1 8 4096 1408 DeepSeek-V2-Lite-Chat (DeepSeek-AI 2024) 27 26 64 2 6 2048 1408 Qwen3.5-35B-A3B (Qwen Team 2026) 40 40 256 1 8 2048 512 
+
+Table 7: Architectures of the evaluated MoE checkpoints.                                     
+
+> Benchmark Domain Cases Samples Metric
+> MATH500 (Hendrycks et al. 2021; Hugging Face H4 Team 2024) Mathematics 500 1Symbolic-equivalence accuracy AIME24 (Math-AI Team 2024) Competition mathematics 30 32 (Qwen3); 8 (GLM) Mean symbolic-equivalence accuracy IFEval (Zhou et al. 2023) Instruction following 541 1Prompt-level strict accuracy IFBench (Pyatkin et al. 2025) Instruction following 294 1OpenCompass four-way mean GPQA-Diamond (Rein et al. 2023) Graduate-level reasoning 198 1Accuracy LiveCodeBench v5 (Jain et al. 2024) Code generation 167 8Pass@8 / mean@8 HumanEval+ (Liu et al. 2023) Code generation 164 1Pass@1 MMLU-Pro (Wang et al. 2024) Knowledge reasoning 12,032 (490 for GLM) 1Category-macro accuracy
+
+Table 8: Benchmarks, evaluation sizes, and reported metrics. where the division is element-wise. The resulting 
+
+Diag( d⋆s→t) cannot be absorbed into a router weight and must act on the hidden vector online. 
+
+Scalar-plus-low-rank projector. Let U, V ∈ Rm×H
+
+stack source and target outputs, and W =Diag( w1, . . . , w m). We fit a layer-wise orthonormal basis Q(l) ∈ RH×R to centered scalar-residual samples by randomized truncated singular value decomposition (SVD) and parameterize 
+
+Ms→t = s⋆s→tI + Q(l)Cs→t, Cs→t ∈ RR×H . (18) Defining Z = W1/2VQ (l), Rs→t = W1/2(U − s⋆s→tV),and G = Z⊤Z, weighted ridge regression gives 
+
+C⋆s→t = ( G + λI)−1Z⊤Rs→t. (19) The evaluated artifact collects a rank-32 basis and retains at most 1,024 directed pairs per layer ranked by accumu-lated source-weighted source energy. We evaluate its first 
+
+R ∈ { 8, 16 } directions; pairs outside the materialized sup-port use only the scalar term. The basis and pair-specific correction require an online vector transform and substantial state, preventing reuse of the standard fused MoE path. 
+
+Projector Storage Online Kernel 
+
+Global scalar 1 Scalar Fused Layer scalar L Scalar Fused Pair scalar P Scalar Fused Pair diagonal P H Element-wise Unfused Scalar + low-rank P + LHR + P RH Rank-R Unfused 
+
+Table 9: Implementation differences among the evaluated projector families. 
+
+Phase-Specific Routing and Folding 
+
+All retained sets and projector lookups below are defined separately for each MoE layer; we omit the layer index for clarity. Let the original routes for token xi be SK (xi) = (ei, 1, . . . , e i,K ), ordered by router score, and let wi,e be the routed weight of expert e and he its cached output-norm estimate; wi,e = 0 when e / ∈ SK (xi). Let Kpre be the per-token prefill budget, let Xq be the tokens processed in decode step q, let B = |X q |, and let D be the decode expert-pool budget. The prefill path ranks the token’s routed experts by estimated contribution magnitude and retains Kpre of them: 
+
+Bpre (xi) = TopK e∈SK (xi) (wi,e he, K pre ) . (20) Decode supports two retained-pool selectors that share the same folding operator. The dynamic path used for the cross-model results and online decode measurement ranks the union of routed experts by its aggregate contribution: 
+
+Bdyn dec (Xq ) = TopK e∈∪ iSK (xi)
+
+ X
+
+> xi∈X q
+
+wi,e he, D 
+
+ . (21) An additional static implementation removes this batch re-duction from the per-step decode path. It forms a pool once from the calibration-time norms, 
+
+Bstatic dec = TopK e∈{ 1,...,E }(he, D ), (22) and precomputes one target and scalar for every possible source expert. Given any retained set Bϕ, an omitted source expert selects the target with minimum calibrated projection loss: 
+
+π(s | Bϕ) = arg min 
+
+> t∈Bϕ
+
+ℓs→t, (23) where Bϕ is the prefill set in Eq. 20 or either decode pool in Eqs. 21–22. 
+
+Prefill folding. The prefill selector places the retained routes from Eq. 20 first, after which the Triton operator coa-lesces omitted routes assigned to the same retained target: 
+
+ewi,t = wi,t + X 
+
+> s∈SK(xi)\Bpre (xi)
+> π(s|Bpre (xi))= t
+
+wi,s s⋆s→t, t ∈ Bpre (xi).
+
+(24) The operator does not materialize omitted expert outputs. Retained expert identifiers remain unchanged, so the fused MoE kernel executes only Kpre experts per token. Listing 1: Abbreviated static ExFold remapping kernel.                                                             
+
+> @triton.jit
+> def _static_projector_remap_kernel( weights, ids, target_ids, target_scale, out_weights, out_ids, B, K: tl.constexpr, BLOCK_B: tl.constexpr): batch =tl.program_id(0) * BLOCK_B \+tl.arange(0, BLOCK_B) valid =batch <B
+> for kin tl.static_range(K): w=tl.load(weights +batch *K+k, mask=valid) src =tl.load(ids +batch * K +k, mask=valid) dst =tl.load(target_ids +src, mask=valid, other=0) scale =tl.load(target_scale +src, mask=valid, other=1.0) tl.store(out_weights +batch * K +k, w * scale, mask=valid) tl.store(out_ids +batch * K+k, dst, mask=valid)
+
+Decode remapping. Decode first obtains a dynamic or static pool. Each routed expert outside that pool selects its target using Eq. 23 and is remapped in place: 
+
+(Es, w i,s ) 7 −→ 
+
+
+
+Eπ(s|Bdec ), w i,s s⋆s→π(s|Bdec )
+
+
+
+. (25) The lookup and remapping occur before dispatch, so every routed identifier presented to the fused kernel belongs to a pool of at most D experts. 
+
+Decode kernels. Here Bdec is the dynamic or static pool selected above. The evaluated dynamic path scans the BK 
+
+routed slots to build Eq. 21, then searches D candidate tar-gets for each omitted route. The static implementation instead caches π(s | Bdec ) and s⋆s→π(s|Bdec ) for all E sources. List-ing 1 is the resulting per-route kernel: one target and scalar lookup per routed slot, or O(BK ) work, while preserving the original [B, K ] layout. 
+
+Cross-Model Quality Results 
+
+Table 10 reports DeepSeek-V2-Lite-Chat under joint com-pression. Table 11 separates prefill-only, decode-only, and joint folding on Qwen3.5-35B-A3B. In the method labels, P4 retains four routed experts per prefill token; D32 and D64 cap each decode batch’s active expert pool at 32 and 64 experts; a combined label applies both constraints. For Qwen3.5 P4 and P4+D64, directed pairs with calibrated loss above 0.99 are excluded from target assignment; after prefill folding, the retained weights are rescaled per token to pre-serve the original routed-weight sum. This safeguard is not enabled for D64. All rows use complete benchmark coverage under the evaluation protocol described above. The “Eval+” column reports HumanEval+ pass@1. 
+
+Method IFEval GPQA Eval+ MMLU pro Avg. 
+
+Original Top-6 42.14 23.23 46.34 26.52 34.56 Direct Top-4 40.85 24.24 46.95 24.71 34.19 
+
+ExFold P4+D32 41.96 26.77 48.17 24.75 35.41 
+
+Table 10: DeepSeek-V2-Lite-Chat quality; bold marks the column best.                                     
+
+> Method MATH 500 IFEval IFBench GPQA Eval+ Avg.
+> Original Top-8 89.00 87.06 29.20 82.83 88.41 75.30 Direct Top-4 32.80 81.52 33.53 82.32 87.20 63.47
+> ExFold P4 88.40 82.62 32.59 82.32 92.68 75.72
+> ExFold D64 89.20 85.21 38.40 81.31 89.63 76.75
+> ExFold P4+D64 88.40 83.36 33.77 86.36 92.07 76.79
+
+Table 11: Qwen3.5-35B-A3B quality; bold marks the column best. 
+
+Expert Geometry and Projector Structure 
+
+Full-Layer Expert Geometry 
+
+We visualize expert-output geometry for every MoE layer. For Qwen3 output matrices Es and Et collected on com-mon inputs, raw similarity is 1 − ∥ Es − Et∥F /d max , where 
+
+dmax is the largest raw pairwise distance in that layer. For this diagnostic, the aligned view fits the closed-form scalar on the same captured outputs, averages the two directed sim-ilarities, and reuses the same dmax . GLM reconstructs the corresponding raw and aligned distances from source-norm-weighted co-routing statistics and averages the two directions using their observation counts. Thus, each aligned distance is no larger than its raw counterpart; these analysis-only fits are separate from the fixed deployment projectors visualized below. The magnitude bar charts show every layer–expert po-sition, use an independent y-axis in each layer, and highlight the minimum- and maximum-magnitude experts. Unavail-able observations are gray; the isolated GLM layer-45 outlier is hatched and excluded from that panel’s axis scaling. Across observed directed off-diagonal pairs, scalar alignment raises the mean similarity from 0.449 to 0.613 for Qwen3. Across observed symmetric GLM entries, the corresponding mean rises from 0.899 to 0.932 for GLM-4.5-Air. 
+
+Qwen3-30B-A3B. Figures 8, 9, and 10 show all 48 layers and 128 routed experts. The matrices exhibit layer-dependent structure, and the norm view confirms expert-wise magnitude variation. 
+
+GLM-4.5-Air. Figures 8, 11, and 12 provide the corre-sponding 45-layer diagnostics. GLM statistics are collected for co-routed expert pairs; gray cells denote pairs that were never jointly observed. The matrices again show nonuniform pair structure and output-magnitude differences. 0 64 127 015 30 
+
+L0 | max/min 2.59x 
+
+0 64 127 0150 300 
+
+L1 | max/min 13.77x 
+
+0 64 127 0300 600 
+
+L2 | max/min 18.98x 
+
+0 64 127 0200 400 
+
+L3 | max/min 9.29x 
+
+0 64 127 040 80 
+
+L4 | max/min 2.37x 
+
+0 64 127 040 80 
+
+L5 | max/min 3.04x 
+
+0 64 127 040 80 
+
+L6 | max/min 2.06x 
+
+0 64 127 050 100 
+
+L7 | max/min 2.54x 
+
+0 64 127 040 80 
+
+L8 | max/min 2.31x 
+
+0 64 127 050 100 
+
+L9 | max/min 4.52x 
+
+0 64 127 050 100 
+
+L10 | max/min 3.77x 
+
+0 64 127 050 100 
+
+L11 | max/min 3.27x 
+
+0 64 127 050 100 
+
+L12 | max/min 3.61x 
+
+0 64 127 080 160 
+
+L13 | max/min 2.75x 
+
+0 64 127 080 160 
+
+L14 | max/min 3.41x 
+
+0 64 127 060 120 
+
+L15 | max/min 3.31x 
+
+0 64 127 060 120 
+
+L16 | max/min 2.12x 
+
+0 64 127 080 160 
+
+L17 | max/min 3.09x 
+
+0 64 127 080 160 
+
+L18 | max/min 2.10x 
+
+0 64 127 080 160 
+
+L19 | max/min 2.23x 
+
+0 64 127 080 160 
+
+L20 | max/min 2.05x 
+
+0 64 127 080 160 
+
+L21 | max/min 2.25x 
+
+0 64 127 0150 300 
+
+L22 | max/min 3.89x 
+
+0 64 127 0100 200 
+
+L23 | max/min 3.15x 
+
+0 64 127 0100 200 
+
+L24 | max/min 2.78x 
+
+0 64 127 0150 300 
+
+L25 | max/min 2.75x 
+
+0 64 127 0100 200 
+
+L26 | max/min 2.24x 
+
+0 64 127 0100 200 
+
+L27 | max/min 2.15x 
+
+0 64 127 0100 200 
+
+L28 | max/min 2.13x 
+
+0 64 127 0150 300 
+
+L29 | max/min 2.63x 
+
+0 64 127 0150 300 
+
+L30 | max/min 2.37x 
+
+0 64 127 0100 200 
+
+L31 | max/min 1.78x 
+
+0 64 127 0200 400 
+
+L32 | max/min 2.93x 
+
+0 64 127 0150 300 
+
+L33 | max/min 2.60x 
+
+0 64 127 0400 800 
+
+L34 | max/min 6.05x 
+
+0 64 127 0250 500 
+
+L35 | max/min 3.54x 
+
+0 64 127 0500 1000 
+
+L36 | max/min 7.91x 
+
+0 64 127 0300 600 
+
+L37 | max/min 3.56x 
+
+0 64 127 0300 600 
+
+L38 | max/min 3.47x 
+
+0 64 127 0300 600 
+
+L39 | max/min 3.60x 
+
+0 64 127 0400 800 
+
+L40 | max/min 3.30x 
+
+0 64 127 0400 800 
+
+L41 | max/min 3.16x 
+
+0 64 127 0500 1000 
+
+L42 | max/min 3.51x 
+
+0 64 127 0800 1600 
+
+L43 | max/min 4.60x 
+
+0 64 127 0600 1200 
+
+L44 | max/min 3.66x 
+
+0 64 127 0800 1600 
+
+L45 | max/min 5.00x 
+
+0 64 127 01000 2000 
+
+L46 | max/min 3.42x 
+
+0 64 127 04000 8000 
+
+L47 | max/min 7.94x 
+
+Qwen3 expert-output magnitudes across all MoE layers 
+
+‖Ee(X)‖ F on the shared analysis capture; each panel uses its own y-axis 
+
+Expert ID Expert-output magnitude 
+
+Expert Layer minimum Layer maximum Figure 8: Expert-output magnitudes across all Qwen3 MoE layers. 0 64 127 0.0 0.8 1.6 
+
+L1 | max/min 24.16x 
+
+0 64 127 012
+
+L2 | max/min 17.00x 
+
+0 64 127 0.0 1.5 3.0 
+
+L3 | max/min 22.33x 
+
+0 64 127 024
+
+L4 | max/min 22.39x 
+
+0 64 127 048
+
+L5 | max/min 30.73x 
+
+0 64 127 0.0 1.5 3.0 
+
+L6 | max/min 8.62x 
+
+0 64 127 024
+
+L7 | max/min 8.63x 
+
+0 64 127 048
+
+L8 | max/min 14.45x 
+
+0 64 127 0.0 2.5 5.0 
+
+L9 | max/min 8.85x 
+
+0 64 127 036
+
+L10 | max/min 14.25x 
+
+0 64 127 0816 
+
+L11 | max/min 19.68x 
+
+0 64 127 048
+
+L12 | max/min 5.87x 
+
+0 64 127 048
+
+L13 | max/min 8.55x 
+
+0 64 127 048
+
+L14 | max/min 6.68x 
+
+0 64 127 0510 
+
+L15 | max/min 8.18x 
+
+0 64 127 0612 
+
+L16 | max/min 8.12x 
+
+0 64 127 0612 
+
+L17 | max/min 6.60x 
+
+0 64 127 0816 
+
+L18 | max/min 9.47x 
+
+0 64 127 015 30 
+
+L19 | max/min 15.65x 
+
+0 64 127 010 20 
+
+L20 | max/min 7.83x 
+
+0 64 127 010 20 
+
+L21 | max/min 9.98x 
+
+0 64 127 015 30 
+
+L22 | max/min 11.92x 
+
+0 64 127 015 30 
+
+L23 | max/min 12.90x 
+
+0 64 127 0816 
+
+L24 | max/min 8.30x 
+
+0 64 127 015 30 
+
+L25 | max/min 10.59x 
+
+0 64 127 010 20 
+
+L26 | max/min 8.51x 
+
+0 64 127 010 20 
+
+L27 | max/min 10.65x 
+
+0 64 127 015 30 
+
+L28 | max/min 12.67x 
+
+0 64 127 010 20 
+
+L29 | max/min 9.53x 
+
+0 64 127 015 30 
+
+L30 | max/min 15.39x 
+
+0 64 127 015 30 
+
+L31 | max/min 8.01x 
+
+0 64 127 015 30 
+
+L32 | max/min 9.72x 
+
+0 64 127 020 40 
+
+L33 | max/min 17.14x 
+
+0 64 127 020 40 
+
+L34 | max/min 14.79x 
+
+0 64 127 015 30 
+
+L35 | max/min 13.68x 
+
+0 64 127 015 30 
+
+L36 | max/min 11.45x 
+
+0 64 127 015 30 
+
+L37 | max/min 10.28x 
+
+0 64 127 025 50 
+
+L38 | max/min 20.40x 
+
+0 64 127 025 50 
+
+L39 | max/min 22.00x 
+
+0 64 127 025 50 
+
+L40 | max/min 16.66x 
+
+0 64 127 025 50 
+
+L41 | max/min 15.24x 
+
+0 64 127 025 50 
+
+L42 | max/min 16.63x 
+
+0 64 127 025 50 
+
+L43 | max/min 16.89x 
+
+0 64 127 020 40 
+
+L44 | max/min 14.56x 
+
+0 64 127 025 50 
+
+L45 | max/min 18.26x 
+
+GLM-4.5-Air expert-output magnitudes across all MoE layers 
+
+Calibration estimate of ‖ Ee(X)‖ 2; each panel uses its own y-axis; an isolated outlier is marked and excluded from axis scaling 
+
+Expert ID Expert-output magnitude 
+
+Expert Layer minimum Layer maximum Unavailable Isolated outlier Figure 8: GLM-4.5-Air expert-output magnitudes (continued); hatching marks one isolated outlier. Layer 0 Layer 1 Layer 2 Layer 3 Layer 4 Layer 5 
+
+Layer 6 Layer 7 Layer 8 Layer 9 Layer 10 Layer 11 
+
+Layer 12 Layer 13 Layer 14 Layer 15 Layer 16 Layer 17 
+
+Layer 18 Layer 19 Layer 20 Layer 21 Layer 22 Layer 23 
+
+Layer 24 Layer 25 Layer 26 Layer 27 Layer 28 Layer 29 
+
+Layer 30 Layer 31 Layer 32 Layer 33 Layer 34 Layer 35 
+
+Layer 36 Layer 37 Layer 38 Layer 39 Layer 40 Layer 41 
+
+Layer 42 Layer 43 Layer 44 Layer 45 Layer 46 Layer 47 
+
+0.0 0.2 0.4 0.6 0.8 1.0 
+
+> Frobenius similarity
+
+Qwen3 expert-output similarity across all MoE layers 
+
+SERE-style Frobenius-distance similarity on shared analysis tokens Figure 9: Raw expert-output similarity across all Qwen3 MoE layers. Layer 0 Layer 1 Layer 2 Layer 3 Layer 4 Layer 5 
+
+Layer 6 Layer 7 Layer 8 Layer 9 Layer 10 Layer 11 
+
+Layer 12 Layer 13 Layer 14 Layer 15 Layer 16 Layer 17 
+
+Layer 18 Layer 19 Layer 20 Layer 21 Layer 22 Layer 23 
+
+Layer 24 Layer 25 Layer 26 Layer 27 Layer 28 Layer 29 
+
+Layer 30 Layer 31 Layer 32 Layer 33 Layer 34 Layer 35 
+
+Layer 36 Layer 37 Layer 38 Layer 39 Layer 40 Layer 41 
+
+Layer 42 Layer 43 Layer 44 Layer 45 Layer 46 Layer 47 
+
+0.0 0.2 0.4 0.6 0.8 1.0 
+
+> Scalar-aligned similarity
+
+Qwen3 expert-output similarity after scalar alignment 
+
+Closed-form directed scalars fitted on the shared analysis tokens; raw and aligned views share each layer's distance scale Figure 10: Scalar-aligned similarity for observed Qwen3 expert pairs. Layer 1 Layer 2 Layer 3 Layer 4 Layer 5 Layer 6 
+
+Layer 7 Layer 8 Layer 9 Layer 10 Layer 11 Layer 12 
+
+Layer 13 Layer 14 Layer 15 Layer 16 Layer 17 Layer 18 
+
+Layer 19 Layer 20 Layer 21 Layer 22 Layer 23 Layer 24 
+
+Layer 25 Layer 26 Layer 27 Layer 28 Layer 29 Layer 30 
+
+Layer 31 Layer 32 Layer 33 Layer 34 Layer 35 Layer 36 
+
+Layer 37 Layer 38 Layer 39 Layer 40 Layer 41 Layer 42 
+
+Layer 43 Layer 44 Layer 45 
+
+0.60 0.65 0.70 0.75 0.80 0.85 0.90 0.95 1.00 
+
+> Frobenius similarity
+
+GLM-4.5-Air expert-output similarity across all MoE layers 
+
+Frobenius-distance similarity on co-routed calibration tokens; gray entries were not jointly observed 
+
+Unobserved pair Figure 11: Raw co-routed expert similarity across all GLM-4.5-Air MoE layers. Layer 1 Layer 2 Layer 3 Layer 4 Layer 5 Layer 6 
+
+Layer 7 Layer 8 Layer 9 Layer 10 Layer 11 Layer 12 
+
+Layer 13 Layer 14 Layer 15 Layer 16 Layer 17 Layer 18 
+
+Layer 19 Layer 20 Layer 21 Layer 22 Layer 23 Layer 24 
+
+Layer 25 Layer 26 Layer 27 Layer 28 Layer 29 Layer 30 
+
+Layer 31 Layer 32 Layer 33 Layer 34 Layer 35 Layer 36 
+
+Layer 37 Layer 38 Layer 39 Layer 40 Layer 41 Layer 42 
+
+Layer 43 Layer 44 Layer 45 
+
+0.60 0.65 0.70 0.75 0.80 0.85 0.90 0.95 1.00 
+
+> Scalar-aligned similarity
+
+GLM-4.5-Air expert-output similarity after scalar alignment 
+
+Analysis-only closed-form scalar projection on co-routed tokens; raw and aligned views share the same per-layer distance scale 
+
+Unobserved pair Figure 12: Scalar-aligned co-routed expert similarity across all GLM-4.5-Air MoE layers. Layer-Wise Projector Structure 
+
+Figures 13 and 14 visualize dense common-input projector geometry for Qwen3. Every expert processes the same hidden-state matrix X; rows are source experts, columns are candidate targets, and self-pairs are suppressed. Scalar colors are clipped symmetrically at the 99th percentile of |s⋆s→t|. For a layer l, Figure 14 reports the directed normalized Frobenius loss eℓs→t = ∥Es(X) − s⋆s→tEt(X)∥F /d (l)max = 1 − Sscalar (s, t ), where d(l)max is the maximum raw pair distance in that layer. Its median over directed off-diagonal pairs is 0.407, and 79.9% of pairs are below 0.5. This common-input diagnostic avoids conflating missing pair support with projection quality; lower values indicate more compatible transfers. Layer 0 Layer 1 Layer 2 Layer 3 Layer 4 Layer 5                                    
+
+> Layer 6 Layer 7 Layer 8 Layer 9 Layer 10 Layer 11
+> Layer 12 Layer 13 Layer 14 Layer 15 Layer 16 Layer 17
+> Layer 18 Layer 19 Layer 20 Layer 21 Layer 22 Layer 23
+> Layer 24 Layer 25 Layer 26 Layer 27 Layer 28 Layer 29
+> Layer 30 Layer 31 Layer 32 Layer 33 Layer 34 Layer 35
+> Layer 36 Layer 37 Layer 38 Layer 39 Layer 40 Layer 41
+> Layer 42 Layer 43 Layer 44 Layer 45 Layer 46 Layer 47
+> −0.8 −0.6 −0.4 −0.2 0.0 0.2 0.4 0.6 0.8
+> Scalar projector  s*
+> s → t
+
+Common-input scalar projectors across all Qwen3 MoE layers     
+
+> Rows are source experts Esand columns are targets Et; every off-diagonal pair uses the same hidden-state matrix X
+> Excluded self-pair
+
+Figure 13: Common-input scalar-projector matrices across all Qwen3 MoE layers. Layer 0 Layer 1 Layer 2 Layer 3 Layer 4 Layer 5 
+
+Layer 6 Layer 7 Layer 8 Layer 9 Layer 10 Layer 11 
+
+Layer 12 Layer 13 Layer 14 Layer 15 Layer 16 Layer 17 
+
+Layer 18 Layer 19 Layer 20 Layer 21 Layer 22 Layer 23 
+
+Layer 24 Layer 25 Layer 26 Layer 27 Layer 28 Layer 29 
+
+Layer 30 Layer 31 Layer 32 Layer 33 Layer 34 Layer 35 
+
+Layer 36 Layer 37 Layer 38 Layer 39 Layer 40 Layer 41 
+
+Layer 42 Layer 43 Layer 44 Layer 45 Layer 46 Layer 47 
+
+0.0 0.2 0.4 0.6 0.8 1.0 
+
+> Normalized Frobenius loss
+
+Common-input scalar-aligned Frobenius loss across Qwen3 layers 
+
+‖Es(X) − s*  
+
+> s→t
+
+Et(X)‖ F/d(l)max ; lower values indicate closer expert outputs 
+
+Excluded self-pair Figure 14: Common-input scalar-aligned Frobenius losses across all Qwen3 MoE layers. DeepSeek-V4-Flash Extension Details 
+
+Model and quality runtime. DeepSeek-V4-Flash contains 284B total and 13B activated parameters, 43 transformer lay-ers, 256 routed experts plus one shared expert, and Top-6 routing (DeepSeek-AI 2026). Quality evaluation uses tensor parallelism eight, max_num_seqs=32 , and CUDA Graph. Every method is evaluated with the same prompts, chat for-matting, decoding rules, and scorers. The full-suite collector is required to have no missing tasks or infrastructure failures before it is admitted to Table 6. All averages and retention ratios are computed from underlying unrounded task scores. 
+
+Calibration data and disclosure. The released DeepSeek matrix is calibrated from 64 unlabeled inputs: 56 general instruction, code, and mathematics inputs from Tulu-3, plus eight benchmark inputs (four IFEval and four IFBench) with-out labels, reference answers, or evaluator feedback. At most 64 observer tokens are collected per sequence, with maxi-mum input length 4,096. This is transductive, benchmark-aware calibration , not a zero-contact held-out evaluation. Calibration uses no benchmark answers and changes no model weights, but the input exposure must be preserved when reporting the results. The DeepSeek artifact uses common-input expert outputs, source-output-norm weighting, and unbounded least-squares scalars. Unlike the Qwen configuration, it does not clip scalar coefficients. 
+
+Confidence-aware P3 safeguard. DeepSeek-V4-Flash ex-hibits a wider range of router scores and expert-output mag-nitudes than the primary Qwen model. For an omitted source 
+
+s and retained target t, we therefore compute a source-relative residual 
+
+ℓrel  
+
+> s→t
+
+=
+
+P 
+
+> i
+
+wi∥ui − as→tvi∥22
+
+P 
+
+> i
+
+wi∥ui∥22 + ϵ ,cs =
+
+h
+
+1 − min  
+
+> t
+
+ℓrel 
+
+> s→t
+
+i10
+
+.
+
+(26) The scalar-transfer part wscsas→t is added to the minimum-loss target. The remaining weight ws(1 − cs) falls back to the retained Top-3 routes in proportion to their original router weights. This continuous safeguard does not execute addi-tional experts: P3 still invokes exactly three routed experts. It only avoids forcing a poorly calibrated pair to absorb the entire omitted contribution. 
+
+Speed protocol and operating-point boundary. All DeepSeek speed measurements use one H800 server with model weights, code, data, and outputs on local storage. The vLLM runtime uses tensor parallelism four and CUDA Graph. Online load curves use max_num_seqs=32 and the same request schedule for every method. Prefill uses 8,192 input tokens and one output token at QPS 1, 2, 4, 6, and 8. Decode uses one input token and 256 output tokens at QPS 2, 4, 8, 12, 16, 24, and 32. The offline-throughput panel uses max_num_seqs=128 , QPS 64, concurrency 128, 32 warmups, and 1,024 measured requests. The TTFT peak at QPS 4 includes queueing amplifica-tion and is therefore a serving-level speedup rather than a pure-kernel claim. Under the matched max_num_seqs=32 
+
+decode limit, D64 stabilizes near 1.15 × TPOT at QPS 8–32, while D128 remains near parity. The saturated 
+
+max_num_seqs=128 run yields a 1.286 × output-throughput gain for D64. Because quality is measured with 
+
+max_num_seqs=32 , the throughput bar is reported as a separate saturation boundary rather than the same quality– speed operating point. 
+
+Open-source reproduction. The repository at https:// github.com/Time-Rune/ExFold-MoE contains the Qwen3 and DeepSeek-V4-Flash runtime patches, CUDA/Triton ker-nels, final calibration matrices, correctness tests, and one-command quality and speed launchers. Model weights and benchmark datasets remain under their original licenses and are downloaded from their providers. Token-Level Reconstructions 
+
+Figure 15 provides proxy-space illustrations for tokens from mathematics, scientific reasoning, instruction following, and code generation. The columns compare the original Top-8 routes with Direct Top-4, MoDES token-wise selection (Huang et al. 2025), REAP using Top-8 within a static 64-expert pool (Lasby et al. 2025), and ExFold Top-4. In this comparison, MoDES applies its calibrated layer-wise threshold to retain a token-dependent subset of at most four leading routes. Expert directions come from two-dimensional classical multidimensional scaling (MDS) of the all-expert cosine-distance matrix, and arrow lengths equal router weight times the calibrated expert-output norm; segment labels 1, . . . , 8 denote route-rank positions rather than global expert identifiers, and primed labels denote REAP routes. ExFold omits per-segment labels for clarity. Colored arrows show individual expert contributions in a strict head-to-tail chain: every arrow starts at the endpoint of the preceding contribution, and the chain endpoint is the corresponding aggregate. Background arrows ending in diamonds show the original aggregate y and each method’s approximate aggregate by; the latter is dashed. The displayed proxy distance is their relative Euclidean distance in this two-dimensional space. Within each dataset, we inspect at most eight evaluation examples and 96 deterministically spaced tokens per example. We select an illustrative case whose Direct-Top-4 proxy distance is at least 0.15, for which ExFold reduces that distance by at least 15%, and for which ExFold has the smallest proxy distance among the displayed approximations. To span model depth, the four datasets target layers 0, 16, 32, and 47, respectively; each panel uses the nearest qualifying layer and the first case in deterministic scan order. These diagrams illustrate routing geometry; their reported distances are proxy-space quantities and are not hidden-state reconstruction errors. They are qualitative examples rather than aggregate evaluation evidence. Original Top-8          
+
+> 12345678
+> y
+> Direct P4 proxy d=0.246
+> 1234
+> ŷ
+> y
+> MoDES (K=4) proxy d=0.246
+> 1234
+> ŷ
+> y
+> REAP (D64) proxy d=0.373
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> 7080
+> ŷ
+> y
+> ExFold P4 proxy d=0.121
+> y
+> MATH500 | layer 0 | token 521: 'the' Original Top-8
+> 12345678
+> y
+> Direct P4 proxy d=0.685
+> 12 34
+> ŷ
+> y
+> MoDES (K=4) proxy d=0.685
+> 12 34
+> ŷ
+> y
+> REAP (D64) proxy d=1.670
+> 10
+> 20
+> 30
+> 40
+> 50
+> 6070
+> 80
+> ŷ
+> y
+> ExFold P4 proxy d=0.554
+> y
+> GPQA | layer 16 | token 89: 'one' Original Top-8
+> 12345678y
+> Direct P4 proxy d=0.467
+> 1234
+> ŷ
+> y
+> MoDES (K=4) proxy d=0.467
+> 1234
+> ŷ
+> y
+> REAP (D64) proxy d=0.566
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> 80
+> ŷ
+> y
+> ExFold P4 proxy d=0.150
+> y
+> IFEval | layer 32 | token 68: 'part' Original Top-8
+> 12345678
+> y
+> Direct P4 proxy d=0.578
+> 1234
+> ŷ
+> y
+> MoDES (K=4) proxy d=0.578
+> 1234
+> ŷ
+> y
+> REAP (D64) proxy d=0.549
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> 80ŷ
+> y
+> ExFold P4 proxy d=0.177
+> y
+> LCBv5 | layer 47 | token 49: 'more'
+
+Figure 15: Token-level proxy reconstructions. Expert contributions are accumulated strictly head-to-tail; each chain terminates at y or by.
