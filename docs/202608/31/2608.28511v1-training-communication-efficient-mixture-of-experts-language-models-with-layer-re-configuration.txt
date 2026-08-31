@@ -1,0 +1,409 @@
+Title: Training Communication-Efficient Mixture-of-Experts Language Models with Layer Re-Configuration
+
+URL Source: https://arxiv.org/pdf/2608.28511v1
+
+Published Time: Mon, 31 Aug 2026 01:15:22 GMT
+
+Number of Pages: 12
+
+Markdown Content:
+# Training Communication-Efficient Mixture-of-Experts Language Models with Layer Re-Configuration 
+
+Simeng Sun, Roger Waleffe 
+
+{simengs,rwaleffe}@nvidia.com 
+
+Abstract 
+
+When training Mixture-of-Experts (MoE) language models with expert parallelism, all-to-all token dispatch and combine collectives can consume a substantial fraction of end-to-end training time. In this work, we study communication-efficient MoE models (CE-MoE), in which we adopt a heterogeneous layer pattern that decouples token-mixing and channel-mixing depth. Compared to conventional models which interleave MoE layers after each token-mixing layer (e.g., attention, Mamba-2), CE-MoE models concentrate expert capacity in a select few routed MoE layers, while maintaining depth by adding additional token-mixing and dense-FFN layers. Across a scaling ladder from 2B to 31.5B total parameters, under matched total and activated parameters, CE-MoE models consistently reduce training cost while matching validation loss and downstream benchmarks with full-MoE baselines. At the 31.5B scale, CE-MoE uses 33.3% fewer GPU-hours while improving average downstream score and inference throughput. 
+
+1 Introduction 
+
+When training large Mixture-of-Experts (MoE) models with expert parallelism (EP), routing tokens to experts requires cross-rank communication rather than only local computation. In the forward pass, each MoE layer uses all-to-all collectives to dispatch token activations to the ranks hosting their selected experts and combine the resulting expert outputs back on the original token ranks. The backward pass uses all-to-all collectives for gradients along the same routing pattern. Together, these EP collectives can involve large communication volume and, in practice, consume a substantial fraction of end-to-end training time [Yan et al., 2026], even with moderate routed top-K. Specifically, with dropless routing and no capacity padding, the expert-parallel communication volume over one training step (forward+backward) Vstep scales as 
+
+Vstep ∝ LE · S · GBS · K (4 Db x + 2 bp) , (1) where LE is the number of MoE layers, S is the sequence length, GBS is the global batch size, K
+
+is the routed top-K, D is the dispatch hidden dimension, bx, bp are the number of bytes per hidden element (e.g. BF16), and per routed probability (FP32) respectively. System-level optimizations such as collective algorithms, computation-communication overlap, and kernel efficiency can reduce exposed EP communication cost. Our focus is orthogonal and complementary: reducing the total volume of moved data in the first place, so that system-level optimizations can compound the gains. The communication volume as modeled in Eq. 1 exposes multiple levers for reducing total communication payload: 
+
+• Precision (bx, bp): use lower-precision for communication [NVIDIA et al., 2025b]. • Dispatch dimension (D): adopt LatentMoE-style [Elango et al., 2026] projections that dispatch routed activations through a lower-dimensional latent space. • Routing width (K): reduce routed top-K so each token is dispatched to fewer experts. 
+
+> Preprint. arXiv:2608.28511v1 [cs.AI] 28 Aug 2026
+
+• MoE depth (LE ): reduce the number of MoE layers. 
+
+We study MoE models with hybrid token-mixer blocks [Lieber et al., 2024, NVIDIA et al., 2025a, 2026], where token-mixers are either full softmax attention or linear recurrent blocks. Rather than regularly pairing token-mixing blocks with routed MoE layers, we substantially reduce LE , while keeping K and D in a controlled range so that total EP all-to-all volume is reduced. We refer to such architectures as communication-efficient MoE (CE-MoE). CE-MoE replaces the removed MoE layers with additional token-mixing and dense-FFN blocks, and compensates for fewer MoE layers with more and wider experts per MoE layer. The resulting token-mixing-heavy layout is roughly parameter matched but more heterogeneous than the regular baseline layer layout. The consecutive token-mixing layers as present in the CE-MoE layout can trigger rank collapse: token representations concentrate into a few dominant directions and develop large norms that destabilize training. We empirically show that linear recurrent blocks are less prone to this instability than softmax-attention token mixers. Finally, we provide a recipe for constructing CE-MoE models that match the downstream performance of parameter-matched baseline hybrid-MoE models while reducing end-to-end training cost. The rest of the report is organized as follows. • Section 2 situates CE-MoE among approaches for reducing EP cost and motivates the heterogeneous layer layout. • Section 3 examines training instability in consecutive token mixers and shows Mamba-2 is more stable than softmax attention token-mixer. • Section 4 provides a recipe for constructing a CE-MoE model using a running example. • Section 5 evaluates CE-MoE against parameter-matched hybrid-MoE baselines on training cost, downstream quality, inference throughput, and residual-stream behavior. • Section 6 summarizes the main findings and discusses limitations. 
+
+2 Overview 
+
+Related work. Related work on reducing the cost of large-scale MoE training spans several levels. At the kernel level, SonicMoE [Guo et al., 2025] improves MoE efficiency through tile-aware optimizations. At the system and framework level, DeepEP [DeepSeek-AI, 2025] provides high-throughput and low-latency all-to-all kernels, while Megatron-Core [Yan et al., 2026] and MegaScale-MoE [Jin et al., 2026] provide scalable systems stacks for large-scale MoE training. At the architecture-system boundary, shortcut-connected MoE [Cai et al., 2024] changes the dependency structure so that EP communication can overlap with computation in the paired attention stream. Equation 1 shows that, the logical communication volume scales with dispatch hidden dimension 
+
+D. LatentMoE [Elango et al., 2026] reduces the effective dispatch dimension D, thereby reducing all-to-all traffic. Multi-Head LatentMoE with head parallel [Cui et al., 2026] changes the architecture and parallelism so communication no longer scales linearly with the number of activated experts.          
+
+> MoE baseline Attention MoE Attention MoE Attention MoE Attention MoE
+
+· · ·          
+
+> Switch/GShard-style Attention Dense FFN Attention MoE Attention Dense FFN Attention MoE
+
+· · ·           
+
+> CE-MoE (Ours) Mamba2 Mamba2 MoE Mamba2 Mamba2 Dense FFN Attention Mamba2 Mamba2
+
+· · ·    
+
+> token-mixing (attention) token-mixing (Mamba2) channel-mixing (dense) channel-mixing (MoE)
+
+Figure 1: MoE baseline and Switch/GShard-style sparse model preserve a regular token-mixing/channel-mixing alternation. CE-MoE uses a token-mixing-heavy heterogeneous layout. 
+
+Reducing MoE depth LE . Existing large-scale MoE architectures reduce routed MoE depth through interleaving MoE and dense FFN blocks [Lepikhin et al., 2020, Fedus et al., 2022, Zoph et al., 2022, The Microsoft AI Team, 2026], e.g., Switch Transformer places MoE at every other 20 500 1000 1500 2000 2500 Train steps 46810 12 Train loss 
+
+> Train loss vs. train steps
+> attn, lr=1e-3 attn, lr=3e-4 mamba, lr=1e-3 mamba, lr=3e-4
+
+Figure 2: Training loss for tiny models of ∼370M parameters with seven consecutive token-mixing layers. The attention variants are less stable, while the Mamba-2 variants train smoothly at both learning rates. FFN layers. These designs nevertheless preserve the regular alternation between token-mixing and channel-mixing blocks in standard Transformers (e.g., attn → dense mlp → attn → moe ). In contrast, we reduce MoE depth more aggressively and decouple token-mixing from channel-mixing counts, producing more heterogeneous layer layouts that depart from the standard Transformer block design, as shown in Figure 1. The heterogeneity in our communication-efficient hybrid-MoE (CE-MoE) is a direct consequence of adopting a skewed distribution between token-mixing and channel-mixing layers. Compared to standard Transformer with 1:1 token-mixing to channel-mixing ratio, CE-MoE allocates more layers for exchanging information along sequence dimension, assigning four token-mixing layers for every MoE layer or more than two token-mixing layers for every channel-mixing layer. With the token-mixing-heavy layer composition, we use a simple phased-greedy procedure to construct the CE-MoE layer pattern, spacing attention and channel-mixing blocks along a spine with linear recurrent blocks while permitting consecutive token-mixing blocks. This design raises the main concern addressed in the next section with a toy setting: whether consecutive token-mixing layers remain expressive and stable to train. In later sections, we empirically verify at larger scale that the resulting pattern recovers the downstream quality of parameter-matched hybrid-MoE baselines while reducing end-to-end training cost. 
+
+3 Rank-collapse risk 
+
+The token-mixing-heavy layer composition in CE-MoE introduces adjacent token-mixing blocks. This raises concerns about training stability, as existing work shows that pure self-attention stacks without MLPs or skip connections can converge doubly exponentially to rank 1 [Dong et al., 2021] thus losing expressivity. We empirically show that self-attention stacks are unstable to train even with skip connections. Figure 2 compares ∼370M-parameter models with seven consecutive token-mixing layers (self-attention or Mamba2 [Dao and Gu, 2024]) at two learning rates. The attention variants show loss spikes and eventually diverge, whereas the Mamba2 variants converge smoothly; the two architectures are matched in per-layer parameter count. To quantify token diversity and rank changes, we measure layerwise statistics on post-residual representations X ∈ RNtok ×D , where Ntok is the number of sampled evaluation tokens and D=1024 
+
+is the hidden dimension. Let σi denote the singular values of X, ∥·∥ F the Frobenius norm, pi =
+
+σ2 
+
+> i
+
+/ P 
+
+> j
+
+σ2 
+
+> j
+
+the normalized spectral distribution, and H(p) its Shannon entropy. We report stable rank    
+
+> rstable (X) = ∥X∥2
+> F/σ 21
+
+, and effective rank reffective (X) = exp( H(p)) . When either metric approaches 1, most residual-stream energy lies in a single singular direction. Token representations become nearly collinear, leaving token-specific information to be carried mainly by scalar magnitudes or small residual components. Figure 3 shows that the self-attention networks have much lower stable and effective rank than Mamba-2, with the strongest collapse in early layers. At the higher learning rate, the early self-attention layers reach stable rank close to 1 and single-digit effective rank, indicating that most 31 2 3 4 5 6 7                
+
+> Layer depth
+> 1234567
+> Rank
+> Stable rank
+> X2
+> F/21
+> 1234567
+> Layer depth
+> 025 50 75 100 125 150
+> Rank
+> Effective rank
+> exp( H(p)), pi=2
+> i/j
+> 2
+> j
+> attn, lr=1e-3 attn, lr=3e-4 mamba, lr=1e-3 mamba, lr=3e-4
+
+(a) Step 125 1 2 3 4 5 6 7                 
+
+> Layer depth
+> 1234567
+> Rank
+> Stable rank
+> X2
+> F/21
+> 1234567
+> Layer depth
+> 025 50 75 100 125 150
+> Rank
+> Effective rank
+> exp( H(p)), pi=2
+> i/j
+> 2
+> j
+> attn, lr=1e-3 attn, lr=3e-4 mamba, lr=1e-3 mamba, lr=3e-4
+
+(b) Step 1000 
+
+Figure 3: Layerwise stable rank and effective rank near the beginning of training and at step 1000, before divergence of the self-attention runs. Consecutive self-attention exhibits severe low-rank bottleneck, while Mamba2 maintains higher ranks despite decreasing with depth. residual-stream energy lies in only a few directions despite D=1024 . The high-learning-rate self-attention network also develops per-token ℓ2 norms that are orders of magnitude larger than the Mamba-2 for all layers, suggesting that, rather than by diverse directions, token differences are increasingly carried by magnitude, which serves as a major source of instability. These results suggest that consecutive token-mixing blocks are viable when the token mixer maintains healthy rank under repeated stacking. In the toy experiments, the linear recurrent block (Mamba-2) demonstrates better stability than self-attention and is therefore a better candidate for the main token-mixing path in a heterogeneous layout. Other mechanisms, such as gated attention [Qiu et al., 2025] and normalized GPT [Loshchilov et al., 2024] may help stablize pure self-attention networks by introducing new directions or controlling residual-stream norms, however they are outside the scope of this report. For the remaining sections, we focus on hybrid models (softmax attention and linear attention) where the linear recurrent block provides the architectural flexibility needed to construct token-mixing-heavy CE-MoE layer patterns. 
+
+4 Communication-Efficient Hybrid-MoE 
+
+The goal is to design a communication-efficient hybrid-MoE (CE-MoE) architecture that preserves the downstream quality of a baseline hybrid-MoE model while using far fewer routed MoE layers. We build CE-MoE in three steps: (1) determine the layer composition, (2) generate the layer pattern with a phased-greedy procedure, and (3) adjust model shape so the transformed model remains comparable to the baseline under the target parameter budget. 
+
+4.1 Determine the layer composition 
+
+Standard Transformer architecture treats the combination of attention and dense FFN (or MoE) as a single layer and therefore implicitly enforces a 1:1 token-mixing-to-channel-mixing ratio. CE-MoE relaxes the 1:1 ratio by reducing MoE layers and reallocating depth to additional token-mixing layers together with a moderate number of dense FFN blocks. Let the baseline composition be (a⋆, b ⋆, c ⋆) for Mamba, MoE, and attention blocks, with L =
+
+a⋆ + b⋆ + c⋆. Let CE-MoE use (a, b, c, d ) for Mamba, MoE, attention, and dense FFN blocks while preserving the same total L = a + b + c + d. CE-MoE sets block counts by targeting an approximate token-mixing-to-MoE ratio α1 and keeping c = c⋆ to control long-context attention cost. With 
+
+d = b,2 this gives b =
+
+j Lα+2 
+
+k
+
+, with the remaining blocks assigned to Mamba. As a concrete example, let q denote the number of expert-parallel all-to-all invocations per rank in an EP group for one forward-plus-backward microbatch through one routed MoE layer. 3 For a Nemotron-3 Nano baseline composition (a⋆, b ⋆, c ⋆) = (23 , 23 , 6) (total L = 52 ) [NVIDIA et al., 2025a], the layer composition for a corresponding CE-MoE model, when we target an approximate 
+
+> 1
+
+Preliminary experiments indicate that values in [4 , 5] preserve downstream quality before performance degrades noticeably. 
+
+> 2
+
+Preliminary ablations showed no clear trend between model quality and the dense-to-MoE ratio; we therefore take d = b
+
+for simplicity. 
+
+> 3
+
+Under Megatron-LM’s alltoall dispatcher, q = 6 : hidden-state dispatch, routed-probability dispatch, and hidden-state combine in the forward pass, plus the inverse all-to-alls in the backward pass. 
+
+4Algorithm 1 Generate CE-MoE layer pattern 
+
+Require: Composition (a, b, c, d ) over (Mamba, MoE, attention, dense FFN), b ≥ c
+
+Ensure: Layer pattern over M, E, *, and - 
+
+> 1:
+
+(nM , n E , n A, n D ) ← (a, b, c, d ); nvb ← max( nE , n A, n D , 1) ; ℓ ← ⌈ nM /n vb ⌉ 
+
+> 2:
+
+▷ A virtual-block tuple (m, 1e, 1a, 1d) uses the indicator variables defined above; 1[·] is the indicator function; ∥ denotes string or list concatenation.  
+
+> 3:
+
+A, N, R ← [ ] , [ ] , [ ]  
+
+> 4:
+
+while nA > 0 and nM ≥ ℓ do ▷ Phase 1: emit attention-bearing virtual blocks  
+
+> 5:
+
+(1e, 1d) ← (1[nE > 0] , 1[nD > 0])  
+
+> 6:
+
+A. append(( ℓ, 1e, 1, 1d))  
+
+> 7:
+
+(nM , n E , n A, n D ) ← (nM − ℓ, n E − 1e, n A − 1, n D − 1d) 
+
+> 8:
+
+end while  
+
+> 9:
+
+while nM ≥ ℓ and nE > 0 and nD > 0 do ▷ Phase 2: emit regular non-attention virtual blocks  
+
+> 10:
+
+N. append(( ℓ, 1, 0, 1))  
+
+> 11:
+
+(nM , n E , n D ) ← (nM − ℓ, n E − 1, n D − 1)  
+
+> 12:
+
+end while  
+
+> 13:
+
+if nM + nE + nA + nD > 0 then ▷ Phase 3: collect residual counts into shortened tail block(s)  
+
+> 14:
+
+append residue virtual blocks with m > 0 covering the remaining counts to R 
+
+> 15:
+
+end if  
+
+> 16:
+
+blocks ← Distribute( A, N ) ∥ R ▷ Phase 4: place N to evenly partition A, breaking ties left-to-right  
+
+> 17:
+
+P ← empty string  
+
+> 18:
+
+for all virtual blocks (m, 1e, 1a, 1d) ∈ blocks do  
+
+> 19:
+
+s ← Insert( Mm, E, 1e) ∥ ∗ 1a ∥ − 1d ▷ Insert returns Mm if 1e = 0 , else adds E after ⌊m/ 2⌋ Mamba  
+
+> 20:
+
+P ← P ∥ s 
+
+> 21:
+
+end for  
+
+> 22:
+
+return P
+
+token-mixing-to-MoE ratio α = 4 , is thus b = d = ⌊52 /(4 + 2) ⌋ = 8 , and a = 30 . The baseline alternating layout, the every-other-layer (Switch-style) variant, and CE-MoE therefore incur 23 q, 12 q,and 8q MoE all-to-all calls per rank and microbatch within an EP group, respectively. Relative to the baseline, every-other-layer (Switch-style) cuts communication by 47 .8% and CE-MoE by 65 .2% . The layer-count difference also governs MoE all-to-all volume up to routed top-K and dispatch dimension (Equation 1); as an illustrative case, if both LE -reduced variants use 1.5Kbase and identical dispatch dimension, Switch-style lowers volume by ≃ 21 .7% and CE-MoE by ≃ 47 .8% .
+
+4.2 Generate the layer pattern 
+
+The composition fixes the multiset of blocks but not their order. CE-MoE assigns layer order with a phased-greedy procedure in Algorithm 1, where M, E, *, and - denote Mamba, MoE, attention, and dense FFN blocks, respectively. The algorithm spreads self-attention and channel-mixing blocks across a Mamba-2 spine while avoiding poor local orderings. It runs in four sequential phases. Phases 1–3 populate three types of virtual blocks: A (attention-bearing blocks), N (regular non-attention blocks), and R (residue blocks). We use the tuple (m, 1e, 1a, 1d) to denote a virtual block, where m is the number of Mamba-2 blocks stored in a virtual block and 1e, 1a, 1d indicate whether MoE, attention, and dense FFN blocks are present. The algorithm first computes a nominal Mamba budget ℓ = ⌈nM /n vb ⌉ for regular virtual blocks. Phases 1–2 greedily create attention-bearing and non-attention blocks with m = ℓ; Phase 3 stores any leftover layers in residue blocks R, whose Mamba count may be smaller. In Phase 4, 
+
+Distribute( A, N ) treats each virtual block atomically and places N blocks so they evenly partition the sequence of A blocks, breaking ties from left to right. Blocks in R are appended at the end. Within each virtual block, the same spacing principle is applied: channel-mixing blocks are distributed along the Mamba spine, attention (if present) sits at the token-mixing tail, and the block ends with channel mixing so the next virtual block can begin with token mixing. For the running example of CE-MoE composition (a, b, c, d ) = (30 , 8, 6, 8) , the procedure yields 
+
+nvb = 8 and ℓ = 4 . After greedy allocation, |A| = 6 , |N | = 1 , and |R| = 1 ; Distribute then produces the global virtual-block order AAANAAAR :
+
+[MMEMM*-][MMEMM*-][MMEMM*-](MMEMM-)[MMEMM*-][MMEMM*-][MMEMM*-](MEM-) .
+
+50 4k 8k 12k 16k 20k 
+
+> steps
+> 1.5 1.6 1.7 1.8 1.9 2.0
+> val loss
+> Validation loss
+> Constrained random ablation CE-MoE Baseline
+
+Figure 4: Validation loss for the phased-greedy CE-MoE pattern, the matched baseline, and 21 constrained-random layer patterns at 2B total parameters and 140B tokens. We run a small layer-order ablation to show the effectiveness of the phased-greedy procedure. At 2B parameters and 140B tokens, we compare the phased-greedy CE-MoE pattern against 21 constrained-random layer patterns that share the same block composition. The constrained-random layer patterns are generated while satisfying three constraints to exclude apparently bad layer patterns: (1) it begins with Mamba and ends with dense FFN, (2) no consecutive channel-mixing blocks ( EE , E-, -E , --), and (3) self-attention blocks are placed at least three positions apart. This yields informed random baselines over plausible orderings rather than unconstrained permutations. Figure 4 shows that phased-greedy CE-MoE matches the baseline and outperforms all constrained-random alternatives in terms of validation loss. At the final step, CE-MoE lies roughly 1.8 standard deviations below the constrained-random mean, suggesting that layer ordering, and not merely layer composition, carries useful inductive bias. 
+
+4.3 Determine the model shape 
+
+Once the layer pattern is fixed, we search for model shape configuration so CE-MoE and the baseline are compared under matched total and activated parameter budgets. Most width and routing ratios are kept near baseline values, while per-expert MoE-FFN width and expert count are allowed to increase to compensate for fewer routed MoE layers. At fixed hidden size, we grid-search expert count, routed top-K, per-expert MoE-FFN width, shared-expert width, and dense-FFN width; candidate values are snapped to hardware-friendly multiples, and expert counts must divide evenly across expert-parallel ranks. Among budget-matched candidates, we select the one with the smallest LE K,a communication-cost proxy from Equation 1 when D and communication precision are fixed. Table 1: Width and routing search space for the 31.5B running example. All ranges are relative to the baseline shape. 
+
+Parameter Search range 
+
+Hidden size H 1.0× (fixed) Dense-FFN width 3.0–5.0×
+
+MoE-FFN width (per expert) 1.5–4.0×
+
+Shared-expert width 0.95 –1.15 ×
+
+Expert count |E| {1.25 , 1.5}× ; divisible by EP rank Routing density K/ |E| 0.5–1.5×
+
+Acceptance criterion total params ±1% ; activated params ±1.5% 
+
+In the running 31.5B example, the baseline uses H=2688 , per-expert MoE-FFN width 1856 , shared-expert width 3712 , |E| =128 , K=6 , and LE =23 , giving LE K=138 . The search in Table 1 spans 
+
+1,708 ,200 candidates, of which 5,817 meet the acceptance criterion. The selected CE-MoE shape uses dense-FFN width 8096 , per-expert MoE-FFN width 3520 , shared-expert width 3520 , |E| =192 ,6Table 2: Model configs. The final column reports the LatentMoE expert input/output dimension; – indicates no latent projection.                                                                                           
+
+> Scale Tokens Model Layers H|E| /K fexpert fdense dlatent
+> 2B-A0.5B 140B Baseline 12M+3A+0D+12E 1024 128/6 640 ––CE-MoE 16M+3A+4D+4E 1024 160/7 1520 1920 –4B-A0.77B 215B Baseline 15M+3A+0D+15E 1280 128/6 768 ––CE-MoE 20M+3A+5D+5E 1280 192/7 1504 3168 –7B-A1B 310B Baseline 16M+4A+0D+16E 1536 128/6 1024 ––CE-MoE 20M+4A+6D+6E 1536 192/7 1792 4576 –14B-A2B 560B Baseline 20M+4A+0D+20E 2048 128/6 1280 ––CE-MoE 26M+4A+7D+7E 2048 192/7 2432 3840 –31.5B-A3.5B 300B; 1T Baseline 23M+6A+0D+23E 2688 128/6 1856 ––CE-MoE 30M+6A+8D+8E 2688 192/7 3520 8096 –LatentMoE 23M+6A+0D+23E 2688 512/22 1856 –672 CE-LatentMoE 30M+6A+8D+8E 2688 640/24 3712 6336 768
+
+and K=7 . Relative to the baseline, it changes total and activated parameters by −0.001% and 
+
+−0.257% , respectively, while reducing LE K by 59 .4% .
+
+5 Empirical results 
+
+5.1 Evaluation axes 
+
+We evaluate CE-MoE along three axes: (1) Training cost. Architectures that are more efficient FLOPs-wise may still take longer time to train if they introduce system-level bottlenecks (e.g., communication, routing overhead, or inefficient kernels). We therefore use end-to-end training cost in GPU-hours, rather than theoretical FLOPs, as the primary metric for measuring training cost. For each run, we estimate steady-state GPU-hours by discarding warmup iterations, iteratively removing latency outliers above the current mean plus 1.5σ (checkpoint saves, restarts, and transient network jitter), and multiplying the filtered mean latency by the total iteration count and world size. The resulting estimate reflects optimistic architecture-level training cost and does not equal the billed cluster GPU-hours. (2) Model quality. We report validation loss and downstream performance on 11 standardized language-model benchmarks: MMLU and MMLU-Pro [Hendrycks et al., 2021a, Wang et al., 2024]; coding benchmarks HumanEval and MBPP [Chen et al., 2021, Austin et al., 2021]; math benchmarks GSM8K, MATH-500, and MATH-Hard (Minerva MATH level-5) [Cobbe et al., 2021, Hendrycks et al., 2021b, Lightman et al., 2023, Lewkowycz et al., 2022]; and commonsense benchmarks RACE, HellaSwag, WinoGrande, and ARC-Challenge [Lai et al., 2017, Zellers et al., 2019, Sakaguchi et al., 2020, Clark et al., 2018]. (3) Inference speed. We run preliminary static inference benchmarks to understand how reducing the MoE layer count affects inference performance. We report tokens per second at input sequence lengths 2048 and 8192 across various output sequence lengths. 
+
+5.2 Experimental details 
+
+All experiments use hybrid Mamba-2 models, with layer compositions reported as M+A+D+E for Mamba-2, self-attention, dense FFN, and MoE layers. Within each model scale, the baseline and CE-MoE variants use the same hidden size and are matched in similar total and activated parameter budgets following the model shape search in Section 4. Training runs are executed on H100 HBM3 clusters with 4th-gen NVLink. We train with BF16 precision at sequence length 8192, global batch size 768 unless specified otherwise. Adam optimizer settings (β1, β 2) = (0 .9, 0.95) , weight decay 0.1, gradient clipping at 1.0, and WSD learning-rate schedule. MoE layers use alltoall 
+
+token dispatch, grouped GEMM, MoE permute fusion, sigmoid router scores with expert bias and sequence-level auxiliary load balancing with coefficient 1e-4. In parallel with the routed experts, each MoE layer also includes an ungated shared expert MLP whose output is added to the combined routed-expert output. 72B-A0.5B 4B-A0.77B 7B-A1B 14B-A2B 31.5B-A3.5B 0.0 0.2 0.4 0.6 0.8 1.0                 
+
+> Normalized GPU-hours (same-scale baseline = 1.0)  -35.0% -33.0% -30.5% -34.1% -33.3%
+> 1.00 1.00 1.00 1.00 1.00 0.65 0.67 0.70 0.66 0.67
+> Relative training cost
+> 2B-A0.5B 4B-A0.77B 7B-A1B 14B-A2B 31.5B-A3.5B 1.25 1.30 1.35 1.40 1.45 1.50 1.55 1.60
+> Final validation loss  1.5228 1.4329 1.3680 1.2828 1.2673 1.5224 1.4326 1.3703 1.2817 1.2655
+> =-0.0004
+> =-0.0003
+> =+0.0023
+> =-0.0011
+> =-0.0018
+> Final Val. Loss
+> baseline CE-MoE
+
+Figure 5: Same-GBS scaling ladder up to 31.5B-A3.5B. Training cost is reported as normalized GPU-hours relative to the same-scale baseline. CE-MoE reduces steady-state GPU-hours by 30.5– 35.0% while keeping final validation loss within a few thousandths of the baseline. 
+
+5.3 Scaling ladder experiments 
+
+We first compare the baseline and CE-MoE under the same global batch size and otherwise matched training configuration. This setting isolates the architecture change and spans five scales from 2B-A0.5B to 31.5B-A3.5B with the scaling-ladder token budgets in Table 2. Figure 5 shows that CE-MoE consistently reduces normalized training cost while preserving validation loss. Across the five scales, the GPU-hour reduction ranges from 30.5% to 35.0%, while final validation loss stays close to the baseline. This same-GBS setting is conservative for CE-MoE: the expert count increases up to 1.5 × the baseline, while the routed top-K increases up to 1.1 ×
+
+the baseline. Under uniform routing, each CE-MoE expert therefore receives 22% fewer routed tokens per step despite having more parameters. The fact that CE-MoE remains loss-matched in this regime suggests that the heterogeneous layer pattern contributes useful modeling capacity beyond the parameter-matching procedure itself. 
+
+5.4 Model quality and scaling-up experiments 
+
+Because the same-GBS setting gives CE-MoE fewer tokens per expert, we also study whether the saved training cost can be reinvested into a larger global batch. We increase GBS to 960 for selected 14B-A2B and 31.5B-A3.5B experiments. This increases the amount of data communicated per iteration, but CE-MoE still remains cheaper than the corresponding baseline while improving downstream quality. With the larger GBS , we use same parallelism configuration as the baseline while changing the world size. The large-GBS runs are then estimated by averaging runs that use node counts closest to the baseline node count. Table 3 shows that at 14B-A2B, the same-token CE-MoE run uses 34.1% fewer GPU-hours than the baseline and improves average downstream score from 56.93 to 58.41. The larger-GBS CE-MoE run consumes 1.25 × as many tokens, further improves the average to 59.36, and still uses 26.1% fewer GPU-hours than the baseline. At 31.5B-A3.5B, same-token CE-MoE reduces GPU-hours by 33.3% while improving the average from 58.37 to 58.65. In the LatentMoE comparison, CE-LatentMoE consumes 1.25 × as many tokens, improves the average from 60.77 to 62.36, and reduces cost by 20.9% relative to LatentMoE. In the 1T-token long-horizon setting, CE-MoE trains on 1.25 × tokens with 21.0% fewer GPU-hours and improves the average from 66.26 to 66.67. Overall, these results indicate that communication savings can be traded for either lower training cost at fixed tokens or additional training tokens at still lower cost. 
+
+5.5 Inference speed 
+
+We run preliminary static, synthetic inference benchmarks using Megatron Server on H100 nodes. The runs use batch size 4, discard two warmup iterations, and report the median over five measured runs. Inference time optimizations are not fully applied here; these results should be viewed as an unoptimized serving proxy rather than a fully tuned deployment. Figure 6 reports tokens per second for the 31.5B-A3.5B baseline and the corresponding CE-MoE at input sequence lengths 2048 and 8Table 3: Training cost and model downstream quality. We report matched-token comparisons for 14B-A2B (560B tokens) and 31.5B-A3.5B (300B tokens), plus selected GBS = 960 CE-MoE/CE-LatentMoE variants trained on 1.25 × tokens. Normalized GPU-hours and GPU-hour reductions are relative to the corresponding baseline in each group. For long-horizon 1T runs, we scale node count to 1.5 × of the 300B token run. LatMoE indicates LatentMoE. 
+
+14B-A2B 31.5B-A3.5B 31.5B-A3.5B 31.5B-A3.5B 
+
+Model Baseline CE-MoE CE-MoE Baseline CE-MoE LatMoE CE-LatMoE Baseline CE-MoE 
+
+Consumed tokens 560B 560B 700B 300B 300B 300B 375B 1T 1.25T 
+
+Training cost 
+
+Norm. GPU-h 1.00 0.66 0.74 1.00 0.67 1.00 0.79 1.00 0.79 GPU-h reduction – 34.1% 26.1% – 33.3% – 20.9% – 21.0% 
+
+Downstream quality 
+
+MMLU-Pro CoT 5-shot 29.26 30.76 33.08 30.17 31.92 35.25 37.41 42.06 44.56 MMLU 5-shot 59.53 60.38 60.32 58.83 58.05 61.27 62.90 65.97 67.19 HumanEval 41.46 39.21 42.16 42.44 42.29 43.54 45.85 47.59 49.15 MBPP 53.33 53.11 55.39 55.41 54.14 57.39 58.23 61.03 62.04 GSM8K CoT 8-shot 64.44 69.75 73.24 67.63 69.83 72.71 71.87 81.20 78.47 MATH-500 55.00 60.80 60.00 60.40 59.40 59.2 66.00 66.60 70.80 MATH-Hard 31.32 35.64 34.76 35.22 36.10 36.96 42.50 47.25 48.24 RACE 74.16 73.88 73.88 73.78 74.74 76.08 76.08 80.96 78.76 ARC-Challenge 72.70 74.57 74.49 72.53 73.04 77.99 77.39 83.11 84.30 HellaSwag 76.11 75.90 76.52 76.94 77.01 77.73 78.09 79.46 79.56 WinoGrande 68.90 68.51 69.14 68.67 68.67 70.40 69.69 73.64 70.32 
+
+Average 56.93 58.41 59.36 58.37 58.65 60.77 62.36 66.26 66.67 128 512 1024 2048 050 100 150 200 250 300 Throughput (tokens/sec)                    
+
+> 174.4 179.0 181.2 181.4 223.5 243.0 244.6 246.1
+> +28.2% +35.8% +35.0% +35.6%
+> ISL = 2048
+> 128 512 1024 2048
+> 167.3 177.6 180.2 182.0 226.6 240.3 243.9 245.5 +35.4% +35.3% +35.3% +34.9%
+> ISL = 8192
+> Output sequence length (OSL)
+> Baseline CE-MoE
+
+Figure 6: Inference throughput for the 31.5B-A3.5B baseline and CE-MoE at input sequence lengths 2048 and 8192 for various output sequence lengths. 8192 in a single-node setting. Across output sequence lengths from 128 to 2048, CE-MoE improves throughput by 28–36% over the baseline. Although CE-MoE uses wider expert FFNs, it routes through fewer MoE layers. This reduces router overhead and synchronization points per generated token, which helps explain its higher inference throughput. 
+
+5.6 Residual stream analysis 
+
+We further compare the layerwise post-residual representations of the 2B-A0.5B baseline and CE-MoE models at the same training step. For each layer output Xℓ, we measure the per-token cosine similarity to the final-layer residual stream XL, averaged over tokens, and the effective rank of Xℓ.Figure 7 shows that the baseline’s cosine-to-final curve increases relatively smoothly, while CE-MoE follows a more staircase-like trajectory: fewer expert layers make larger representational updates, and the token-mixing layers between expert layers provide smaller refinements. The effective-rank curves provide a complementary check on this trajectory. Although CE-MoE has larger layer-to-layer rank variation, the two models end with similar effective rank. Rank drops in spans dominated by token mixing but recovers near expert layers, suggesting that these spans do not cause irreversible rank collapse. Together with the cosine pattern, this indicates that CE-MoE reaches 9comparable validation loss through a different residual-stream trajectory: sparse channel-mixing blocks periodically reshape the representation, while token-mixing layers between them refine it without permanently reducing token diversity. 5 10 15 20 25 
+
+> Layer index
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> Cosine similarity
+> Cosine similarity with final layer
+> Model (line) · Layer type (marker)
+> Baseline CE-MoE Mamba (M) MoE (E) Attention (*) Dense FFN (-)
+
+(a) Cosine similarity with final layer 5 10 15 20 25  
+
+> Layer index
+> 20 40 60 80 100
+> exp( H(p))
+> Effective rank
+> Model (line) · Layer type (marker)
+> Baseline CE-MoE Mamba (M) MoE (E) Attention (*) Dense FFN (-)
+
+(b) Effective rank 
+
+Figure 7: Residual-stream analysis for the 2B-A0.5B baseline and CE-MoE models. Lines identify the model, while marker shapes identify the layer type in each architecture. 
+
+6 Conclusion 
+
+Summary. In this report, we presented communication-efficient hybrid-MoE, which lowers expert-parallel communication by reducing the number of MoE layers LE and reallocating capacity into additional token-mixing layers and fewer, wider expert and dense-FFN blocks under comparable total and activated parameter budgets. Across our scaling-ladder experiments, CE-MoE consistently reduces training cost in terms of GPU-hours while keeping validation loss close to matched full-MoE baselines; at larger scale it can train for more tokens at lower cost, remain competitive on downstream benchmarks, and show preliminary inference throughput gains over the full-MoE baseline. 
+
+Limitations. The measured GPU-hour savings from lowering LE may change under other compute or communication precisions (e.g., FP8 or NVFP4), using larger world sizes, or overlapping commu-nication strategies. We also observed that CE-MoE exhibits higher sequence-level load-imbalance signals than full-MoE baselines and suffers from early-training loss spikes more if global batch size does not scale accordingly with expert counts; better routing regularization or load-balancing may improve the efficiency-quality tradeoff. Finally, the inference measurements are preliminary and based on a synthetic static benchmark rather than a full production serving study. 
+
+References 
+
+Jacob Austin, Augustus Odena, Maxwell Nye, Maarten Bosma, Henryk Michalewski, David Dohan, Ellen Jiang, Carrie Cai, Michael Terry, Quoc Le, and Charles Sutton. Program Synthesis with Large Language Models. arXiv preprint arXiv:2108.07732 , 2021. URL https://arxiv.org/ abs/2108.07732 .Weilin Cai, Juyong Jiang, Le Qin, Junwei Cui, Sunghun Kim, and Jiayi Huang. Shortcut-connected expert parallelism for accelerating mixture-of-experts. arXiv preprint arXiv:2404.05019 , 2024. URL https://arxiv.org/abs/2404.05019 .Mark Chen et al. Evaluating Large Language Models Trained on Code. arXiv preprint arXiv:2107.03374 , 2021. URL https://arxiv.org/abs/2107.03374 .Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. Think you have Solved Question Answering? Try ARC, the AI2 Reasoning Challenge. arXiv preprint arXiv:1803.05457 , 2018. URL https://arxiv.org/abs/1803. 05457 .10 Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. Training Verifiers to Solve Math Word Problems. arXiv preprint arXiv:2110.14168 ,2021. URL https://arxiv.org/abs/2110.14168 .Chenwei Cui, Rockwell Jackson, Benjamin Joseph Herrera, Ana María Tárano, and Hannah Kerner. Multi-head LatentMoE and head parallel: Communication-efficient and deterministic MoE par-allelism. arXiv preprint arXiv:2602.04870 , 2026. URL https://arxiv.org/abs/2602. 04870 .Tri Dao and Albert Gu. Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality. arXiv preprint arXiv:2405.21060 , 2024. URL https: //arxiv.org/abs/2405.21060 .DeepSeek-AI. DeepEP: An efficient expert-parallel communication library. GitHub repository, 2025. URL https://github.com/deepseek-ai/DeepEP .Yihe Dong, Jean-Baptiste Cordonnier, and Andreas Loukas. Attention is not all you need: Pure attention loses rank doubly exponentially with depth. In Proceedings of the 38th International Conference on Machine Learning , volume 139 of Proceedings of Machine Learning Research ,pages 2793–2803, 2021. URL https://proceedings.mlr.press/v139/dong21a. html .Venmugil Elango, Nidhi Bhatia, Roger Waleffe, Rasoul Shafipour, Tomer Asida, Abhinav Khattar, Nave Assaf, Maximilian Golub, Joey Guman, Tiyasa Mitra, Ritchie Zhao, Ritika Borkar, Ran Zilberstein, Mostofa Patwary, Mohammad Shoeybi, and Bita Rouhani. LatentMoE: Toward optimal accuracy per FLOP and parameter in mixture of experts. arXiv preprint arXiv:2601.18089 , 2026. URL https://arxiv.org/abs/2601.18089 .William Fedus, Barret Zoph, and Noam Shazeer. Switch Transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23(120):1–39, 2022. URL https://arxiv.org/abs/2101.03961 .Wentao Guo, Mayank Mishra, Xinle Cheng, Ion Stoica, and Tri Dao. SonicMoE: Accelerating MoE with IO and tile-aware optimizations. arXiv preprint arXiv:2512.14080 , 2025. URL 
+
+https://arxiv.org/abs/2512.14080 .Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. Measuring Massive Multitask Language Understanding. In International Conference on Learning Representations , 2021a. URL https://arxiv.org/abs/2009.03300 .Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. Measuring Mathematical Problem Solving With the MATH Dataset. arXiv preprint arXiv:2103.03874 , 2021b. URL https://arxiv.org/abs/2103.03874 .Chao Jin, Ziheng Jiang, Zhihao Bai, Zheng Zhong, Juncai Liu, Xiang Li, Ningxin Zheng, Xi Wang, Cong Xie, Qi Huang, Wen Heng, Yiyuan Ma, Wenlei Bao, Size Zheng, Xuegui Zheng, Yanghua Peng, Haibin Lin, Xuanzhe Liu, Xin Jin, and Xin Liu. MegaScale-MoE: Large-Scale Communication-Efficient Training of Mixture-of-Experts Models in Production. In Proceedings of the 21st European Conference on Computer Systems , pages 366–382. ACM, 2026. doi: 10.1145/ 3767295.3769325. URL https://dl.acm.org/doi/10.1145/3767295.3769325 .Guokun Lai, Qizhe Xie, Hanxiao Liu, Yiming Yang, and Eduard Hovy. RACE: Large-scale ReAding Comprehension Dataset From Examinations. In Proceedings of the 2017 Conference on Empirical Methods in Natural Language Processing , pages 785–794, 2017. URL https://arxiv.org/ abs/1704.04683 .Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu, Dehao Chen, Orhan Firat, Yanping Huang, Maxim Krikun, Noam Shazeer, and Zhifeng Chen. GShard: Scaling giant models with conditional computation and automatic sharding. arXiv preprint arXiv:2006.16668 , 2020. URL https: //arxiv.org/abs/2006.16668 .11 Aitor Lewkowycz, Anders Andreassen, David Dohan, Ethan Dyer, Henryk Michalewski, Vinay Ramasesh, Ambrose Slone, Cem Anil, Imanol Schlag, Theo Gutman-Solo, Yuhuai Wu, Behnam Neyshabur, Guy Gur-Ari, and Vedant Misra. Solving Quantitative Reasoning Problems with Language Models. arXiv preprint arXiv:2206.14858 , 2022. URL https://arxiv.org/abs/ 2206.14858 .Opher Lieber, Barak Lenz, Hofit Bata, Gal Cohen, Jhonathan Osin, Itay Dalmedigos, Erez Safahi, Shaked Meirom, Yonatan Belinkov, Shai Shalev-Shwartz, Omri Abend, Raz Alon, Tomer Asida, Amir Bergman, Roman Glozman, Michael Gokhman, Avashalom Manevich, Nir Ratner, Noam Rozen, Erez Shwartz, Mor Zusman, and Yoav Shoham. Jamba: A Hybrid Transformer-Mamba Language Model. arXiv preprint arXiv:2403.19887 , 2024. URL https://arxiv.org/abs/ 2403.19887 .Hunter Lightman, Vineet Kosaraju, Yura Burda, Harri Edwards, Bowen Baker, Teddy Lee, Jan Leike, John Schulman, Ilya Sutskever, and Karl Cobbe. Let’s Verify Step by Step. arXiv preprint arXiv:2305.20050 , 2023. URL https://arxiv.org/abs/2305.20050 .Ilya Loshchilov, Cheng-Ping Hsieh, Simeng Sun, and Boris Ginsburg. nGPT: Normalized Transformer with representation learning on the hypersphere. arXiv preprint arXiv:2410.01131 , 2024. URL 
+
+https://arxiv.org/abs/2410.01131 .NVIDIA et al. NVIDIA Nemotron 3: Efficient and Open Intelligence. arXiv preprint arXiv:2512.20856 , 2025a. URL https://arxiv.org/abs/2512.20856 .NVIDIA et al. Pretraining Large Language Models with NVFP4. arXiv preprint arXiv:2509.25149 ,2025b. URL https://arxiv.org/abs/2509.25149 .NVIDIA et al. Nemotron 3 Super: Open, Efficient Mixture-of-Experts Hybrid Mamba-Transformer Model for Agentic Reasoning. arXiv preprint arXiv:2604.12374 , 2026. URL https://arxiv. org/abs/2604.12374 .Zihan Qiu, Zekun Wang, Bo Zheng, Zeyu Huang, Kaiyue Wen, Songlin Yang, Rui Men, Le Yu, Fei Huang, Suozhi Huang, Dayiheng Liu, Jingren Zhou, and Junyang Lin. Gated attention for large language models: Non-linearity, sparsity, and attention-sink-free. arXiv preprint arXiv:2505.06708 ,2025. URL https://arxiv.org/abs/2505.06708 .Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. WinoGrande: An Adversarial Winograd Schema Challenge at Scale. In Proceedings of the AAAI Conference on Artificial Intelligence , 2020. URL https://arxiv.org/abs/1907.10641 .The Microsoft AI Team. MAI-Thinking-1: Building a Hill-Climbing Machine. Technical report, Microsoft AI, 2026. URL https://microsoft.ai/pdf/mai-thinking-1.pdf .Yubo Wang, Xueguang Ma, Ge Zhang, Yuansheng Ni, Abhranil Chandra, Shiguang Guo, Weiming Ren, Aaran Arulraj, Xuan He, Ziyan Jiang, Tianle Li, Max Ku, Kai Wang, Alex Zhuang, Rongqi Fan, Xiang Yue, and Wenhu Chen. MMLU-Pro: A More Robust and Challenging Multi-Task Language Understanding Benchmark. arXiv preprint arXiv:2406.01574 , 2024. URL https: //arxiv.org/abs/2406.01574 .Zijie Yan et al. Scalable training of mixture-of-experts models with Megatron Core. arXiv preprint arXiv:2603.07685 , 2026. URL https://arxiv.org/abs/2603.07685 .Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. HellaSwag: Can a Machine Really Finish Your Sentence? In Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics , pages 4791–4800, 2019. URL https://arxiv.org/abs/1905. 07830 .Barret Zoph, Irwan Bello, Sameer Kumar, Nan Du, Yanping Huang, Jeff Dean, Noam Shazeer, and William Fedus. ST-MoE: Designing stable and transferable sparse expert models. arXiv preprint arXiv:2202.08906 , 2022. URL https://arxiv.org/abs/2202.08906 .12

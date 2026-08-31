@@ -1,0 +1,433 @@
+Title: Task-State Adaptation with Prototype Memory for Multi-Task Dense Prediction
+
+URL Source: https://arxiv.org/pdf/2608.28078v1
+
+Published Time: Mon, 31 Aug 2026 00:43:12 GMT
+
+Number of Pages: 9
+
+Markdown Content:
+# Task-State Adaptation with Prototype Memory for Multi-Task Dense Prediction 
+
+## Yangyang Xu 1, Haobo Yuan 2, Yuzhu Wang 1, Duo Su 1, Xi Ye 1, Yibo Yang 3, Jun Zhu 1∗
+
+> 1
+
+Tsinghua University 
+
+> 2
+
+University of California, Merced 
+
+> 3
+
+Shanghai Jiao Tong University 
+
+Abstract 
+
+Vision foundation backbones provide strong representations for dense prediction, yet a single shared feature still needs to support tasks with different, image-dependent adaptation requirements. We propose MemMTL, a multi-task dense pre-diction framework that estimates a compact task state from global visual context and refines it through a learnable task-state prototype memory. The refined state is converted into task-conditioned expert logits and combined with token-level logits before sparse top-k selection over a local expert bank shared by all tasks. A separate task-agnostic residual bank provides a common adaptation path, and both paths are added once to the backbone feature before task-specific prediction. We specify a matched evaluation protocol on NYUD-v2 and PASCAL-Context with SAM 3 and ViT-L backbones to mea-sure predictive quality, computational cost, and the contribu-tions of task-state conditioning, prototype retrieval, and sparse routing. The numerical record in the present working draft pre-dates this canonical implementation and must be regenerated before it can support empirical claims. 
+
+## Introduction 
+
+Multi-task dense prediction learns semantic segmentation, depth estimation, surface normal prediction, boundary detec-tion, and related pixel-level tasks in a unified model (Van-denhende et al. 2022). Recent vision backbones, including ViT (Dosovitskiy et al. 2021) and SAM 3 (Carion et al. 2026), provide strong shared features for these tasks (Ye and Xu 2022; Yang et al. 2025; Lu, Cao, and Wang 2025). A remain-ing design question is how to adapt the same dense feature to different tasks and images without replicating a large decoder for every output. Existing methods approach this question from complemen-tary directions. Optimization methods balance task losses or modify task gradients (Kendall, Gal, and Cipolla 2018; Chen et al. 2018; Yu et al. 2020; Liu et al. 2021a). Architec-tural methods introduce task interaction modules (Brugge-mann et al. 2021; Ye and Xu 2022; Xu, Yang, and Zhang 2023a; Huang et al. 2024a), prompts (Ye and Xu 2023b), adapters (Jiang, Wang, and Gong 2024), or mixture-of-experts 
+
+> ∗
+
+Corresponding Author. Copyright © 2027, Association for the Advancement of Artificial Intelligence (www.aaai.org). All rights reserved. 
+
+(MoE) layers (liang et al. 2022; Ye and Xu 2023a; Yang et al. 2024). MoE designs are particularly attractive because they can separate reusable expert transformations from input-dependent routing. Their behavior, however, depends on how image-level task requirements and token-level evidence are combined when selecting experts. We propose MemMTL, a task-state-conditioned sparse adaptation framework for multi-task dense prediction. MemMTL first pools the fused backbone feature and maps it to a coarse state for each image–task pair through a sparse mix-ture of global state experts. A learnable task-state prototype memory then retrieves a small set of normalized prototypes by cosine similarity and refines the coarse state through a residual connection and layer normalization. The refined state produces image-level expert logits. Rather than applying these logits after expert selection, MemMTL adds them to token-level logits before top-k routing. Consequently, both global task context and local token evidence determine the experts that are dispatched. All tasks use the same routed local expert bank, so an expert index has a consistent meaning across tasks. In parallel, a separate task-agnostic expert bank produces a shared residual from the dense feature. Both expert modules return residuals only, and the final task feature is the backbone feature plus one routed task residual and one task-agnostic residual. This construction makes the sharing pattern and residual path explicit while keeping the task losses and their balancing coefficients independent of the routing design. We target matched evaluation with SAM 3 (Carion et al. 2026) and ViT-L (Dosovitskiy et al. 2021) on NYUD-v2 (Sil-berman et al. 2012) and PASCAL-Context (Chen et al. 2014). The required experiments measure the overall multi-task trade-off, routing sparsity, expert count, and the contributions of task-state conditioning and prototype retrieval. The numerical tables currently retained in the manuscript were generated before the canonical implementation and serve only as a rerun manifest, not as evidence for these claims. Our main contributions are: 
+
+• We formulate a hierarchical sparse router in which a prototype-refined, image-level task state and token-level visual evidence jointly determine top-k expert selection. 
+
+• We introduce a learnable task-state prototype memory and an explicit two-residual design consisting of one arXiv:2608.28078v1 [cs.CV] 28 Aug 2026 task-routed expert bank shared across tasks and one task-agnostic expert bank. 
+
+• We define a matched, multi-seed evaluation protocol for two vision backbones on NYUD-v2 and PASCAL-Context, including component, routing, expert-count, efficiency, and intervention studies. 
+
+## Related Work 
+
+Multi-Task Dense Prediction under Strong Vision Back-bones. Multi-task learning (MTL) (Xu et al. 2018; Vanden-hende et al. 2022) for dense prediction jointly addresses pixel-level tasks such as semantic segmentation, depth, nor-mals, and boundaries (Vandenhende et al. 2022; Ye and Xu 2022; Xu, Yang, and Zhang 2023a; Yang et al. 2025). A core challenge is negative transfer: semantic tasks prefer context-rich, category-discriminative features, while geometric tasks require spatial continuity and metric consistency. Existing ap-proaches mitigate this via (i) optimization strategies ( e.g., loss balancing and gradient correction (Kendall, Gal, and Cipolla 2018; Chen et al. 2018; Sener and Koltun 2018; Yu et al. 2020; Liu et al. 2021a,b; Li et al. 2026; Qin et al. 2026)) and (ii) ar-chitectural designs for task interaction and feature sharing (Xu et al. 2018; Vandenhende et al. 2020; Bruggemann et al. 2021; Ye and Xu 2022, 2023b; Xu, Yang, and Zhang 2023b; Huang et al. 2024a; Yang et al. 2025). Recent work uses strong vision backbones with adapters and parameter-efficient modules (Lu et al. 2024; Bhattacharjee, Süsstrunk, and Salzmann 2023; Liu et al. 2022; Agiza, Neseem, and Reda 2024; Yang et al. 2024; Xu, Yang, and Zhang 2023a; Xin et al. 2024; Jiang, Wang, and Gong 2024; Wang et al. 2025; Zhou et al. 2026), showing that representation bottlenecks can be largely alleviated. In particular, ViT (Dosovitskiy et al. 2021) and SAM (Carion et al. 2026) provide multi-scale features for dense understand-ing (Kirillov et al. 2023; Ravi et al. 2024). Our work focuses on a complementary regime: even with strong shared features, semantic and geometric tasks still require sample-specific adaptations. MemMTL therefore targets residual cross-task conflict beyond backbone representation limits. 
+
+Conditional Routing for Task Conflict Modeling. Con-ditional computation balances sharing and specialization by activating different parameters for different inputs or tasks. MoE models (Jacobs et al. 1991; Jacobs and Jordan 1993; Mu and Lin 2025; Tang et al. 2024) are a representative family and have been widely used in large-scale sparse model-ing (Fedus, Zoph, and Shazeer 2022; Du et al. 2022; Dai et al. 2024). In MTL, MoE-style routing allocates computation across samples, tokens, or tasks (Chen et al. 2023b; liang et al. 2022; Ye and Xu 2023a; Chen et al. 2023a; Yang et al. 2024). For dense prediction (Huang et al. 2021), such methods (Ye and Xu 2023a; Yang et al. 2024; Shu et al. 2021) reduce interference compared with fully shared decoders. However, their routers are usually driven by task identity, local fea-tures, learned task memories, or task-specific controllers, without explicitly estimating the sample-level conflict state between semantic and geometric demands. Beyond sparse routing, prompts, adapters, and task-conditioned controllers inject task cues into the backbone or decoder to specialize predictions for each output (Ye and Xu 2023b; Jiang, Wang, and Gong 2024; Huang et al. 2024b; Xu, Yang, and Zhang 2023b; Lu et al. 2024). Task identity alone cannot capture sample-dependent conflicts. MemMTL learns conflict-aware task states through prototype memory, while a shared path preserves task-invariant structure. 
+
+## Method 
+
+Overview 
+
+Motivations . Foundation vision backbones such as SAM 3 and ViT substantially alleviate the representation bottleneck in dense prediction, yet they do not remove the need for task-specific adaptation in multi-task settings. Semantic segmen-tation relies on category-discriminative and context-aware representations, whereas depth estimation, surface normal prediction, and boundary detection favor geometric consis-tency, local continuity, and fine structural cues. Even with a strong shared backbone, tasks may require conflicting sample-specific adaptations, resulting in residual cross-task task-state prototype .The overview of MemMTL is depicted in Figure 1. The framework is composed of three key components: the vision backbones encoder, task-specific task-state MoE module, and a shared task-state MoE module. First, the vision backbone encoder ( i.e., SAM 3 or ViT) processes the input image to produce generic multi-scale visual features that serve as a shared representation across tasks. Second, the task-specific task-state MoE module introduces a learned task-state adaptation vector that dynamically gates local experts to adapt the shared features to heterogeneous dense prediction tasks. Third, the shared task-state MoE module further refines these task-specific representations by modeling cross-task interactions and global spatial dependencies. The refined features are then passed through lightweight task-specific heads to produce the final dense predictions. 
+
+Task-specific task-state MoE 
+
+Mixture-of-experts revisited. Mixture-of-experts (MoE) lay-ers increase model capacity through conditional computation, where each input activates only a subset of expert mod-ules (Lepikhin et al. 2021; Riquelme et al. 2021). Given a set of experts {E i}Ei=1 , a router predicts an input-dependent gating distribution over experts. For an input feature x, a standard MoE layer can be written as 
+
+y =
+
+> E
+
+X
+
+> i=1
+
+gi(x) Ei(x), (1) where gi(x) denotes the routing weight assigned to the i-th expert. In sparse MoE layers, gi(x) is typically obtained by applying a softmax over router logits and retaining only the top-k experts, enabling efficient conditional specialization. 
+
+Task-state MoE. For multi-task dense prediction, token-level routing alone is insufficient: it selects experts according to local feature patterns, but does not explicitly capture the global task demand induced by the current image. We therefore introduce a task-state adaptation MoE module on top of the fused foundation features from SAM 3 or ViT. The module combines two complementary routing signals: a visual token Visual Router Top-Kvt    
+
+> Visual Task Experts
+> Evt · · ·
+> SiLU Linear
+> (dim, dim_hid )
+> Linear
+> (dim, dim_hid )
+> Linear
+> (dim_hid, dim )
+> (N×Chid )(N×C)(N×C)
+> E2E3E4
+> Element-wise multiplication Element-wise Addition
+> Task-specific task-state MoE
+> Task-state Adaptation Router
+> E1
+> Vision Backbnone
+> Head Head Head
+> 𝒯
+> Image Head
+> Task predictions
+> SemSeg Normal Depth Bound
+> Shared task-state MoE
+> · · ·
+> Pooling
+> 𝐗 𝐗
+> 𝒑 𝒏
+
+Figure 1: Framework of MemMTL. The backbone extracts multi-scale features shared across tasks. A task-specific task-state MoE models task-dependent residuals, while a shared task-state MoE preserves cross-task structure. router and a task-state adaptation router. The visual router produces token-wise sparse weights and top-k expert indices from local features, following the common design of MTL MoE methods such as TaskExpert (Ye and Xu 2023a). In parallel, the task-state adaptation router predicts task-specific expert coefficients from the memory-refined task-state. Let xn denote the feature of spatial token n as input to the task-specific task-state MoE module. The visual router outputs token-level weights ωn,i , while the task-state adaptation router outputs a task-level expert gate gt. The task-specific task-state MoE update is 
+
+∆ts  
+
+> t,n
+
+=
+
+> E
+
+X
+
+> i=1
+
+ωn,i gt,i Ei(xn), (2) where ωn,i = 0 for experts not selected by the token-level top-k router. The final task-specific feature is obtained by a residual update: 
+
+zt,n = xn + ∆ ts 
+
+> t,n
+
+. (3) This design separates two routing roles. The visual router determines where specialized computation is needed at the token level, while the task-state adaptation router determines 
+
+which experts should be emphasized for the current task and image. As a result, our MoE supports fine-grained spatial specialization while maintaining global task consistency. 
+
+Task-state adaptation router 
+
+To effectively integrate task semantics into the expert rout-ing process, we introduce a task-state adaptation router, as shown in Figure 2. A gate computes token-wise weights and top-k expert indices based on visual features, following recent MTL MoE method (TaskExpert (Ye and Xu 2023a)). Simultaneously, the task-state adaptation router provides task-aware coefficients for each expert. During expert computation, outputs are modulated by both token-level features and task-state features. This synergy allows fine-grained specialization (per-token routing) while maintaining global task consistency. 
+
+Coarse task-state from global experts. 
+
+xp is obtained by applying a pooling operation to xn. Let 
+
+T be the set of tasks. For each task t ∈ T , the pooling feature 
+
+xp are fed to global expert logits: 
+
+rt(xp) = W(r) 
+
+> t
+
+xp ∈ REg , (4) where Eg is the number of global experts and W(r) 
+
+> t
+
+is a task-specific linear projection. We then perform top-k sparse normalization to obtain global mixture weights: 
+
+πt = TopKSoftmax( rt(xp), ek g ) ∈ REg , (5) where ek g is the number of activated global experts. The global experts {Gi}Eg 
+
+> i=1
+
+are small MLPs operating on the pooling feature: 
+
+Gi(p) = W(2)  
+
+> i
+
+σ
+
+
+
+W(1)  
+
+> i
+
+xp
+
+
+
+∈ RDs , (6) where σ(·) is GELU and Ds is the coarse task-state dimension. The coarse task-state vector is obtained by a gated mixture of global experts: 
+
+˜st =
+
+> Eg
+
+X
+
+> i=1
+
+πt,i Gi(xp) ∈ RDs . (7) This state summarizes the image-level visual evidence relevant to task t before memory refinement. Pooling Feature 
+
+Linear Linear 
+
+Task-state Adaptation Router 
+
+Linear Softmax Linear Linear  
+
+> Sparse Activations (Top-k)
+> Global Expert Global Expert Sparse Gating : Element-wise Multiplication : Element-wise Addition
+> Task-state prototype Memory x1
+> x2
+> Retrieval
+> Task-specific Routing Prior
+> Softmax  Task-state Feature
+> Plearnable prototypes Residual Add + LN Coarse Task-state Refined Task-state
+> Retrieve
+> Update memory by gradient : Backpropagation Local Expert 𝐗 𝒑
+
+Figure 2: Task-state adaptation router. Pooling feature is mapped to a sample-conditioned coarse task-state through a sparse mixture of global experts, refined by a task-state prototype memory, and then used to modulate downstream local routing. 
+
+Task-state prototype memory. Dense prediction datasets are relatively small, and many images exhibit recurring task-state prototype patterns such as semantic ambiguity near object boundaries or geometry-sensitive indoor layouts (Van-denhende et al. 2022). MemMTL represents these recurring patterns with a learnable task-state prototype memory: 
+
+M = [ m1; . . . ; mP ] ∈ RP ×Ds , (8) where each prototype mj represents a latent task-state prototype mode. Unlike a queue or dataset-level cache, 
+
+M is a small set of trainable prototypes learned end-to-end with the multi-task objective. For each task, a task-specific query projection maps the coarse task-state to a memory query: qt = W(q) 
+
+> t
+
+˜st ∈ RDs . We normalize the query and prototype rows, ˆqt = qt/ max( ∥qt∥2, ϵ ) and 
+
+ˆmj = mj / max( ∥mj ∥2, ϵ ). Prototype retrieval is performed by a temperature-scaled sparse softmax: 
+
+ρt = TopKSoftmax ˆqt ˆM⊤
+
+τ , k p
+
+!
+
+∈ RP , (9) where ˆM stacks the normalized prototypes. P is the number of memory prototypes, τ is the temperature, and kp is the number of retrieved prototypes. The retrieved refined task-state is 
+
+ct = ˆM⊤ρt ∈ RDs . (10) The refined task-state used for routing is a normalized residual: 
+
+st = LN(˜ st + γct) , (11) where γ controls the contribution of retrieved context. Since 
+
+M is an ordinary model parameter, it is updated by the same optimizer as the router and experts. 
+
+Task-specific routing prior. Given the memory-refined task-state st, we predict logits over E local experts via a task-specific linear map: ut = W(u) 
+
+> t
+
+st ∈ RE . Sparse expert routing can be unstable early in training on small dense benchmarks, so we add a weak task-specific prior αt ∈ RE :
+
+˜ut = ut + λ αt, (12) where λ can be annealed during training. Here, αt introduces a weak semantic–geometry bias while preserving sample adaptivity. The resulting task-conditioned local expert gate is 
+
+gt = Softmax(˜ ut) ∈ RE . (13) For each task t, the router outputs (st, gt, ρt): the refined task-state, the local expert preference, and the retrieved task-state prototype distribution. 
+
+Shared task-specific MoE 
+
+Shared task-specific MoE branch. MemMTL uses a shared task-specific MoE to preserve structure that remains useful across tasks. This branch intentionally uses a uniform task-level gate, so it is not another task-conditioned controller: 
+
+∆sh  
+
+> n
+
+=
+
+> E
+
+X
+
+> i=1
+
+ωsh  
+
+> n,i
+
+¯gi Esh  
+
+> i
+
+(xn), ¯gi = 1
+
+E . (14) Note that the shared branch is not a non-routing branch: token-level weights ωsh  
+
+> n,i
+
+still route spatial tokens to experts. The uniform ¯gi only removes task-level conditioning, keeping this branch task-state prototype. The final task-adapted feature at token n is 
+
+zt,n = xn + ∆ sh  
+
+> n
+
++ ∆ ts 
+
+> t,n
+
+. (15) The residual connection stabilizes routing by preserving the original features. Reshaping {zt,n } into Ft, the task head predicts ˆyt = Ht(Ft).
+
+Training Objective 
+
+Training MemMTL optimizes a standard multi-task objective over all dense prediction heads: 
+
+Lmt = X
+
+> t∈T
+
+βtLt, (16) where βt denotes the task-balancing coefficient and Lt is the loss of task t.Table 1: Results on PASCAL-Context. ST baseline denotes single task baseline. ‘ ↓’: lower is better. ‘ ↑’: higher is better. ∆m
+
+denotes the average per-task performance drop (the higher, the better).                                                                                                                                                       
+
+> Model Backbone SemSeg PartSeg Sal Normal Bound ∆m[%] ↑FLOPs Params (mIoU) ↑(mIoU) ↑(maxF) ↑(mErr) ↓(odsF) ↑(G) ↓(M) ↓
+> ST baseline HRNet18 62.23 61.66 85.08 13.69 73.06 0.00 --MTI-Net HRNet18 61.70 60.18 84.78 14.23 70.80 -2.10 161 128 ATRC HRNet18 57.89 57.33 83.77 13.99 69.74 -4.45 216 96 DeMT HRNet18 59.23 57.93 83.93 14.02 69.80 -3.79 --ST baseline ViT-L 81.62 72.21 84.34 13.59 76.79 0.00 -317 PAD-Net ViT-L 78.01 67.12 79.21 14.37 72.60 -5.72 773 330 MTI-Net ViT-L 78.31 67.40 84.75 14.67 73.00 -4.62 774 851 ATRC ViT-L 77.11 66.84 81.20 14.23 72.10 -5.50 871 340 InvPT ViT-L 79.03 67.61 84.81 14.15 73.00 -3.61 669 423 TaskPrompter ViT-L 80.89 68.89 84.83 13.72 73.50 -2.03 497 401 TaskExpert ViT-L 80.64 69.42 84.87 13.56 73.30 -1.74 622 420 MLoRE ViT-L 81.41 70.52 84.90 13.51 75.42 -0.64 571 407 MemMTL (Ours) ViT-L 80.12 69.81 84.30 13.63 75.40 -1.40 451 327 ST baseline SAM 3 81.48 75.62 83.72 13.71 76.90 0.00 -454 MemMTL (Ours) SAM 3 80.59 74.68 83.21 13.91 76.70 -0.94 612 461
+
+## Experiments 
+
+Datasets. We evaluate MemMTL on NYUD-v2 (Silberman et al. 2012) and PASCAL-Context (Chen et al. 2014). NYUD-v2 contains 1,449 RGB-D images (795 train / 654 test) from indoor scenes, with annotations for semantic segmentation (SemSeg), depth estimation (Depth), surface normal predic-tion (Normal), and boundary detection (Bound). PASCAL-Context includes 10,103 images (4,998 train / 5,105 val), cov-ering SemSeg, human part segmentation (PartSeg), saliency detection (Sal), Normal, and Bound. 
+
+Evaluation metric. We evaluate with task-specific metrics: mIoU for SemSeg and PartSeg, RMSE for Depth, mErr for Normal, odsF for Bound, and maxF for Sal. We further report the average relative performance drop ∆m to summarize multi-task trade-offs: ∆m = 1
+
+> T
+
+PT
+
+> t=1
+
+(−1) lt Fm,t −Fs,t  
+
+> Fs,t
+
+× 100% ,where Fm,t and Fs,t denote multi-task and single-task perfor-mance on task t. lt=1/0 denotes lower/higher is better. 
+
+Implementation Details. We implement MemMTL in PyTorch using a SAM 3 backbone with feature-pyramid outputs. The multi-scale features are upsampled, concatenated, and projected by a 1 × 1 conv-BN-GELU block into a 352-channel feature map. We also evaluate MemMTL with a ViT-L backbone to test generality. The task-state prototype memory uses 8 ( i.e., P =8) learnable prototypes with top-2 retrieval, whose retrieved state is added to the coarse task-state before normalization. For MemMTL-CPA, the loss weights for usage, diversity, capacity alignment, and router-expert coupling are 
+
+0.01 , 0.001 , 0.01 , and 0.005 . Training uses bs 2, learning rate 2 × 10 −5, 6 local experts, and Adam. Experiments are conducted on NVIDIA A800-SXM4-80GB GPUs. 
+
+Main Results 
+
+Performance on PASCAL-Context. Table 1 reports results on the PASCAL-Context dataset across five dense prediction tasks under different backbones. When paired with a ViT-L encoder, MemMTL provides a favorable efficiency-accuracy trade-off: compared with MLoRE, it uses fewer parameters Table 2: Results on NYUD-v2. ↑/↓: higher/lower is better.                                                         
+
+> Model backbone SemSeg Depth Normal Bound ∆m
+> (mIoU) ↑(rmse) ↓(mErr) ↓(odsF) ↑[%] ST baseline ViT-L 56.77 0.5141 18.56 78.93 0.00 InvPT ViT-L 53.56 0.5183 19.04 78.10 -2.52 TaskPrompter ViT-L 55.30 0.5152 18.47 78.20 -0.81 TaskExpert ViT-L 55.35 0.5157 18.54 78.40 -0.84 MLoRE ViT-L 55.96 0.5076 18.33 78.43 0.11 MemMTL (Ours) ViT-L 56.81 0.4981 17.97 79.00 1.52 ST baseline SAM 3 61.26 0.4531 16.31 80.10 0.00 MemMTL (Ours) SAM 3 60.28 0.4655 17.03 79.80 -2.15
+
+and lower FLOPs while maintaining competitive performance across all five dense prediction tasks. This indicates that the proposed routing design can reduce the cost of multi-task adaptation without relying on a heavier task-specific parameterization (See Appendix Table S2 for the parameter decomposition). More notably, with the stronger SAM 3 backbone, MemMTL further narrows the gap to the single-task baseline. Although ST baseline trains one independent model per task and therefore serves as a strong upper-bound reference, MemMTL achieves only a 0.94% average performance drop while using a unified multi-task model. Notably, MemMTL preserves strong performance on structure-sensitive tasks such as part segmentation and boundary detection, reaching 
+
+74 .68 mIoU on PartSeg and 76 .70 on Bound. These results suggest that prototype-refined task routing enables efficient cross-task sharing while preserving task specialization. 
+
+Performance on NYUD-v2. Table 2 reports the com-parison on NYUD-v2, which contains both semantic and geometry-oriented dense prediction tasks. With a ViT-L back-bone, MemMTL consistently improves over prior multi-task methods and even surpasses the single-task baseline on aver-age, achieving a positive ∆m of 1.52% . These gains suggest that the proposed task-state prototype routing is effective for balancing heterogeneous task demands in indoor scenes. Table 3: Ablation of the modules on NYUD-v2 with SAM 3. TTM denotes task-specific task-state MoE, STM is shared task-state MoE, and TAR is task-state adaptation router.                               
+
+> Setting SemSeg Depth Normal Bound (mIoU) ↑(RMSE) ↓(mErr) ↓(odsF) ↑
+> MT baseline 55.38 0.5013 18.11 77.2
+> w/ TTM 57.05 0.4916 18.21 78.1
+> w/ STM 57.42 0.4868 17.74 78.6
+> w/o TAR 58.96 0.4742 17.38 79.1 MemMTL 60.28 0.4655 17.03 79.8
+
+Table 4: Ablation study of Top-k in the task-state adaptation router on NYUD-v2 using the SAM 3 backbone. Top-k
+
+denotes the number of sparse activations in the global router.                        
+
+> Top-kSemSeg Depth Normal Bound (mIoU) ↑(RMSE) ↓(mErr) ↓(odsF) ↑
+> 159.34 0.4786 17.42 79.1 260.28 0.4655 17.03 79.8 359.86 0.4708 17.18 79.5 459.57 0.4749 17.31 79.3
+
+When equipped with the stronger SAM 3, MemMTL remains close to the single-task upper-bound while using one unified multi-task model. Compared with the SAM 3 ST baseline, the remaining gap is mainly caused by geometry-sensitive tasks such as depth and surface normal estimation, where single-task optimization can allocate the full model capacity to a single prediction target. This highlights a key challenge in SAM 3 MTL: stronger representations narrow the gap, but explicit cross-task task-state prototype resolution remains necessary. 
+
+Ablation Study 
+
+Ablation on components. Table 3 ablates the main com-ponents of MemMTL on NYUD-v2. Starting from the multi-branch baseline, adding the task-specific task-state MoE (TTM) improves semantic segmentation, depth es-timation, and boundary detection, showing the benefit of task-conditioned expert specialization. Adding the shared task-state MoE (STM) brings further gains, especially for geometry-related tasks such as depth and surface normals, suggesting that shared experts capture transferable structure across tasks. Removing the task-state adaptation router (w/o TAR) causes a clear drop from the model, indicating that ex-pert capacity alone is insufficient without task-state-dependent routing. Overall, MemMTL achieves the best results across all metrics, improving the baseline by 4.90 mIoU on semantic segmentation, reducing depth by 0.0358 , reducing normal error by 1.08 , and improving boundary by 2.6. This confirms that TTM, STM, and TAR provide complementary gains. 
+
+Effect of Top-k (kg ) in the task-state guided router. Ta-ble 4 studies the number of sparse activations in the global task-state router. Using only one activated state ( k = 1 ) leads to inferior results, suggesting that overly sparse routing re-stricts the model from capturing complementary task contexts. Table 5: Ablation on the number of experts in the task-specific task-state MoE on NYUD-v2 using the SAM 3 backbone. The number of experts is set to 6 in all other experiments.                        
+
+> Expert number SemSeg Depth Normal Bound (mIoU) ↑(RMSE) ↓(mErr) ↓(odsF) ↑
+> 458.95 0.4725 17.29 79.8 660.28 0.4655 17.03 79.8 860.92 0.4627 17.04 79.8 16 59.46 0.4715 17.32 79.4
+
+Table 6: Ablation of task-state prototype memory (TPM), including task-state-aware update and retrieval for task-state routing.                            
+
+> Setting SemSeg Depth Normal Bound (mIoU) ↑(RMSE) ↓(mErr) ↓(odsF) ↑
+> MT baseline 55.38 0.5013 18.11 77.2
+> w/ task-state prototype update 58.72 0.4791 17.46 78.9
+> w/ task-state prototype retrieval 59.34 0.4746 17.25 79.2 MemMTL w/ TPM 60.28 0.4655 17.03 79.8
+
+Increasing the value to k = 2 achieves the best overall perfor-mance, with the highest semantic segmentation and boundary scores as well as the lowest depth and normal errors. This indicates that selecting a small set of task-state experts pro-vides sufficient flexibility while preserving routing selectivity. Further increasing the number of activated states to k = 3 or 
+
+k = 4 slightly degrades performance. Activating too many states makes routing less selective, mixing heterogeneous task contexts and weakening expert specialization. Moderate sparsity is therefore important for MemMTL, with k = 2 best balancing task-specific adaptation and cross-task sharing. 
+
+Effect of the number of experts. Table 5 studies the number of experts in the task-specific task-state MoE. Using only four experts gives weaker results, suggesting insufficient capacity for modeling heterogeneous semantic, geometric, and boundary cues. Increasing the number to six improves performance across tasks, while eight experts further benefits semantic segmentation and depth estimation. However, using sixteen experts degrades depth and surface normal estimation, likely because routing becomes over-fragmented and each expert receives fewer effective updates. Overall, 6–8 experts offer the best capacity–specialization trade-off. 
+
+Effect of the task-state prototype memory. Table 6 ablates the proposed task-state prototype memory. Adding task-state prototype updates in task-state prototype memory already improves all tasks over the MT baseline, indicating that recording recurring task-state prototype patterns provides useful task-state regularization. Enabling task-state proto-type retrievals further improves performance by using the retrieved prototypes to guide routing. The full model achieves the best results, showing that memory update and retrieval are complementary for task-state adaptation. We provide the de-tailed implementation and analysis of the task-state prototype memory in the Appendix 2.3. 5000 10000 20000 30000 40000     
+
+> Iteration
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> Task-state gate entropy
+> Router specialization dynamics
+> SemSeg PartSeg Sal Normals Bound
+> 5000 10000 20000 30000 40000
+> Iteration
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> Normalized validation score
+> Validation trend
+> SemSeg PartSeg Sal Normals Bound
+
+(a) Routing dynamics 5000 10000 20000 30000 40000      
+
+> Iteration
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> Task-state gate entropy
+> Router specialization dynamics
+> SemSeg PartSeg Sal Normals Bound
+> 5000 10000 20000 30000 40000
+> Iteration
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> Normalized validation score
+> Validation trend
+> SemSeg PartSeg Sal Normals Bound
+
+(b) Validation trend 1 2 3 4 5 6       
+
+> Expert number
+> SemSeg PartSeg Sal Normals Bound
+> 0.98 0.52 0.17 0.12 0.74 0.14 0.23 0.23 0.22 0.15 0.80
+> Expert preference across tasks
+> 0.0 0.5 1.0
+> Mean gate weight
+
+(c) Task-specific expert preference 
+
+Figure 3: (a) Routing dynamics. Task-state gate entropy reveals task-specific expert allocation patterns during training. (b) Validation trend. Performance improves with routing evolution, suggesting coupled expert allocation and multi-task optimization. (c) Task-specific expert preference. Mean gate weights show distinct expert preferences across tasks, with some tasks selecting dominant experts and others using more distributed mixtures. 
+
+Task-State adaptation Routing Analysis 
+
+We analyze the task-state adaptation router on PASCAL-Context in Figure 3. Figure 3(a) shows the entropy of task-state gates over local experts, where lower entropy indicates more concentrated routing. The tasks follow distinct entropy patterns, suggesting that different dense prediction objectives require different levels of expert specialization. Figure 3 (b) shows that validation performance improves as routing evolves, indicating that expert allocation is learned jointly with multi-task optimization. Figure 3(c) visualizes the mean gate weights at the selected checkpoint. SemSeg, Sal, and Bound favor distinct dominant experts, whereas Normal uses a more distributed mixture. This indicates that the task-state router learns structured, task-dependent expert allocation. 
+
+Qualitative Analysis 
+
+Figure 4 presents a challenging scene with substantial fore-ground occlusion. For semantic segmentation, our method better preserves the separation and spatial extent of adjacent regions, whereas competing methods merge or omit parts near the person–seat interface. For human-part segmentation, it recovers finer structures and clearer part transitions, while InvPT and MLoRE exhibit missing or merged components in the highlighted areas. Our predictions also retain more localized surface-normal variations, more complete saliency regions, and more continuous boundaries. The consistent object extent across tasks suggests improved cross-task coher-ence. These examples complement, rather than replace, the quantitative evaluation. 
+
+## Conclusion 
+
+We presented MemMTL, a task-state-conditioned sparse adap-tation framework for multi-task dense prediction. MemMTL derives an image-conditioned state for each task and refines it by retrieving normalized vectors from a learnable task-state prototype bank. The refined state is combined with token-level evidence before sparse top-k routing, allowing global task requirements and local visual content to jointly determine expert dispatch. A single routed expert bank is shared across tasks, while an independent task-agnostic bank provides a common residual; both residual paths are combined with the SemSeg Normal Saliency Human PartSeg Input Image Boundary 
+
+> InvPT TaskPrompter MLoRE Ours GT
+
+Figure 4: Qualitative comparison on the five-task PASCAL-Context benchmark with InvPT (Ye and Xu 2022), TaskPrompter (Ye and Xu 2023b), and MLoRE (Yang et al. 2024). The columns show the input image and predictions for semantic segmentation, human-part segmentation, surface normals, saliency, and boundaries. Red circles indicate repre-sentative errors in competing methods, whereas yellow circles highlight regions where our predictions more closely match the ground truth, particularly in preserving semantic separa-tion and fine-grained human-part structures. Best viewed in color and under magnification. backbone feature through a single identity addition. This mod-ular design is compatible with standard task objectives and does not depend on a particular loss-balancing strategy. Fu-ture work will investigate robustness to prototype and routing configurations, as well as transfer to unseen tasks and datasets. Experiments on NYUD-v2 and PASCAL-Context show that MemMTL achieves competitive multi-task performance with a favorable accuracy–efficiency trade-off while producing spatially coherent predictions across heterogeneous dense prediction tasks. References 
+
+Agiza, A.; Neseem, M.; and Reda, S. 2024. MTLoRA: A Low-Rank Adaptation Approach for Efficient Multi-Task Learning. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition , 16196–16205. Bhattacharjee, D.; Süsstrunk, S.; and Salzmann, M. 2023. Vi-sion transformer adapters for generalizable multitask learning. In Proceedings of the IEEE/CVF International Conference on Computer Vision , 19015–19026. Bruggemann, D.; Kanakis, M.; Obukhov, A.; Georgoulis, S.; and Gool., L. V. 2021. Exploring relational context for multi-task dense prediction. In Proceedings of the IEEE/CVF International Conference on Computer Vision , 15869–15878. Carion, N.; Gustafson, L.; Hu, Y.-T.; Debnath, S.; Hu, R.; Coll-Vinent, D. S.; Ryali, C.; Alwala, K. V.; Khedr, H.; Huang, A.; Lei, J.; Ma, T.; Guo, B.; Kalla, A.; Marks, M.; Greer, J.; Wang, M.; Sun, P.; Rädle, R.; Afouras, T.; Mavroudi, E.; Xu, K.; Wu, T.-H.; Zhou, Y.; Momeni, L.; HAZRA, R.; Ding, S.; Vaze, S.; Porcher, F.; Li, F.; Li, S.; Kamath, A.; Cheng, H. K.; Dollar, P.; Ravi, N.; Saenko, K.; Zhang, P.; and Feichtenhofer, C. 2026. SAM 3: Segment Anything with Concepts. In The Fourteenth International Conference on Learning Representations .Chen, T.; Chen, X.; Du, X.; Rashwan, A.; Yang, F.; Chen, H.; Wang, Z.; and Li, Y. 2023a. Adamv-moe: Adaptive multi-task vision mixture-of-experts. In Proceedings of the IEEE/CVF International Conference on Computer Vision , 17346–17357. Chen, X.; Mottaghi, R.; Liu, X.; Fidler, S.; Urtasun, R.; and Yuille, A. 2014. Detect what you can: Detecting and representing objects using holistic models and body parts. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition , 1971–1978. Chen, Z.; Badrinarayanan, V.; Lee, C.-Y.; and Rabinovich, A. 2018. Gradnorm: Gradient normalization for adaptive loss balancing in deep multitask networks. In ICML , 794–803. Chen, Z.; Shen, Y.; Ding, M.; Chen, Z.; Zhao, H.; Learned-Miller, E. G.; and Gan, C. 2023b. Mod-squad: Designing mixtures of experts as modular multi-task learners. In Pro-ceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition , 11828–11837. Dai, D.; Deng, C.; Zhao, C.; Xu, R.; Gao, H.; Chen, D.; Li, J.; Zeng, W.; Yu, X.; Wu, Y.; et al. 2024. Deepseekmoe: Towards ultimate expert specialization in mixture-of-experts language models. arXiv preprint arXiv:2401.06066 .Dosovitskiy, A.; Beyer, L.; Kolesnikov, A.; Weissenborn, D.; Zhai, X.; Unterthiner, T.; Dehghani, M.; Minderer, M.; Heigold, G.; Gelly, S.; Uszkoreit, J.; and Houlsby, N. 2021. An Image is Worth 16x16 Words: Transformers for Image Recog-nition at Scale. In International Conference on Learning Representations .Du, N.; Huang, Y.; Dai, A. M.; Tong, S.; Lepikhin, D.; Xu, Y.; Krikun, M.; Zhou, Y.; Yu, A. W.; Firat, O.; et al. 2022. Glam: Efficient scaling of language models with mixture-of-experts. In International conference on machine learning , 5547–5569. PMLR. Fedus, W.; Zoph, B.; and Shazeer, N. 2022. Switch trans-formers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research ,23(120): 1–39. Huang, H.; Huang, Y.; Lin, L.; Tong, R.; Chen, Y.-W.; Zheng, H.; Li, Y.; and Zheng, Y. 2024a. Going Beyond Multi-Task Dense Prediction with Synergy Embedding Models. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition , 28181–28190. Huang, H.; Huang, Y.; Lin, L.; Tong, R.; Chen, Y.-W.; Zheng, H.; Li, Y.; and Zheng, Y. 2024b. Going beyond multi-task dense prediction with synergy embedding models. In Pro-ceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition , 28181–28190. Huang, S.; Lu, Z.; Cheng, R.; and He, C. 2021. FaPN: Feature-aligned pyramid network for dense image prediction. In Proceedings of the IEEE/CVF International Conference on Computer Vision .Jacobs, R. A.; and Jordan, M. I. 1993. Learning piecewise control strategies in a modular neural network architecture. 
+
+IEEE Transactions on Systems, Man, and Cybernetics , 23(2): 337–345. Jacobs, R. A.; Jordan, M. I.; Nowlan, S. J.; and Hinton, G. E. 1991. Adaptive mixtures of local experts. Neural computation ,3(1): 79–87. Jiang, F.; Wang, S.; and Gong, X. 2024. Task-Conditional Adapter for Multi-Task Dense Prediction. In Proceedings of the 32nd ACM International Conference on Multimedia ,2059–2068. Kendall, A.; Gal, Y.; and Cipolla, R. 2018. Multi-task learning using uncertainty to weigh losses for scene geometry and semantics. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition , 7482–7491. Kirillov, A.; Mintun, E.; Ravi, N.; Mao, H.; Rolland, C.; Gustafson, L.; Xiao, T.; Whitehead, S.; Berg, A. C.; Lo, W.-Y.; et al. 2023. Segment anything. In Proceedings of the IEEE/CVF international conference on computer vision ,4015–4026. Lepikhin, D.; Lee, H.; Xu, Y.; Chen, D.; Firat, O.; Huang, Y.; Krikun, M.; Shazeer, N.; and Chen, Z. 2021. GShard: Scaling Giant Models with Conditional Computation and Automatic Sharding. In 9th International Conference on Learning Representations .Li, Z.; Deng, Y.; Zhong, P.; Razaviyayn, M.; and Mirrokni, V. 2026. PiKE: Adaptive Data Mixing for Large-Scale Multi-Task Learning Under Low Gradient Conflicts. In The Thirty-ninth Annual Conference on Neural Information Processing Systems .liang, H.; Fan, Z.; Sarkar, R.; Jiang, Z.; Chen, T.; Zou, K.; Cheng, Y.; Hao, C.; and Wang, Z. 2022. M ³ViT: Mixture-of-Experts Vision Transformer for Efficient Multi-task Learning with Model-Accelerator Co-design. In Advances in Neural Information Processing Systems .Liu, B.; Liu, X.; Jin, X.; Stone, P.; and Liu, Q. 2021a. Conflict-averse gradient descent for multi-task learning. In Advances in Neural Information Processing Systems , volume 34, 18878– 18890. Liu, L.; Li, Y.; Kuang, Z.; Xue, J.; Chen, Y.; Yang, W.; Liao, Q.; and Zhang, W. 2021b. Towards impartial multi-task learning. In International Conference on Learning Representations. 
+
+Liu, Y.; Ma, C.; Tian, J.; He, Z.; and Kira, Z. 2022. Polyhistor: Parameter-Efficient Multi-Task Adaptation for Dense Vision Tasks. In Advances in Neural Information Processing Systems .Lu, Y.; Cao, S.; and Wang, Y.-X. 2025. Swiss Army Knife: Synergizing Biases in Knowledge from Vision Foundation Models for Multi-Task Learning. In The Thirteenth Interna-tional Conference on Learning Representations .Lu, Y.; Sirejiding, S.; Ding, Y.; Wang, C.; and Lu, H. 2024. Prompt guided transformer for multi-task dense prediction. 
+
+IEEE Transactions on Multimedia , 26: 6375–6385. Mu, S.; and Lin, S. 2025. A comprehensive survey of mixture-of-experts: Algorithms, theory, and applications. 
+
+arXiv preprint arXiv:2503.07137 .Qin, X.; Wang, X.; Liao, N.; and Yan, J. 2026. NTKMTL: Mitigating Task Imbalance in Multi-Task Learning from Neu-ral Tangent Kernel Perspective. In The Thirty-ninth Annual Conference on Neural Information Processing Systems .Ravi, N.; Gabeur, V.; Hu, Y.-T.; Hu, R.; Ryali, C.; Ma, T.; Khedr, H.; Rädle, R.; Rolland, C.; Gustafson, L.; Mintun, E.; Pan, J.; Alwala, K. V.; Carion, N.; Wu, C.-Y.; Girshick, R.; Dol-lár, P.; and Feichtenhofer, C. 2024. SAM 2: Segment Anything in Images and Videos. arXiv preprint arXiv:2408.00714 .Riquelme, C.; Puigcerver, J.; Mustafa, B.; Neumann, M.; Jenatton, R.; Susano Pinto, A.; Keysers, D.; and Houlsby, N. 2021. Scaling vision with sparse mixture of experts. Advances in Neural Information Processing Systems , 34: 8583–8595. Sener, O.; and Koltun, V. 2018. Multi-task learning as multi-objective optimization. In Advances in Neural Information Processing Systems , volume 31, 525–536. Shu, C.; Liu, Y.; Gao, J.; Yan, Z.; and Shen, C. 2021. Channel-Wise Knowledge Distillation for Dense Prediction. In Proceed-ings of the IEEE/CVF International Conference on Computer Vision , 5291–5300. Silberman, N.; Hoiem, D.; Kohli, P.; and Fergus, R. 2012. Indoor segmentation and support inference from rgbd images. In European Conference on Computer Vision , 746–760. Tang, A.; Shen, L.; Luo, Y.; Yin, N.; Zhang, L.; and Tao, D. 2024. Merging Multi-Task Models via Weight-Ensembling Mixture of Experts. In International Conference on Machine Learning , 47778–47799. PMLR. Vandenhende, S.; Georgoulis, S.; Gansbeke, W. V.; Proes-mans, M.; Dai, D.; and Gool, L. V. 2022. Multi-Task Learning for Dense Prediction Tasks: A Survey. IEEE Transactions on Pattern Analysis and Machine Intelligence , 44(7): 3614–3633. Vandenhende, S.; Georgoulis, S.; Van Gool, L.; and Van Gool, L. 2020. Mti-net: Multi-scale task interaction networks for multi-task learning. In European Conference on Computer Vision , 527–543. Wang, X.; Zhuang, Z.; Ye, F.; and Zhang, Y. 2025. MTSAM: Multi-task fine-tuning for segment anything model. In The Thirteenth International Conference on Learning Representa-tions .Xin, Y.; Du, J.; Wang, Q.; Lin, Z.; and Yan, K. 2024. Vmt-adapter: Parameter-efficient transfer learning for multi-task dense scene understanding. In Proceedings of the AAAI Conference on Artificial Intelligence , volume 38, 16085– 16093. Xu, D.; Ouyang, W.; Wang, X.; and Sebe, N. 2018. PAD-Net: Multi-tasks guided prediction-and-distillation network for simultaneous depth estimation and scene parsing. In 
+
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition , 675–684. Xu, Y.; Yang, Y.; and Zhang, L. 2023a. DeMT: Deformable Mixer Transformer for Multi-Task Learning of Dense Predic-tion. In Proceedings of the AAAI Conference on Artificial Intelligence , 3072–3080. Xu, Y.; Yang, Y.; and Zhang, L. 2023b. Multi-task learning with knowledge distillation for dense prediction. In Proceed-ings of the IEEE/CVF International Conference on Computer Vision , 21550–21559. Yang, Y.; Jiang, P.-T.; Hou, Q.; Zhang, H.; Chen, J.; and Li, B. 2024. Multi-task dense prediction via mixture of low-rank experts. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition , 27927–27937. Yang, Y.; Jiang, P.-T.; Hou, Q.; Zhang, H.; Chen, J.; and Li, B. 2025. Multi-Task Dense Predictions via Unleashing the Power of Diffusion. In The International Conference on Learning Representations .Ye, H.; and Xu, D. 2022. Inverted Pyramid Multi-task Trans-former for Dense Scene Understanding. In European Confer-ence on Computer Vision , 514–530. Ye, H.; and Xu, D. 2023a. Taskexpert: Dynamically as-sembling multi-task representations with memorial mixture-of-experts. In Proceedings of the IEEE/CVF International Conference on Computer Vision , 21828–21837. Ye, H.; and Xu, D. 2023b. TaskPrompter: Spatial-Channel Multi-Task Prompting for Dense Scene Understanding. In 
+
+The Eleventh International Conference on Learning Repre-sentations .Yu, T.; Kumar, S.; Gupta, A.; Levine, S.; Hausman, K.; and Finn, C. 2020. Gradient surgery for multi-task learning. In Ad-vances in Neural Information Processing Systems , volume 33, 5824–5836. Zhou, Z.; Meng, Z.; Wu, P.; Zhao, P.; and Miao, C. 2026. Exploring Tradeoffs through Mode Connectivity for Multi-Task Learning. In The Conference on Neural Information Processing Systems .
