@@ -1,0 +1,1035 @@
+Title: Structure Aware Neural Architecture Search for Mixture of Experts
+
+URL Source: https://arxiv.org/pdf/2608.29817v1
+
+Published Time: Tue, 01 Sep 2026 01:26:57 GMT
+
+Number of Pages: 23
+
+Markdown Content:
+# Structure Aware Neural Architecture Search for Mixture of Experts 
+
+Petr Babkin ∗, Oleg Bakhteev 
+
+Abstract 
+
+Neural Architecture Search (NAS) has so far rarely been applied to Mixture-of-Experts (MoE) models, and existing MoE designs leave the alignment between experts and the structure of the data to emerge on its own. We propose an architecture search framework that makes this alignment an explicit search variable: the assignment of data clusters to experts is optimised jointly with the per-expert architectures. We cast the joint problem as a cluster-aware likeli-hood maximisation, show that it coincides with the incomplete-data maximum likelihood of a latent-variable mixture, and solve it by a generalised Expectation–Maximisation procedure whose otherwise intractable expert-quality term is supplied by an adaptively refined surrogate. We prove that the iterates converge whenever the surrogate errors are summable, and that at every limit point no candidate the search produces improves the true objective. On a heterogeneous image-classification mixture the method recovers the underlying domain partition on 95% of clusters without ever observing domain labels, and on that benchmark and a four-domain time-series forecasting one alike it outperforms the MoE and NAS baselines that likewise use no label information. 
+
+Keywords: Mixture of Experts, Neural Architecture Search, Surrogate model, Expectation–Maximisation 
+
+1. Introduction 
+
+The Mixture-of-Experts (MoE) architecture, in which a gating function routes each input to a small subset of specialized experts, has been well-established in the literature for decades [1, 2] and is now a standard building block of large-scale deep models [3, 4]. Neural Architecture Search (NAS) has in parallel matured into a wide field [5, 6], automating a design step that otherwise requires substantial domain expertise and manual tuning. Despite the individual successes of both methodologies, the application of NAS techniques specifically to MoE architectures remains a relatively underexplored research area, as the survey of prior work in Section 1.1 below shows, presenting significant opportunities for advancing both e ffi ciency and performance in large-scale neural architectures. In contrast to the classical approach where all experts share the same architecture [3], our study allows architectural heterogeneity between experts. We claim that this flexibility enhances the overall e ffi ciency of the resulting architecture by enabling more specialized and adaptable expert networks. The MoE architecture is inherently well-suited for data with strong clustering properties, both in theory [7] and in practice on multimodal datasets [8, 9, 10]. However, despite these promising results, the underlying mechanisms that enable experts to align with distinct modalities remain insu ffi ciently understood, and existing methods leave that alignment to emerge on its own rather than controlling it explicitly. Given the foregoing, we formulate the following research question: how can we design conditions under which expert architectures adapt to specific data clusters? In this study, we aim to address this question by examining how models evolve during adaptation to specific data modalities. 
+
+Contributions 
+
+• Problem formulation. We propose a new formulation of architecture search for Mixture-of-Experts models as a cluster-aware likelihood-maximisation problem, and give a theoretical grounding for it by showing its equivalence to the incomplete-data maximum likelihood of a latent-variable mixture.   
+
+> ∗Corresponding author.
+> Email address: p.k.babkin@gmail.com (Petr Babkin) arXiv:2608.29817v1 [cs.LG] 30 Aug 2026
+
+• Algorithm. We propose an algorithm that solves the stated problem, based on the Expectation–Maximisation (EM) algorithm with an adaptively refined surrogate model. 
+
+• Convergence guarantee. We prove a convergence theorem for the proposed algorithm. 
+
+• Benchmarks and experiments. We construct datasets on which mixture-of-experts approaches have a clear advantage, and conduct comparative experiments against several baselines on them. The source code of the proposed method and of all experiments is publicly available at https://github.com/ intsystems/nas-for-moe .
+
+1.1. Related Work 
+
+Mixture-of-Experts. The Mixture-of-Experts (MoE) framework was originally introduced in [1, 11, 12] as a way to combine specialised statistical models through a learnable gating mechanism. Subsequent theoretical analyses characterised identifiability and convergence in classical MoE formulations [13, 14, 15, 16]. With the rise of deep learning, MoE has been revived in the form of sparsely activated neural networks, where the gate routes each input to only a small subset of experts [17, 18, 19, 3]. This sparse formulation enables training of models with hundreds of billions of parameters while keeping per-token compute roughly constant, and is now a standard building block of modern large-scale transformers [4, 20, 21]. 
+
+Domain specialisation of experts. A complementary line of work constructs experts that specialise to data domains explicitly . DEMix layers [22] condition expert selection on document-level domain metadata; Branch-Train-Merge [23] trains independent expert language models per domain and observes that ensembles built from random data splits perform poorly; c-BTM [24] removes the need for metadata by discovering domains via k-means clustering of corpus embeddings and dedicating one expert to each cluster; Branch-Train-MiX [25] subsequently merges such domain experts into a single sparse MoE layer with a learned router. In all of these methods the cluster-to-expert mapping is fixed a priori and all experts share the same architecture, whereas we treat both the mapping and the per-expert architectures as optimisation variables. The need for such an explicit mechanism is supported by analyses of trained sparse MoE models: the routers of Mixtral exhibit no topic-level expert specialisation [4], and OLMoE finds that domain specialisation emerges only partially — and in an uncontrolled manner — when training from scratch [26]. Sparse MoE has also been adopted by time-series foundation models such as Time-MoE [27] and Moirai-MoE [28]; the latter routes tokens through k-means centroids of pretrained representations, which is close in spirit to our cluster-level formulation, but neither model searches expert architectures or optimises the cluster-level assignment itself. 
+
+Neural Architecture Search. Neural Architecture Search (NAS) automates the design of neural networks and has matured into a wide research field [5]. Many-shot approaches based on reinforcement learning [29, 30, 31] or evolutionary search [32, 33] explicitly train candidate architectures and select the best performer. One-shot methods reduce the search cost by training a single supernet that contains all candidate architectures as sub-networks [6, 34, 35, 36]. DARTS [6] is the most prominent representative of this family and forms one of the baselines we compare against in our experimental study. 
+
+Neural Architecture Search for Mixture-of-Experts. The intersection of NAS and MoE is a comparatively recent and still sparsely populated research area. AutoMoE [37] applies an evolutionary search on top of a shared supernet to obtain heterogeneous MoE architectures for neural machine translation; Brainformers [38] search over block types including sparse-FFN layers at foundation-model scale; and a recent automated pipeline search explores heterogeneous 4-expert mixtures [39]. CMN [40] co-designs MoE topologies for computing-in-memory hardware. These methods operate at a scale and in domains (large-scale NMT and language modelling on shared supernets) that are not directly comparable to our regime; we therefore cite them as the closest NAS-for-MoE prior work but do not reproduce them, and instead include an AutoMoE-style baseline that searches heterogeneous per-expert architectures under a conventional gate — isolating the contribution of jointly optimising the cluster-to-expert assignment, which none of the above treat as a search variable. The work most closely related to ours is MoE-NAS [41], which optimises the number of experts per layer but keeps the expert architectures shared. In contrast, we explicitly search over per-expert architectures and tie this search to the cluster structure of the input data. 2Theoretical Understanding. A growing body of theoretical work studies why MoE models perform well on data with strong cluster or modality structure. [7] proves on simplified settings that MoE provably benefits from clusterable data, while [42] analyses the optimisation landscape of sparse gates. Empirical evidence from multimodal and multi-task learning [8, 9, 10, 43] further supports the claim that experts naturally specialise to distinct sub-distributions. Our work builds on this perspective and turns it into an explicit search objective by optimising over per-cluster expert architectures rather than treating the cluster structure as a by-product of training. 
+
+2. Problem Statement 
+
+This section formalises what exactly is being searched for. We first define the search space — the discrete space of per-expert architectures together with the cluster-level routing that jointly specify an MoE model (Section 2.1) — and then cast the search over this space as a cluster-aware likelihood-maximisation problem (Section 2.2). 
+
+2.1. Search Space of MoE 
+
+We adopt the cell-based search space that is standard in the NAS literature [31, 6]: instead of searching over entire networks, one searches over a single small building block — a cell — and a network is obtained by stacking several copies of that block inside a fixed skeleton (a stem, a reduction stage and a task-specific head). Each expert is one such network, so searching for an expert amounts to searching for its cell. A cell is a directed acyclic graph whose nodes are computation steps. It has a fixed number of nodes and each node applies a single operation, drawn from a fixed finite set O of primitives appropriate to the data modality (the concrete sets used in our experiments are given in Section 4), to the output of one preceding node; the first node reads the cell input. An architecture is therefore determined by two discrete choices per node: which operation the node applies, and from which earlier node it takes its input. We gather all these choices into a single architecture vector α.It describes one cell and, through the fixed skeleton, the whole expert network: all copies of the cell within an expert share the same α, while their weights are trained independently. Since both O and the number of nodes are finite, the search space A of all admissible α is finite, and neural architecture search reduces to selecting the best α ∈ A . For an architecture αk with trained weights θk we denote the resulting network by f (αk, θk) : X → Y .A Mixture-of-Experts (MoE) model combines K such experts, each meant to specialise on a di ff erent region of the input space. Stacking the expert architectures into α = [α⊤ 
+
+> 1
+
+, . . . , α⊤ 
+
+> K
+
+]⊤, the MoE prediction is the routing-weighted combination of expert outputs 
+
+g(α, θ, wr)( x) =
+
+> K
+
+X
+
+> k=1
+
+rk(x, wr) f (αk, θk)( x), (1) where the gate values rk(x, wr) ≥ 0 with PKk=1 rk(x, wr) = 1 are produced by a routing network with parameters wr.
+
+Data clustering and routing. Prior to architecture search, the dataset is partitioned into M clusters, D = C1 ∪C 2 ∪· · · ∪ C M , each grouping samples of similar structure (e.g. a semantic class group or a data modality). Throughout the paper, n ∈ { 1, . . . , N} indexes individual dataset samples, m ∈ { 1, . . . , M} indexes clusters, and k ∈ { 1, . . . , K} indexes experts. We write Cm ⊆ { 1, . . . , N} for the sample indices that belong to cluster m, and denote by m(n) ∈ { 1, . . . , M}
+
+the cluster index of sample n.Routing is defined at the cluster level, and it is stochastic : every cluster m carries a latent assignment variable 
+
+cm ∈ { 1, . . . , K} naming the expert it is routed to, and 
+
+p(cm = k) = rmk ∈ [0 , 1] ,
+
+> K
+
+X
+
+> k=1
+
+rmk = 1, (2) the probabilities being collected in a routing matrix R ∈ [0 , 1] M×K . The column rk = R:,k ∈ [0 , 1] M encodes the clusters expert k is responsible for. The latent variables c1: M are what makes the model below a genuine mixture; the search optimises the distribution R rather than any fixed assignment, and a hard cluster →expert assignment is read o ff 
+
+only at the end of optimisation, as Ik = {m : arg max k′ rmk ′ = k} ⊆ { 1, . . . , M}, the set of cluster indices routed to expert 
+
+k.3Unlike standard MoE training, where only the gating parameters wr are learned for a fixed architecture, here 
+
+finding the routing R is itself part of the architecture search : the search jointly determines the per-expert architectures 
+
+α1: K and the assignment of clusters to experts. This couples architecture selection with data specialization, since the best architecture for an expert depends on the cluster subset it is trained on. 
+
+2.2. MoE Objective 
+
+We cast MoE architecture search as a likelihood-maximization problem. The goal is to choose, for every expert k,an architecture αk and its trained parameters θk, together with the routing distribution R, so as to maximize the data likelihood under the mixture induced by the latent assignments c1: M :
+
+> N
+
+Y
+
+> n=1
+> K
+
+X
+
+> k=1
+
+p yn, cm(n) = k xn, αk, θk
+
+ → max     
+
+> α1: K,θ1: K,R
+
+, (3) where the event cm(n) = k reads “sample n’s cluster is routed to expert k”. Summing over k marginalises this event out, which is what makes (3) a mixture: had the cluster →expert map been a fixed partition instead of a distribution, the membership indicator would be deterministic, exactly one term of the inner sum would survive, and the objective would collapse to the likelihood of a hard assignment. Each joint term factorizes into a routing probability and a conditional likelihood: 
+
+p yn, cm(n) = k xn, αk, θk
+
+ = p cm(n) = k p yn xn, αk, θk, cm(n) = k. (4) The membership probability is the cluster-level routing, p cm(n) = k = rm(n),k, by the definition (2) of R. The conditional factor is the expensive one: evaluating it exactly for a candidate architecture would mean actually training that architecture — and, in the MoE setting, all K of them — on the cluster subset the routing assigns to it. We therefore replace exact training by a learned surrogate , and we let that surrogate be vector-valued , with one component per cluster, because two indices must be kept apart here: the factor is indexed by the sample n, hence by its cluster 
+
+m(n), and asks how well expert k — trained on the clusters that rk assigns to it — explains the data of cluster m(n). 
+
+Definition 1. Let the training data be partitioned into M clusters Dtrain = C1 ∪ · · · ∪ C M ; for b ∈ { 0, 1}M let Db =
+
+Sm:bm=1 Cm be the cluster subset selected by b and θ∗ 
+
+> α,b
+
+the parameters obtained by training α on it — for a binary routing column we abbreviate these to Drk and θ∗
+
+> k
+
+. A vector-valued surrogate function 
+
+u : A × [0 , 1] M → RM
+
+> ≥0
+
+, b ∈ { 0, 1}M ,
+
+um(α, b) ≈ NLL (m)val 
+
+ f (α, θ∗
+
+> α,b
+
+) = − 1
+
+|C val  
+
+> m
+
+|
+
+X
+
+> n∈C val
+> m
+
+log p yn xn, α, θ∗
+
+> α,b
+
+, (5) has as its m-th component the mean per-sample negative log-likelihood (NLL) of architecture α, trained on Db, when evaluated on the validation part Cval  
+
+> m
+
+of cluster m — all without performing the actual training. The NLL is the cross-entropy of the correct class in the classification experiments of Sections 4.1 and 4.2, and the negative log-density of the predictive distribution in the forecasting experiment of Section 4.3. Components with bm = 0 are out-of-region 
+
+queries: they predict how the expert behaves on clusters it was never trained on, which is exactly the evidence the routing search needs. The two arguments thus play distinct roles: the mask (in the search, the routing column rk)selects the training region, m selects the evaluation cluster. Only the vertices b carry this operational meaning, since only a binary mask corresponds to a real training run; the second argument is nevertheless allowed to range over the whole cube, because the routing column rk that the search manipulates is in general fractional. We fix the fractional values canonically , as the average over masks drawn independently per cluster, 
+
+um(α, r) = Eb∼Bernoulli( r)
+
+um(α, b) =
+
+X
+
+> b∈{ 0,1}M
+
+ MY
+
+> m′=1
+
+r bm′ 
+
+> m′
+
+(1 − rm′ )1−bm′
+
+ um(α, b), (6) which is precisely the quantity that the straight-through Gumbel-Softmax M-step of Section 3.2 estimates when it draws a binary mask from r. The extension agrees with (5) at the vertices, is multilinear in r and hence continuous, 4and inherits any bound satisfied on the vertices — the two properties the convergence analysis of Section 3.3 asks for (Assumptions 1 and 4). A concrete construction of u as a learned regressor with M outputs is given in Section 3.1. For the conditional factor we then adopt the standard MLE proxy: the experts are trained by minimising exactly this loss, so the mean per-sample NLL an expert attains on a group of samples is what training drives down. The surrogate being constant within a cluster, we read that factor o ff it: for every n in cluster m,
+
+p yn xn, αk, θk, cm(n) = k ≈ e−um(αk ,rk ), (7) i.e. e−um is the per-sample geometric mean of the conditional likelihood of expert k over cluster m. As in the standard EM treatment of mixtures, the component is evaluated at its current parameters: um(αk, rk) uses θ∗ 
+
+> k
+
+trained on Drk ,without retraining expert k on Drk ∪ C m. Substituting (4) and (7) into (3) yields the surrogate-based objective 
+
+> N
+
+Y
+
+> n=1
+> K
+
+X
+
+> k=1
+
+rm(n),k e−um(n)(αk ,rk ) → max    
+
+> α1: K,R
+
+. (8) Because routing is decided at the cluster level, rm(n),k = rm,k for every n ∈ C m, and by (7) the conditional likelihood is likewise identical across the samples of a cluster. Taking the logarithm of (8) and grouping the N per-sample terms by cluster collapses each cluster’s |C m| identical log-factors into a single weighted term, yielding the cluster-aware MoE objective :
+
+J(α1: K , R) =
+
+> M
+
+X
+
+> m=1
+
+|C m| log 
+
+> K
+
+X
+
+> k=1
+
+rmk e−um(αk ,rk ) → max    
+
+> α1: K,R
+
+. (9) Intuitively, rmk specifies how strongly cluster m is routed to expert k, e−um(αk ,rk ) is the per-sample likelihood that expert 
+
+k attains on cluster m , and the cluster-size weight |C m| reflects that a cluster’s contribution to the joint log-likelihood scales with the number of samples it contains. Problem (9) is solved by the algorithm of Section 3.2 via Generalised EM with an adaptively refined surrogate. 
+
+3. Solving the Cluster-aware Objective by Surrogate-assisted EM 
+
+The objective (9) cannot be optimised directly: every evaluation of a candidate architecture would require training it from scratch on the cluster subset the routing assigns to it. We therefore first construct a learned surrogate of the conditional likelihood (Section 3.1), then embed it into a generalized EM procedure that alternates between updating the routing and the expert architectures (Section 3.2), and finally prove that the procedure converges even though the surrogate itself is refined during the search (Section 3.3). 
+
+3.1. Learning the Surrogate 
+
+We now give the concrete construction of the vector-valued surrogate u of Definition 1. Figure 1 gives an overview of the loop it sits in, in which the surrogate scores candidate architectures against the current cluster assignment and only a few selected candidates are ever trained. The surrogate is trained on a dataset of architecture /subset pairs collected by genuine training: 
+
+Dsurr = {(α(i), b(i), y(i))}Si=1, y(i) 
+
+> m
+
+= NLL (m)val 
+
+  f (α(i), θ∗ 
+
+> α(i),b(i)
+
+). (10) A single training run yields the whole target vector at once — one forward pass over the validation set, with the per-sample losses bucketed by cluster — so the vector-valued surrogate costs no extra training while providing M
+
+regression targets per observation instead of one, including targets for clusters outside b(i). We parametrise uθ as a Graph Neural Network encoder over the architecture DAG concatenated with an embedding of the cluster mask b,followed by an M-dimensional output head, and minimise the mean squared regression loss min 
+
+> θ
+
+1
+
+S M 
+
+X
+
+> (α,b,y)∈D surr
+> M
+
+X
+
+> m=1
+
+ uθ,m(α, b) − ym
+
+2. (11) 5Figure 1: Method workflow: a surrogate model u is used to select the most suitable expert architectures for each cluster. 
+
+Targets are clipped at an upper quantile before the fit, which both keeps the regression from being dominated by far-out-of-region outliers and enforces the boundedness required by Assumption 1. The surrogate is refined inside an active learning loop. Ranking architecture candidates needs a single number, so the predicted vector is reduced to a scalar — either the size-weighted average over the clusters the candidate was trained on, ¯u(αk, rk) = P m∈Ik |C val  
+
+> m
+
+|−1 Pm∈Ik |C val  
+
+> m
+
+| um(αk, rk), (12) which discards the dependence on the evaluation cluster, or, inside the M-step, the responsibility-weighted loss of (16). At every iteration we use Monte-Carlo dropout to obtain a predictive mean μ(α, b) and standard deviation σ(α, b) of that scalar over T stochastic forward passes, and score candidates by the Lower Confidence Bound LCB = μ − σ
+
+(since u is a loss, the most promising candidates are those with the lowest predicted NLL together with high epistemic uncertainty). The most promising candidate is trained from scratch, the resulting triple is appended to Dsurr , and the surrogate is refit. Every observation, and hence the whole fit (11), lives at a vertex b ∈ { 0, 1}M ; fractional masks are covered by the extension (6). 
+
+3.2. Surrogate-assisted Generalized EM (SGEM) 
+
+Treating the cluster →expert routing as a latent variable turns the surrogate objective (9) into a mixture model on which Expectation–Maximisation applies directly, with the surrogate u(t) standing in for the otherwise-intractable expert quality. The derivation is the standard EM treatment of a finite mixture, the per-component data-fit term being the surrogate factor e−um(αk ,rk ), evaluated at the cluster m of the sample being explained. 
+
+Latent-variable form of the objective. For every sample n introduce a one-hot latent vector zn ∈ { 0, 1}K with 
+
+znk = 1 ⇐⇒ sample n is generated by expert k — the per-sample copy of the cluster-level assignment cm(n) of Section 2.1, so that znk = 1 ⇐⇒ cm(n) = k — and collect them into the latent matrix Z = ∥znk ∥ ∈ { 0, 1}N×K . The generative story is the standard mixture one: the expert of sample n is drawn from its cluster’s routing distribution, 
+
+p(znk = 1) = rm(n),k, and the label is then emitted with that expert’s per-sample likelihood on the sample’s own cluster, 
+
+e−um(n)(αk ,rk ) [cf. (7)]. The resulting complete-data likelihood is 
+
+p y, Z | α1: K , R =
+
+> N
+
+Y
+
+> n=1
+> K
+
+Y
+
+> k=1
+
+rm(n),k e−um(n)(αk ,rk )znk 
+
+, (13) 6in which the routing rmk acts as the mixing weight and e−um(n)(αk ,rk ) as the per-component likelihood — a component density that, as in any mixture model, is evaluated at the observation it is asked to explain. 
+
+Equivalence with (9) . Marginalising the one-hot rows zn out of (13) and grouping the samples by cluster recovers exp J(α1: K , R), exactly as in the passage from (8) to (9). Maximising (9) is thus the incomplete-data MLE of the latent-variable model (13), which we now solve by alternating maximisation of the variational free energy Fu(q, θ ) =
+
+Eq[log p(y, Z | θ)] + H[q] over the posterior q(Z) (E-step) and the parameters θ = (α1: K , R) (M-step). 
+
+E-step. At fixed ( α1: K , R) the free energy is maximised by the exact posterior q(Z) = p(Z | y, α1: K , R). From (13), log q(Z) ∝ Pn
+
+Pk znk 
+
+ log rm(n),k −um(n)(αk, rk), so the posterior factorises over samples and the responsibility of expert 
+
+k for sample n is the normalised mixture weight γnk ∝ rm(n),k e−um(n)(αk ,rk ). This depends on n only through its cluster 
+
+m(n), so all samples of a cluster share one responsibility, which we write as 
+
+qmk = rmk e−um(αk ,rk )
+
+PKj=1 rm j e−um(α j,r j) ,
+
+> K
+
+X
+
+> k=1
+
+qmk = 1. (14) Intuitively, a cluster is softly attached to the experts that both already claim it ( rmk large) and are predicted to model 
+
+that cluster well ( um(αk, rk) small); the out-of-region components of Definition 1 are what let di ff erent clusters favour di ff erent experts. 
+
+M-step. Substituting the E-step posterior into Eq[log p(y, Z | · )] and grouping the sample-level terms by cluster yields the Q-function 
+
+Q(α1: K , R) =
+
+> M
+
+X
+
+> m=1
+
+|C m|
+
+> K
+
+X
+
+> k=1
+
+qmk 
+
+log rmk − um(αk, rk), (15) which the M-step maximises over the routing R and the per-expert architectures α1: K (maximising Q at fixed q co-incides with maximising Fu(q, ·), as the entropy H[q] is independent of θ). The two parameter blocks are updated in turn. 
+
+M-step (routing). For fixed architectures, Q is maximised over R subject to Pk rmk = 1 by gradient ascent on the routing logits, using a straight-through Gumbel-Softmax to back-propagate through the discrete masks rk that the surrogate consumes, which is exactly how the extension (6) is evaluated. The term Pm,k |C m| qmk log rmk alone is a cross-entropy whose constrained optimum is rmk = qmk , i.e. it pulls the routing towards the current responsibilities, while the −qmk um(αk, rk) term additionally biases each column rk towards masks on which expert k is predicted to perform well on the clusters that claim it : enlarging rk with a foreign cluster raises um′ on the clusters m′ the expert already owns, and the gradient sees that interference. Because the predicted loss varies with the evaluation cluster, this step does not collapse onto a single expert. 
+
+M-step (architectures). For fixed routing the only architecture-dependent part of (15) is 
+
+αk ∈ arg min 
+
+> α∈A
+> M
+
+X
+
+> m=1
+
+|C m| qmk um(α, rk), (16) so each expert is optimised independently by minimising its responsibility-weighted surrogate loss — a weighted av-erage of the per-cluster losses that concentrates on the clusters expert k is responsible for. Since u is non-di ff erentiable in α, this step is solved by sampling: for each expert k we draw a pool of candidate architectures from A, score ev-ery candidate by (16) under the current responsibilities, and keep the minimiser as αk. Scoring the pool costs only forward passes of uθ; the expensive operation is the active-learning step that follows, in which a small number of the selected candidates are actually trained. Which of them is trained is decided by the Lower Confidence Bound of Section 3.1, so the same pass both advances the M-step and supplies the surrogate with the observation it is least certain about. Because the pool is drawn afresh at every iteration, the M-step is a stochastic improvement rather than an exact maximisation — which is why the analysis of Section 3.3 only assumes a generalised (improvement) M-step. 
+
+Exploration of the mask space. Left to itself, the loop above under-explores. The masks it trains on all con-centrate around the current routing, so the surrogate never observes near-pure regions and drifts towards confirming the split it already has — an e ff ect that is mild when the domains di ff er sharply in di ffi culty and severe when they do not. We therefore augment the active-learning step with three mechanisms, driven by the algorithm’s own signals and never by any domain labels. All three rest on cluster a ffi nities read o ff the observations collected so far: clusters 7whose per-cluster losses react similarly to architectures — after the global e ff ect of an architecture has been removed — are grouped by agglomerative clustering. First, each a ffi nity group is proposed as a training mask in its own right and evaluated with several architectures; these exploration masks supply the near-pure regions that the plain acqui-sition, which keeps sampling masks close to the current routing, never reaches. Second, the same a ffi nities propose complete candidate partitions of the clusters into K regions, which lets the routing escape a local optimum in one jump 
+
+instead of drifting there cluster by cluster; a candidate is accepted only if it improves the real — not the predicted — objective proxy, so a mis-calibrated surrogate cannot push the routing to a worse partition. Finally, once the EM loop has terminated and the routing is fixed, the architecture of each expert is re-searched by random search restricted to its final region, an ordinary per-region NAS problem. Appendix B details the three mechanisms. The complete procedure — alternating the E-step, the two M-steps over the routing R and the architectures α1: K ,and an S-step , the active-learning refit of the surrogate itself — is summarised in Algorithm 1. We name the last one by analogy with the other two: like the E- and M-steps it is executed once per iteration, and it is the only one that spends real training compute. 
+
+Algorithm 1 Surrogate-assisted Generalized EM (SGEM) for MoE Architecture Search 
+
+Require: Surrogate uθ, search space A, number of experts K, clusters M, EM iterations T . 
+
+> 1:
+
+Initialise architectures α1, . . . , αK at random and logits ℓ ∈ RM×K ∼ N (0, I).  
+
+> 2:
+
+for t = 1 to T do  
+
+> 3:
+
+E-step. qmk ∝ rmk e−um(αk ,rk ). 
+
+> 4:
+
+M-step (r). Gradient ascent on Pm |C m| Pk qmk [log rmk − um(αk, rk)] using straight-through Gumbel-Softmax for rk. 
+
+> 5:
+
+M-step ( α). For each expert k, sample candidates and keep the one minimising Pm |C m| qmk um(·, rk).  
+
+> 6:
+
+S-step. Train selected candidates, update Dsurr , refit uθ. 
+
+> 7:
+
+end for  
+
+> 8:
+
+return α1: K and hard assignment ˆ rmk = 1, [k = arg max k′ rmk ′ ]. 
+
+3.3. Convergence under a Drifting Surrogate 
+
+We show that, provided the surrogate error decays fast enough, SGEM converges in the same sense as Generalised EM — even though the surrogate u(t) used inside the E- and M-steps is itself updated across iterations. Let utrue denote the (unknown) ground-truth expert loss: at a binary mask b its m-th component is the per-sample NLL on cluster m actually attained by training architecture α on Db, and it is carried to fractional r by (6), exactly as the surrogate is. Define the per-iteration surrogate error directly in the loss scale, as the sup-norm over both arguments and all output components, 
+
+εt = sup    
+
+> α∈A ,r∈[0 ,1] M,m∈{ 1,..., M}
+
+u(t) 
+
+> m
+
+(α, r) − utrue ,m(α, r) . (17) Whenever both maps are read through the extension (6) — as they are in the M-step — the supremum in (17) is attained at a binary mask, so εt is the surrogate error on the 2 M masks, precisely the set on which the surrogate can be given evidence. The parameter θ = (α1: K , R) lies on the compact set Θ = AK × (∆K )M ; we write N = Pm |C m| for the total sample count. The (size-weighted) true log-likelihood is 
+
+Ltrue (θ) =
+
+> M
+
+X
+
+> m=1
+
+|C m| log 
+
+> K
+
+X
+
+> k=1
+
+rmk e−utrue ,m(αk ,rk ), (18) and the true Q-function is 
+
+Qtrue (θ; θ′) =
+
+> M
+
+X
+
+> m=1
+
+|C m|
+
+> K
+
+X
+
+> k=1
+
+wmk (θ′)log rmk − utrue ,m(αk, rk), (19) where wmk (θ′) are the responsibilities computed under utrue (Proposition 1 in Appendix A). Note that the analysis below never uses the dependence of the loss on the evaluation cluster m — it only requires that each component be bounded and that the error (17) be summable. Theorem 1 therefore holds for any surrogate satisfying these two conditions. 8Assumption 1. There exists U max < ∞ such that 0 ≤ utrue ,m(α, r), u(t) 
+
+> m
+
+(α, r) ≤ Umax for all α ∈ A , r ∈ [0 , 1] M ,m ∈ { 1, . . . , M}, t ≥ 0. Since (6) is an average of vertex values, a bound on the binary masks already implies the bound on the whole cube. In practice the surrogate targets are clipped at an upper quantile, which enforces it: an expert evaluated far outside its training region can otherwise incur an arbitrarily large NLL. 
+
+Assumption 2. The surrogate errors are summable: P∞ 
+
+> t=0
+
+εt < ∞.
+
+Assumption 3. At every iteration t the M-step of Algorithm 1 maximises the free energy over a candidate set M(t) ⊆ Θ
+
+that contains the incumbent, θ(t) ∈ M (t):
+
+θ(t+1) ∈ arg max 
+
+> θ∈M (t)
+
+Fu(t)
+
+ q(t), θ .
+
+In Algorithm 1 the set M(t) consists of the architectures drawn into the pool at iteration t paired with the routings visited by the gradient update, and keeping the incumbent in the pool is what makes the inclusion θ(t) ∈ M (t) hold. The step is then generalised in the usual sense, 
+
+Fu(t)
+
+ q(t), θ (t+1)  ≥ F u(t)
+
+ q(t), θ (t),
+
+without being an exact maximisation over Θ. Here the variational free energy is 
+
+Fu(q, θ ) =
+
+> M
+
+X
+
+> m=1
+
+|C m|
+
+> K
+
+X
+
+> k=1
+
+qmk log rmk e−um(αk ,rk )
+
+qmk 
+
+.
+
+Assumption 4. For every α ∈ A and every m ∈ { 1, . . . , M} the map r 7 → utrue ,m(α, r) is continuous on [0 , 1] M . For the canonical extension (6) this holds by construction, the extension being a polynomial in r; we state it separately because continuity is all the proof uses. 
+
+Theorem 1 (Convergence of SGEM with adaptive surrogate) . Under Assumptions 1–4, the iterates {θ(t)} produced by Algorithm 1 satisfy 
+
+(a) the sequence {Ltrue (θ(t))} converges; 
+
+(b) every limit point θ⋆ is a fixed point of the M-step with respect to the true objective: writing θ(t j) → θ⋆ for a convergent subsequence and 
+
+M∞(θ⋆) = θ′ ∈ Θ : θ′ ∈ M (t j) for infinitely many j 
+
+for the candidates the M-step keeps o ff ering near θ⋆, one has Q true (θ′; θ⋆) ≤ Qtrue (θ⋆; θ⋆) for every θ′ ∈ M ∞(θ⋆).
+
+Part (b) is stated relative to what the M-step can reach, because Algorithm 1 scores a freshly drawn pool of architectures instead of all of AK and moves R by gradient ascent: no candidate the algorithm actually produces improves the true Q-function at θ⋆. Were the M-step exhaustive ( M(t) = Θ ), this would be the classical stationarity condition of EM. Short of that, drawing the pool i.i.d. from a distribution with full support on the finite set AK already makes every architecture vector enter the pool infinitely often almost surely, by the Borel–Cantelli lemma, so that 
+
+M∞(θ⋆) contains every architecture; for the routing block, updated by gradient ascent, part (b) is the corresponding first-order condition. The proof, together with the auxiliary lemmas (uniform deviation of the ELBO, stability of the softmax respon-sibilities, and a quasi-monotonicity bound Ltrue (θ(t+1) ) ≥ Ltrue (θ(t)) − 2Nεt established via a Robbins–Siegmund argu-ment), is given in Appendix A. 
+
+Remark 1. The summability assumption 2 is the surrogate analogue of the diminishing step-size condition in stochastic EM [44]; replacing it by the weaker condition εt → 0 preserves part (b) of Theorem 1 but not part (a). Practically, summability is achieved whenever the S-step of Algorithm 1 provides su ffi ciently rich coverage of A × [0 , 1] M .
+
+Novelty and relation to classical convergence results. The classical theory of EM and its generalised variant [44, 45] rests on the monotone ascent of a single, fixed likelihood — a premise our setting violates, since the objective optimised at iteration t is read o ff the re-fitted surrogate u(t) and is thus a moving target, while Ltrue is never evaluated 9by the algorithm at all. Theorem 1 retains convergence nonetheless, with the quasi-monotonicity bound above taking over the role of exact monotonicity; this is the main theoretical contribution. It also di ff ers from stochastic and online EM analyses [46], where the perturbation of the exact update is zero-mean stochastic noise tamed by a diminishing step-size schedule: here it is a deterministic, bounded approximation error of a learned surrogate, and the role of the vanishing step size is played by the summability condition 2, whose smallness is secured by active-learning coverage of the search space rather than by averaging out noise. To our knowledge, this is the first convergence guarantee for an EM-type architecture-search procedure whose per-iteration objective is supplied by an adaptively trained surrogate model. 
+
+4. Experiments 
+
+We evaluate the proposed framework on three complementary problems: (i) a controlled 2D toy task that allows us to verify whether the recovered routing matches the ground-truth cluster structure, (ii) a heterogeneous image-classification benchmark obtained by mixing CIFAR-100 with SVHN, whose two sources give a sharp ground-truth domain structure and hence a well-defined oracle routing, where we compare against several MoE and NAS baselines, and (iii) a multi-domain time-series forecasting benchmark that probes the framework in a harder, low-contrast regime against a ladder of routing and architecture baselines. 
+
+4.1. Toy Experiment 
+
+We sample 2000 points in R2 from a four-class problem consisting of one “linear” cloud (two classes separated by a diagonal) and one “ring” cloud (two classes corresponding to an inner and an outer ring), shown in Figure 2a. The data is split 80 /20 into training /validation and clustered into M = 20 k-means clusters (Figure 2b). We use K = 2experts so that the ideal solution is unambiguous: one expert should specialise to the linear cloud and the other to the ring cloud. The search space is a small cell-based space over the 2D inputs, in the spirit of [6], whose operation set is deliberately chosen so that the two clouds prefer di ff erent architectures: a linear map x 7 → W x already separates the linear cloud but cannot model concentric rings, while a radial basis function x 7 → exp  −γ ∥x − c∥2 separates the rings by radius and is needlessly poor on the linear cloud (identity, element-wise squaring, additive shift, ReLU and dropout complete the set). The optimal mixture is therefore forced to assign architecturally distinct experts to the two regions, so the toy task probes architectural specialisation, not merely the routing. SGEM (Algorithm 1) recovers the ideal cluster split (7 ring / 13 linear clusters) between the two experts in 20 EM iterations (Figure 2c), matching the hand-defined oracle assignment that splits clusters according to the centroid coordinate x0 = −2. This sanity check confirms that the surrogate-guided objective in (9) is well posed and that the proposed optimiser solves it when the surrogate is su ffi ciently accurate, in agreement with the convergence guarantee of Theorem 1.          
+
+> (a) (b) (c)
+> Figure 2: Toy experiment. (a) The four-class dataset: a linear cloud (classes 0–1) and a ring cloud (classes 2–3). (b) The M=20 k-means clusters (crosses mark the centroids). (c) The expert assignment recovered by SGEM with K=2: it splits the clusters exactly along the linear /ring boundary, matching the oracle partition up to a permutation of expert labels.
+
+10 4.2. CIFAR-100 and SVHN mixture 
+
+To test whether the cluster-aware objective recovers a meaningful data partition on realistic data, we build a heterogeneous benchmark by mixing CIFAR-100 and SVHN in equal proportions (42 000 images total). SVHN labels are shifted by 100, so the combined problem has 110 classes. The two sources form a maximally separated domain structure, which gives a well-defined oracle: with K = 2 experts the ideal routing assigns each cluster to the expert specialised on its source. We partition the data into M = 30 semantic clusters obtained from a pretrained feature extractor, using a three-way train /validation /test split (0 .7/0.15 /0.15). The clustering is fit on the training embeddings only; validation and test points are assigned to the nearest centroid. The resulting oracle partition is 19 CIFAR-majority and 11 SVHN-majority clusters, with a mean source purity of 0 .978. All MoE configurations use K = 2 experts with init_channels = 16 . The base network is a small DARTS-style architecture CIFAR100Net (stem, two normal cells, one fixed reduction cell, global average pooling, fully connected head). The MoE wrapper instantiates K such networks combined through a fixed hard cluster gate : each cluster is routed to a single expert, so the gate directly reflects the discovered data partition. Architecture search uses the train /validation split; the final model is retrained for 100 epochs on train ∪ validation and evaluated once on the held-out test set. We report test accuracy averaged over five random seeds. Training is performed inside a Docker container with PyTorch 2.5.1 on a single RTX 3080 Ti GPU. We compare against the following methods, all evaluated with the same cluster gate: 
+
+• Random-MoE : 200 random architecture pairs are searched at 30 epochs each on a random cluster split, then the best is retrained. 
+
+• DARTS ×K: K experts that share the same DARTS-discovered architecture on a random cluster split. 
+
+• SGEM (ours): Algorithm 1 with the exploration mechanisms and final refit of Section 3.2, and the two data-collection measures described next. No source labels are used at any stage. 
+
+• DARTS oracle MoE : an upper bound in which the cluster →expert routing is fixed to the true source split and each expert uses a DARTS architecture searched on its own source. It uses the source labels and is therefore not a competitor but a ceiling on what perfect routing can achieve. 
+
+Surrogate data collection. Two obstacles stand between the surrogate dataset and a usable routing signal, and each is met by a domain-agnostic choice. Evaluation leakage : scoring a candidate on the whole validation set mixes in clusters it was never trained for and collapses the predicted-loss gap between a specialised and a mixed expert, which is the signal the routing relies on; we therefore evaluate each candidate only on its own clusters. Mask concentration :including every cluster with probability 12 concentrates masks around M/2, so near-pure single-source subsets are essentially never drawn (2 −19 for pure SVHN) and the surrogate cannot learn that a pure expert attains a low loss; we therefore sample the mask size log-uniformly (minimum three clusters). Neither measure consults the source labels, and both are needed: without them accuracy falls to ≈ 0.59 at near-random source recovery ( ≈ 60%). Table 1 reports test accuracy with cluster gating. SGEM reaches 0 .6402 ± 0.002 over five seeds, outperforming DARTS ×K (0 .5913 ± 0.009) and the random-MoE baseline (0 .5551 ± 0.031) by +4.9 and +8.5 percentage points, and even exceeding the DARTS oracle MoE (0 .6317 ± 0.004). The oracle row is given the true source split but keeps DARTS-searched expert architectures, so it bounds what routing alone can achieve at a fixed architecture quality; the per-region final refit of SGEM finds stronger expert architectures and thereby passes it. The cluster gate is what isolates routing quality: under a learnable gate the methods become nearly indistinguishable (all ≈ 0.63), because a trainable gate can compensate for a suboptimal partition and so masks the benefit of a good one. A finer ablation that decomposes this accuracy into a routing and an architecture contribution is reported in Appendix C.1: the gain stems almost entirely from the cluster →expert routing, while architectural heterogeneity between experts adds little once the routing is correct, and learning the routing inside SGEM (rather than freezing it) is what recovers the source structure. Because the oracle partition by data source is sharp (mean purity 0 .978), we can directly check whether the learned routing aligns with it. Across five seeds the SGEM hard assignment agrees with the oracle source split on 95% ± 2% of clusters (best of the two label permutations) — far above the ≈ 54% of a balanced random split and a large jump over the ≈ 60% reached without the two data-collection measures above. In a typical run (seed 322, Figure 3) one 11 Figure 3: Per-cluster representatives of the CIFAR-100 / SVHN mixture under the SGEM routing ( K = 2, seed 322; first 15 of the M = 30 semantic clusters shown). Each row is one cluster: the leftmost column is the cluster medoid and the rest are the eight images nearest to the cluster mean. The medoid border is coloured by the expert SGEM assigns to the cluster (E0, the SVHN specialist, red; E1, the CIFAR specialist, green). SGEM sends every SVHN (digit) cluster to E0 and keeps E1 a pure CIFAR expert; the source-recovery rate is 93% for this seed. 
+
+expert becomes a pure CIFAR specialist (17 clusters, no SVHN) while the other absorbs all 11 SVHN clusters together with only 2 CIFAR ones. The cluster-aware objective therefore does discover the underlying data domains on this benchmark; the small residual gap to the oracle stems from a few genuinely mixed clusters and from objective noise near the optimum: the iterate selected by best objective occasionally misses a perfect assignment — all 30 clusters matching the oracle — that was attained one iteration earlier. Empirically the routing converges fast: on every seed the source-recovery rate jumps from its initial 53–67% to ≈ 97% within the first two EM iterations and then remains on a 0 .93–0 .97 plateau, illustrating the convergence guaranteed by Theorem 1; Appendix C.3 traces a single run iteration by iteration. 
+
+4.3. Time-Series Forecasting over a Multi-Domain Mixture 
+
+The CIFAR-100 /SVHN benchmark has two domains of very di ff erent di ffi culty, which makes the domain structure easy for the likelihood to reward. To probe the framework in a harder, low-contrast regime, we turn to probabilistic time-series forecasting over a mixture of four Monash [47] domains: hourly electricity demand, air quality (KDD Cup 2018), weather, and monthly tourism. We sample 40 000 sliding windows with context length L = 96 and forecast horizon H = 24, and cluster them into M = 30 k-means clusters computed from simple statistical descriptors of each window (no pretrained embeddings and no domain labels). The clusters align with the domains only approximately (mean source purity 0 .864; the oracle partition has 5 /5/8/12 clusters per domain), and, unlike SVHN, all four domains are forecasting tasks of comparable di ffi culty. We use K = 4 experts. Each expert is a small cell-based forecasting network drawn from a search space over the six time-series operations of Table 3 (moving average, dilated convolution, GRU, patch attention, a linear trend and a skip connection) that emits the parameters of a per-step Student-t predictive distribution. The data protocol mirrors Section 4.2: a three-way train /validation /test split, search on train /validation only, and a final MoE retrained for 50 epochs on train ∪ validation and evaluated once on the held-out test set. We 12 Table 1: Test accuracy on the CIFAR-100 / SVHN mixture with cluster gating ( M = 30, K = 2, semantic clustering, mean ± std over five seeds). The DARTS oracle MoE uses the ground-truth source split with DARTS-searched architectures: it is a routing upper bound at fixed architecture quality, not a competitor. 
+
+Method test acc. (cluster gate) Random-MoE 0.5551 ± 0.031 DARTS ×K (same arch) 0.5913 ± 0.009 
+
+SGEM (ours) 0.6402 ± 0.002 
+
+DARTS oracle MoE (uses source labels) 0.6317 ± 0.004 report the test negative log-likelihood (NLL) and the sample-based continuous ranked probability score (CRPS), both averaged over 5 seeds (lower is better). 
+
+Exploration. Because the four domains are of similar di ffi culty, this benchmark is where the exploration mech-anisms of Section 3.2 matter most: without them the masks concentrate around the current routing and the surrogate drifts towards confirming it. All runs below use the exploration masks, the partition jumps and the final per-region refit, with no domain labels at any stage. 
+
+Baselines. We compare against a ladder of baselines that isolate the individual design choices; all MoE methods use K = 4 and the same final-training protocol, and all label-free methods see no domain information. Global single 
+
+trains one network ( K = 1) found by random search. Random-MoE uses random architectures on a random cluster partition. BestArch ×K uses K copies of the best single architecture (the analogue of DARTS ×K in Section 4.2). 
+
+Geometry routing assigns clusters to experts by k-means over cluster centroids, with K copies of the best single architecture. NAS-MoE equips a random fixed partition with K independently searched architectures. MoLE [48] is a mixture of linear experts with a learnable gate. Finally, an oracle method uses the ground-truth domain labels and bounds what perfect routing can achieve: per-domain specialists route each domain to its own expert and search a separate architecture for every domain. Simple statistical baselines (naive, seasonal-naive, DLinear) are far behind all MoE variants (test NLL 2 .01, 1 .91 and 1 .80 respectively) and are omitted from the table.        
+
+> Table 2: Test NLL and CRPS on the four-domain Monash mixture ( M=30, K=4, mean ±std over 5 seeds; lower is better). Bold marks the best entry of the first block, whose methods all use the cluster gate and no domain labels and are therefore directly comparable. MoLE is separated out because it routes with its own learnable gate; the oracle row uses the ground-truth domain labels and is an upper bound, not a competitor. NLL is the primary metric here, the framework being likelihood-based throughout.
+
+Method NLL CRPS 
+
+cluster gate, no domain labels 
+
+Global single ( K=1) 1.070 ± .038 0.627 ± .022 Random-MoE 1.026 ± .100 0.630 ± .045 Geometry routing 1.058 ± .018 0.619 ± .008 BestArch ×K 0.925 ± .039 0.588 ± .023 NAS-MoE 0.908 ± .038 0.580 ± .012 
+
+SGEM (ours) 0.883 ± .026 0.574 ± .013 
+
+own learnable routing 
+
+MoLE [48] 1.458 ± .016 0.558 ± .007 
+
+oracle, uses domain labels 
+
+Per-domain specialists 0.789 ± .028 0.549 ± .015 Table 2 summarises the results. Under the cluster gate — the metric that isolates routing quality — SGEM is the best method that uses no domain labels: it improves on BestArch ×K by 0 .042 NLL, on NAS-MoE by 0 .025, and on geometry routing by a wide 0 .175 margin, showing that likelihood-driven routing extracts structure that centroid geometry does not. 
+
+Where the two scores disagree. MoLE is the one entry that is not dominated: it attains the lowest CRPS outside 13 the oracle (0 .558 against 0 .574 for SGEM) while being the worst on NLL by at least 0 .38 nats. The two scores are not interchangeable — CRPS is computed from samples and rewards a well-placed predictive median with a roughly correct spread, whereas NLL is evaluated on the predictive density and additionally punishes a mis-calibrated shape — and we treat NLL as the primary criterion, since it measures precisely what the likelihood-based objective of Section 2.2 optimises. The comparison is indirect in any case, MoLE bringing its own learnable gate rather than the cluster gate of the rest of the table (Section 4.2). 
+
+What each domain asks of the architecture. The search already leaves behind the material for a post-hoc answer, at no extra training cost: every surrogate observation is a triple (architecture, training mask, per-cluster loss). Restricting to cluster /observation pairs in which the cluster was part of the training mask, and standardising the losses 
+
+within each domain — which removes the overall strength of an architecture and leaves only the domain’s preference — the e ff ect of an operation is the di ff erence in mean standardised loss between architectures that contain it and those that do not. Negative means the operation helps. Table 3 reports these e ff ects over the 843 observations collected across two independent seeds (6226 pairs); bold marks e ff ects whose 95% bootstrap interval excludes zero.   
+
+> Table 3: E ff ect of each operation on the standardised region loss, per domain (negative =the operation helps). Bold: 95% bootstrap interval over observations excludes zero. The last row is how much the domain depends on the architecture at all: the spread of the real region NLL over 50 random architectures under oracle routing.
+
+Operation electricity KDD Cup weather tourism dilated conv −0.59 −0.00 +0.15 −0.21 
+
+moving average −0.46 −0.27 +0.03 −0.35 
+
+GRU −0.43 −0.06 −0.10 −0.06 patch attention −0.23 −0.40 −0.12 −0.03 linear trend +0.07 +0.20 −0.12 +0.22 
+
+skip connection +0.49 +0.05 +0.04 +0.22 
+
+architecture spread (std NLL) 0.431 0.118 0.095 0.128 The preferences are readable and, for some pairs of domains, opposed. Hourly electricity — by far the most architecture-sensitive domain, with a threefold spread between the best and the worst architecture — wants a wide receptive field and memory (dilated convolution, GRU, moving average) and is hurt badly by a bare skip connection, whereas weather is the one domain that dilated convolution hurts and a linear trend helps. Ranking the six operations by their e ff ect, the two domains disagree ( ρ = −0.37), as do weather and tourism ( ρ = −0.26), while electricity and tourism nearly coincide ( ρ = + 0.94). The disagreement is nevertheless partial: the useful operations overlap enough — moving average helps three domains out of four — that a single well-chosen architecture remains adequate everywhere. Notably, no such disagreement exists on CIFAR-100 /SVHN. Repeating the analysis there, the two sources rank the four operations identically ( ρ = + 1): both prefer the 5 × 5 separable convolution and both su ff er from a bare skip connection, and only the magnitude di ff ers (SVHN reacts about seven times more strongly). On that benchmark the architectural preference is a property of the task, not of the domain, which is consistent with the routing — and not the architecture — carrying the gain there as well. Unlike on CIFAR-100 /SVHN, however, SGEM does not close the gap to the oracle ceiling on the test set (0 .883 vs. 0 .789 NLL), and its hard routing recovers the domain partition only marginally better than chance (45% mean Hungarian agreement against a 40% random-split base). This is not an optimiser failure but a property of the bench-mark: an equal-budget ablation shows that the real objective values of the partitions found by SGEM match or exceed the value of the oracle domain partition on all five seeds, i.e. the likelihood landscape of this low-contrast mixture has near-optimal partitions that do not coincide with the domain boundaries (the domain-diagonal NLL gap is only 
+
+≈ 0.09 nats at M = 30 and vanishes under a finer clustering). The benchmark thus delineates the scope of domain discovery: when domains di ff er sharply in di ffi culty (CIFAR vs. SVHN), the likelihood optimum coincides with the domain partition and SGEM recovers it; when all domains are comparably hard, many partitions are equally good and domain recovery is no longer the right success criterion, while the end-metric advantage of SGEM over its label-free competitors persists. 14 5. Conclusion 
+
+We presented a structure-aware architecture search framework for Mixture-of-Experts models, in which the as-signment of data clusters to experts is treated as a search variable alongside the per-expert architectures. Writing the cluster-aware objective as the incomplete-data likelihood of a latent-variable mixture turns the search into an Expectation–Maximisation problem, solved by SGEM (Algorithm 1) with the otherwise intractable expert-quality term supplied by a vector-valued surrogate refined inside an active-learning loop. Theorem 1 shows that the proce-dure converges even though that objective is re-fitted at every iteration and the true likelihood is never evaluated by the algorithm. SGEM recovers the ideal split on the controlled toy problem. On the deliberately heterogeneous CIFAR-100 /
+
+SVHN mixture it recovers the ground-truth source partition on 95% of clusters without ever seeing the source labels 
+
+and attains 0 .640 cluster-gate test accuracy, ahead of every label-free baseline and of the oracle MoE (0 .632) that is handed the true split but keeps DARTS-searched expert architectures; region-restricted evaluation and a domain-agnostic log-uniform mask sampler are what expose the surrogate to the near-pure subsets this requires, and without them the routing collapses. On the four-domain time-series mixture SGEM is again the best label-free method under the cluster gate (test NLL 0 .883). Domain recovery, however, is the right success criterion only where the domains di ff er sharply in di ffi culty: on the low-contrast time-series mixture the partitions SGEM finds match the oracle domain partition in real objective value while agreeing with it barely above chance. The remaining gap to the oracle ceiling there (0 .789 NLL) indicates that matching the validation objective does not yet guarantee matching test-time generalisation, which we regard as the most interesting open question. Scaling the search space beyond the present K ≤ 4, widening the seed sweep, and extending the framework to transformer-based MoE layers remain natural next steps. 
+
+CRediT authorship contribution statement Petr Babkin: Conceptualization, Methodology, Software, Investigation, Writing – original draft. Oleg Bakhteev: 
+
+Conceptualization, Methodology, Supervision, Writing – review & editing. 
+
+Declaration of competing interest 
+
+The authors declare that they have no known competing financial interests or personal relationships that could have appeared to influence the work reported in this paper. 
+
+Data availability 
+
+All datasets used in this work are either publicly available (CIFAR-100, SVHN, Monash Forecasting Archive) or synthetically generated by scripts included in the code repository at https://github.com/intsystems/nas-for-moe .The source code of the proposed method and of all experiments is publicly available at the same repository. 
+
+A. Proof of Theorem 1 
+
+This appendix collects the lemmas and the full proof of Theorem 1. We follow the notation of Section 3.3: 
+
+θ = (α1: K , R) ∈ Θ = AK × (∆K )M with A finite, εt is the per-iteration surrogate error (in the loss scale; see (17)), 
+
+N = Pm |C m|, and the variational free energy parameterised by a vector-valued loss function u is 
+
+Fu(q, θ ) =
+
+> M
+
+X
+
+> m=1
+
+|C m|
+
+> K
+
+X
+
+> k=1
+
+qmk log rmk e−um(αk ,rk )
+
+qmk 
+
+.
+
+We write Lu(θ) = max q Fu(q, θ ) for the size-weighted log-likelihood induced by loss u, and abbreviate Ltrue = Lutrue ,
+
+L(t) = Lu(t) . Every argument below is carried out row-wise in m; the evaluation index m is inert throughout, so the proof applies verbatim to any surrogate satisfying Assumption 1. 15 A.1. Preliminary Lemmas 
+
+Proposition 1 (ELBO maximisation) . For every loss function u : A × [0 , 1] M → RM 
+
+> ≥0
+
+and every θ ∈ Θ, L u(θ) =
+
+max q∈Q Fu(q, θ ) with the maximum attained at q⋆
+
+> mk
+
+(θ) = rmk e−um(αk ,rk )
+
+P j rm j e−um(α j,r j) .
+
+Proof. Fix θ and m. The factor |C m| is a positive constant; it can be pulled out of the inner maximisation in qm,:
+
+without a ff ecting the optimum. Writing amk = rmk e−um(αk ,rk ) and using Pk qmk = 1, the inner expression equals 
+
+−KL( qm,:∥am,:/P j am j ) + log P j am j . The KL-divergence is non-negative and vanishes exactly at qmk = amk / P j am j ,which yields the claim. Summing over m with weights |C m| recovers Lu(θ) = Pm |C m| log Pk amk .A consequence is the Neal–Hinton decomposition Lu(θ) = Fu(q, θ ) + Pm |C m| KL  qm,:∥q⋆
+
+> m,:
+
+(θ), implying Lu(θ) ≥Fu(q, θ ) with equality i ff q = q⋆(θ). 
+
+Lemma 1 (Uniform ELBO deviation) . Under Assumption 1, for every q, θ, t, Futrue (q, θ ) − F u(t) (q, θ ) ≤ N εt.Proof. The terms log rmk and − log qmk cancel between the two ELBOs, leaving 
+
+Futrue − F u(t) =
+
+X
+
+> m
+
+|C m|
+
+X
+
+> k
+
+qmk 
+
+u(t) 
+
+> m
+
+(αk, rk) − utrue ,m(αk, rk).
+
+Bounding the inner bracket by εt — the sup in (17) ranges over m as well — and using Pk qmk = 1 gives |F utrue −F u(t) | ≤ 
+
+εt
+
+Pm |C m| = N εt.
+
+Corollary 1. For every θ, |Ltrue (θ) − L(t)(θ)| ≤ N εt.Proof. Apply Lemma 1 to the maxima of the two ELBOs and use | max q f − max q g| ≤ sup q | f − g|.Finally, we record three auxiliary bounds — on the softmax map, on the responsibilities, and on the Q-function — used to analyse the limit points in Part (b) of the main proof; they compare the surrogate-based and the true responsibilities. 
+
+Lemma 2 (Softmax stability) . Let a k, ˜ak > 0 satisfy e −εak ≤ ˜ak ≤ eεak. Then the normalised vectors p k = ak/ P j a j
+
+and ˜pk = ˜ak/ P j ˜a j obey | ˜pk − pk| ≤ (e2ε − 1) pk ≤ 3ε pk for ε ≤ 1.Proof. ˜pk ≤ akeε/ P j a je−ε = pk e2ε and similarly ˜ pk ≥ pk e−2ε.
+
+Lemma 3 (Responsibility deviation) . Let w mk (θ) = q⋆
+
+> mk
+
+(θ) be the true-surrogate responsibilities (Proposition 1 with 
+
+u = utrue ) and q (t) 
+
+> mk
+
+the surrogate responsibilities of the E-step at iteration t. For εt ≤ 1, |q(t) 
+
+> mk
+
+− wmk (θ(t))| ≤ 3εt wmk (θ(t)).Proof. Fix m and apply Lemma 2 with amk = r(t) 
+
+> mk
+
+e−utrue ,m(α(t)   
+
+> k,r(t)
+> k)
+
+and ˜ amk obtained by replacing utrue by u(t). The ratio ˜amk /amk = eutrue ,m−u(t) 
+
+> m
+
+satisfies e−εt ≤ ˜amk /amk ≤ eεt by (17), so Lemma 2 applies with ε = εt.
+
+Lemma 4 (Q-function deviation) . Define the surrogate Q-function 
+
+˜Q(t)(θ; θ′) =
+
+> M
+
+X
+
+> m=1
+
+|C m|
+
+> K
+
+X
+
+> k=1
+
+q(t)
+
+> mk
+
+(θ′)log rmk − u(t) 
+
+> m
+
+(αk, rk).
+
+Under Assumption 1 there exists a constant C Q = CQ(N, K, Umax ) such that for every θ, θ ′ and every t with εt ≤ 1,
+
+| ˜Q(t)(θ; θ′) − Qtrue (θ; θ′)| ≤ CQ εt.Proof. Add and subtract Pm |C m| Pk q(t)
+
+> mk
+
+log rmk −utrue ,m(αk, rk). The first piece, the surrogate-error term, is Pm |C m| Pk q(t)
+
+> mk
+
+(utrue ,m−
+
+u(t) 
+
+> m
+
+) and is bounded by Nεt. The remainder splits as Pm |C m| Pk(q(t) 
+
+> mk
+
+−wmk )( −utrue ,m) and Pm |C m| Pk(q(t) 
+
+> mk
+
+−wmk ) log rmk .The first is bounded by 3 NK U max εt via Lemma 3 (because |utrue ,m| ≤ Umax for every m). For the second, using 
+
+|x log x| ≤ 1/e on [0 , 1] together with the softmax-stability bound of Lemma 2, one obtains a bound of 3 Nεt/e.Summing the three contributions gives the claim with CQ = N(1 + 3K U max + 3/e). 16 A.2. Main Proof 
+
+Proposition 2 (Quasi-monotonicity of Ltrue ). Under Assumptions 1–3, for every t, Ltrue (θ(t+1) ) ≥ Ltrue (θ(t)) − 2N εt. (A.1) 
+
+Proof. We chain five inequalities. First, Ltrue (θ(t+1) ) ≥ F utrue (q(t), θ (t+1) ) since Lu(θ) = max q Fu(q, θ ). Second, by Lemma 1, Futrue (q(t), θ (t+1) ) ≥ F u(t) (q(t), θ (t+1) )−Nεt. Third, the GEM Assumption 3 yields Fu(t) (q(t), θ (t+1) ) ≥ F u(t) (q(t), θ (t)). Fourth, the E-step makes the latter equal to L(t)(θ(t)). Fifth, Corollary 1 gives L(t)(θ(t)) ≥ Ltrue (θ(t)) − Nεt. Combining the five steps yields (A.1). 
+
+Part (a): convergence of the likelihood. Set Lmax = sup θ∈Θ Ltrue (θ), which is finite because Θ is compact (Assumption 4 and finiteness of A). Define Vt = Lmax − Ltrue (θ(t)) ≥ 0. From Proposition 2, 
+
+Vt+1 ≤ Vt + 2Nεt,
+
+> ∞
+
+X
+
+> t=0
+
+2Nεt < ∞ by Assumption 2. The Robbins–Siegmund theorem [49] (with at = 0, bt = 2Nεt) implies that {Vt} converges, hence {Ltrue (θ(t))} con-verges. 
+
+Part (b): limit points are M-step fixed points. Step 1: existence. Θ is compact, so {θ(t)} has at least one limit point θ⋆ = lim j→∞ θ(t j).
+
+Step 2: contradiction setup. Suppose the claim fails: there are θ′ ∈ M ∞(θ⋆) and δ > 0 with Qtrue (θ′; θ⋆) −
+
+Qtrue (θ⋆; θ⋆) = δ > 0. Since θ′ lies in M(t j) for infinitely many j, we may pass to a further subsequence — still written (t j) — along which θ(t j) → θ⋆ and θ′ ∈ M (t j) for every j.
+
+Step 3: continuity. The map θ′ 7 → Qtrue (θ; θ′) is continuous on Θ: wmk (θ′) is continuous because each component 
+
+utrue ,m is continuous in r (Assumption 4) and softmax is continuous; and the product wmk log rmk extends continuously to rmk = 0 because wmk = O(rmk ) and r 7 → r log r is continuous at 0. Thus, for j large enough, Qtrue (θ′; θ(t j)) −
+
+Qtrue (θ(t j); θ(t j)) ≥ δ/ 2. 
+
+Step 4: transfer to ˜Q. By Lemma 4, ˜Q(t j)(θ′; θ(t j)) − ˜Q(t j)(θ(t j); θ(t j)) ≥ δ/ 2 − 2CQ εt j ≥ δ/ 4for j large enough, since εt j → 0. 
+
+Step 5: M-step ascent. By Assumption 3 the iterate θ(t j+1) maximises Fu(t j) (q(t j), ·) over M(t j), and θ′ ∈ M (t j) by Step 2. The responsibilities q(t j) are held fixed in that maximisation, and expanding the logarithm in F gives 
+
+Fu(t)
+
+ q(t), θ  = ˜Q(t) θ; θ(t) −
+
+> M
+
+X
+
+> m=1
+
+|C m|
+
+> K
+
+X
+
+> k=1
+
+q(t) 
+
+> mk
+
+log q(t)
+
+> mk
+
+,
+
+whose second term does not depend on θ. The two objectives therefore have the same maximisers over any candidate set, and ˜ Q(t j)(θ(t j+1) ; θ(t j)) ≥ ˜Q(t j)(θ′; θ(t j)). Translating back through Lemma 4 once more, 
+
+∆t j := Qtrue (θ(t j+1) ; θ(t j)) − Qtrue (θ(t j); θ(t j)) ≥ δ/ 4 − 2CQ εt j ≥ δ/ 8for j large enough. 
+
+Step 6: summability contradiction. The Gibbs inequality Ltrue (θ(t+1) )−Ltrue (θ(t)) ≥ ∆t together with Proposition 2 implies ∆t ≥ − 2Nεt. Hence the non-negative sequence ∆t + 2Nεt satisfies Pt(∆t + 2Nεt) < ∞ by Robbins–Siegmund applied to Vt, and consequently Pt ∆t < ∞. But Step 5 gives ∆t j ≥ δ/ 8 for infinitely many j, yielding Pt ∆t = + ∞ —a contradiction. Therefore no θ′ ∈ M ∞(θ⋆) improves Qtrue at θ⋆, which is the claim. 
+
+A.3. Convergence Rate 
+
+A by-product of the proof of Theorem 1(a) is the explicit rate 
+
+Ltrue (θ⋆) − Ltrue (θ(T )) ≤ 2N
+
+> ∞
+
+X
+
+> t=T
+
+εt. (A.2) If εt = O(t−p) with p > 1, this gives Ltrue (θ(T )) → Ltrue (θ⋆) at rate O(T 1−p), matching the rate observed for stochastic-EM analyses [46]. 17 B. Exploration Mechanisms in SGEM 
+
+This appendix details the three exploration mechanisms introduced in Section 3.2. All of them consume only quantities the search has already produced — the accumulated surrogate observations Dsurr — and none of them consults domain labels. 
+
+Cluster a ffi nities. The observations collected so far form a cluster ×architecture matrix of per-cluster validation losses, whose ( m, i) entry is the loss y(i) 
+
+> m
+
+attained on cluster m by the i-th trained architecture. Subtracting the column mean removes the global e ff ect of an architecture, so that what remains is how a cluster reacts to architectures rather than how hard the cluster is in absolute terms — without this centring the matrix is dominated by the overall di ffi culty ordering of the clusters, which carries no architectural information. Clusters with correlated residual profiles are then grouped by agglomerative clustering; the resulting groups drive the first two mechanisms below. 
+
+Exploration masks. Each a ffi nity group is proposed as a training mask b and evaluated with several architectures, the resulting triples entering Dsurr as ordinary observations. A group is by construction much smaller than a current routing region, so these are precisely the near-pure masks that the LCB acquisition of Section 3.1 never proposes on its own: that acquisition scores candidates under the current routing and therefore keeps drawing masks close to it, leaving the surrogate without evidence on what a specialised expert would attain. The mechanism is what breaks the feedback loop in which a surrogate trained only around the incumbent split keeps confirming that split. 
+
+Partition jumps. The same a ffi nities also propose complete candidate partitions of the M clusters into K regions. A candidate partition is evaluated by genuinely training, for each of its regions, the incumbent architecture of the corresponding expert and one further architecture selected by the surrogate; it replaces the current routing only if the resulting measured objective exceeds that of the incumbent partition. Acceptance is therefore decided on real training outcomes rather than on surrogate predictions, so a mis-calibrated surrogate can waste evaluation budget but cannot move the routing to a worse partition. The mechanism matters when the routing sits in a local optimum that no single-cluster move can leave, which the gradient M-step on R alone cannot escape. 
+
+Final per-region refit. After the EM loop terminates, the hard assignment Ik of Section 2.1 is fixed and each expert’s architecture is re-searched from scratch by random search restricted to its own region Drk . At this point no routing variable is left and the problem is an ordinary NAS problem per region. 
+
+C. Additional Experimental Results 
+
+This appendix collects two ablations and a convergence trace on the CIFAR-100 /SVHN mixture ( K = 2, M = 30 semantic clusters) referenced from Section 4.2. All numbers are cluster-gate test accuracy (mean ± std over the indicated number of seeds), evaluated under the same protocol as Table 1. Both ablations were run with a simplified surrogate that predicts a single scalar per candidate — the region average of (12) — instead of the per-cluster vector of Definition 1; this reduction requires the load-balancing term discussed in Appendix C.2 (used here at λLB = 1) and costs about 2 p.p. of accuracy overall, so the levels below sit under the 0 .6402 ± 0.002 of Table 1. The comparison 
+
+within each block is una ff ected. 
+
+C.1. Decomposition of the cluster-gate accuracy 
+
+To attribute the MoE gain to its two ingredients — the cluster →expert routing and the per-expert architecture 
+
+— we vary one factor at a time (Table C.4). Block (i) fixes a single DARTS architecture (searched on the full mixture) and only changes the routing: moving from a random cluster split to the oracle source split raises accuracy by 3 .0 percentage points, so the routing is the main lever. Block (ii) fixes the oracle routing and instead changes the architecture: a single full-mix architecture, a CIFAR-searched one and an SVHN-searched one all lie within 1 p.p. of each other, i.e. once the routing is correct, architectural heterogeneity between experts adds little on this benchmark. Block (iii) isolates the contribution of learning the routing inside SGEM: freezing the routing matrix at its random initialisation (no M-step on R) drops the source-recovery rate to chance (59%) and the accuracy to 0 .598, whereas the full method recovers the source partition (92%) and reaches 0 .620 — essentially the value obtained with the oracle routing in block (i), but without any source labels. 18 Table C.4: Ablation decomposing the cluster-gate accuracy. “src. match” is the agreement of the hard routing with the ground-truth source partition; it is 100% by construction whenever the oracle split is used. 
+
+Setting test acc. src. match 
+
+(i) vary routing, architecture fixed (full-mix DARTS) 
+
+random cluster split 0.587 ± 0.006 ≈ 54% oracle source split 0.617 ± 0.007 100% 
+
+(ii) vary architecture, oracle routing 
+
+full-mix architecture 0.627 ± 0.009 100% CIFAR-searched architecture 0.636 ± 0.003 100% SVHN-searched architecture 0.626 ± 0.006 100% 
+
+(iii) learn the routing (SGEM, no labels) 
+
+routing frozen at random init 0.598 ± 0.003 59 ± 7% 
+
+SGEM (full) 0.620 ± 0.009 92 ± 2%
+
+C.2. The scalar surrogate and load balancing 
+
+Why the scalar reduction needs a penalty. The ablations above approximate the conditional factor in (7) by a quantity that does not depend on the evaluation cluster, replacing um(αk, rk) by the region average ¯ u(αk, rk) of (12). This makes the routing sub-problem degenerate. Fix the architectures and treat the values ¯ uk = ¯u(αk, rk) as constants: each row of (9) is then a linear form Pk rmk e−¯uk on the simplex, whose maximiser is the one-hot vector at arg min k ¯uk
+
+— the same expert for every cluster . The objective is maximised by routing all clusters to a single expert, and specialisation is opposed only by the implicit dependence of ¯ uk on rk, so a scalar surrogate collapses unless its M-step is modified. The per-cluster surrogate of Definition 1, which the method uses throughout, is free of this e ff ect: the row-wise maximiser arg min k um(αk, rk) varies with m, and specialisation is the argmax of (9) itself. The collapse is a property of the scalar reduction of the objective rather than of the optimiser, and it is visible directly in the EM dynamics of Algorithm 1. At a hard routing, where every cluster m is sent to a single expert k(m)(so rmk = [ k = k(m) ]), the inner sum of (9) has a single non-zero term and the logarithm cancels the exponential, giving 
+
+J =
+
+> M
+
+X
+
+> m=1
+
+|C m|  −¯u(αk(m), rk(m)) = −
+
+> K
+
+X
+
+> k=1
+
+Nk ¯uk, Nk =
+
+X 
+
+> m:k(m)=k
+
+|C m|, (C.1) with ¯ uk = ¯u(αk, rk) the predicted loss of expert k and Nk the number of samples routed to it. If the surrogate becomes nearly constant in its routing argument and the experts are interchangeable (¯ uk ≡ ¯u), then J = −¯u N is independent of the assignment {Nk}, so the likelihood is flat over the routing simplex; and even when the ¯ uk di ff er, J is linear in the counts Nk and is maximised by routing all clusters to the single expert with the smallest ¯ uk. Under the per-cluster surrogate the same hard routing gives J = − Pk
+
+Pm∈Ik |C m| um(αk, rk), which is no longer linear in the counts and whose per-cluster maximiser varies with m; the penalty is then unnecessary. To counteract the collapse in the scalar case we augment the M-step of Algorithm 1 with a load-balancing penalty LB( R) = K ·
+
+> K
+
+X
+
+> k=1
+
+¯rk · pk, ¯rk = 1
+
+M
+
+> M
+
+X
+
+> m=1
+
+rmk , pk = |{ m : arg max k′ rmk ′ = k}| 
+
+M , (C.2) weighted by a coe ffi cient λLB ; it is minimal for a uniform routing and saturates at K under full collapse. 
+
+Choosing the weight. We keep the weight of these runs small ( λLB = 1) because the correct source partition is itself imbalanced (19 /11), so a strong balancing penalty would push the routing away from it; collapse is prevented in-stead through the data-collection scheme of Section 4.2. We make this trade-o ff quantitative by scoring three candidate hard routings under the penalised objective L−λLB ·LB N actually optimised in the M-step, where the per-expert losses 
+
+uk are obtained by genuinely training a fixed architecture on each expert’s clusters (no surrogate), L = − Pk Nkuk is the resulting size-weighted objective, and LB N = K Pk P2 
+
+> k
+
+· N is the (extensive) balancing penalty (Table C.5). 19 Table C.5: Penalised objective of three hard routings on real-trained per-expert losses. The penalised score is L − λLB LB N .
+
+hard split uk (per expert) L LB N
+
+oracle [19 , 11] [2 .73 , 0.51] −48099 31491 balanced, SGEM [15 , 15] [1 .91 , 1.90] −55973 29400 balanced, random [15 , 15] [1 .77 , 2.15] −57726 29400 On the unpenalised objective ( λLB = 0) the oracle split is preferred by a margin of ∆L = 7874. However, because the oracle split is imbalanced it is penalised more heavily than a balanced one by ∆ LB N = 2091 per unit of λLB .The oracle split therefore wins the penalised objective only while λLB < ∆L/∆ LB N ≈ 3.77; beyond this cross-over a balanced (and hence domain-blind) split scores higher. This is a direct, surrogate-free conflict between load balancing and the imbalanced domain structure, and explains why a large λLB — which reliably prevents collapse — would also suppress the very specialisation we seek; we therefore operate well below the cross-over. Two observations sharpen this. First, the penalty (C.2) measures balance in clusters : Pk is the fraction of clusters routed to expert k. The oracle split is imbalanced in clusters (19 /11) but, since the benchmark mixes the two sources in equal proportion, almost perfectly balanced in samples . Replacing Pk by the sample fraction Nk/N therefore leaves the oracle split essentially unpenalised and dissolves the cross-over of Table C.5. Second, and more fundamentally, the penalty is needed at all only under the scalar reduction; the method itself uses the per-cluster surrogate throughout, drops the term entirely and shows no collapse, as the runs of Table 1 confirm ( λLB = 0, five seeds). The M-step of Algorithm 1 is therefore run exactly as analysed in Section 3.3. 
+
+What the scalar reduction costs. Run under the same data collection as the headline results, the scalar-surrogate variant reaches 0 .6199 ± 0.009 cluster-gate test accuracy over three seeds, with a source-recovery rate of 92% ± 2%, against the 0 .6402 ±0.002 and 95% ±2% of Table 1. The 2 .0 p.p. gap is paid despite the penalty above, which prevents the collapse but cannot restore the per-cluster signal the routing needs — which is why the surrogate is vector-valued in the first place. 
+
+C.3. Convergence of a single run 
+
+Tracing one run of the scalar-surrogate variant across its EM iterations (seed 322), the size-weighted objective L(t)
+
+increases up to optimisation noise while the source-recovery rate climbs from 67% to 100%, which is the behaviour Theorem 1 predicts. The two curves peak one iteration apart — the objective at t = 8, the recovery at t = 9 — the same objective /quality mismatch near the optimum discussed in Section 4.2, so selecting the iterate by best objective returns a near-ideal but not always perfect split. 
+
+References 
+
+[1] R. A. Jacobs, M. I. Jordan, S. J. Nowlan, G. E. Hinton, Adaptive mixtures of local experts, Neural computation 3 (1) (1991) 79–87. doi:10.1162/neco.1991.3.1.79 .[2] S. Mu, S. Lin, A comprehensive survey of mixture-of-experts: Algorithms, theory, and applications, arXiv preprint arXiv:2503.07137 (2025). doi:10.48550/arXiv.2503.07137 .[3] W. Fedus, B. Zoph, N. Shazeer, Switch transformers: Scaling to trillion parameter models with simple and effi cient sparsity, Journal of Machine Learning Research 23 (120) (2022) 1–39. doi:10.48550/arXiv.2101. 03961 .[4] A. Q. Jiang, A. Sablayrolles, A. Roux, A. Mensch, B. Savary, C. Bamford, D. S. Chaplot, D. d. l. Casas, E. B. Hanna, F. Bressand, et al., Mixtral of experts, arXiv preprint arXiv:2401.04088 (2024). doi:10.48550/arXiv. 2401.04088 .[5] P. Ren, Y. Xiao, X. Chang, P.-Y. Huang, Z. Li, X. Chen, X. Wang, A comprehensive survey of neural architecture search: Challenges and solutions, ACM Computing Surveys (CSUR) 54 (4) (2021) 1–34. doi:10.1145/ 3447582 .20 [6] H. Liu, K. Simonyan, Y. Yang, Darts: Di ff erentiable architecture search, arXiv preprint arXiv:1806.09055 (2018). doi:10.48550/arXiv.1806.09055 .[7] Z. Chen, Y. Deng, Y. Wu, Q. Gu, Y. Li, Towards understanding the mixture-of-experts layer in deep learning, Advances in neural information processing systems 35 (2022) 23049–23062. doi:10.52202/068431-1675 .[8] T. Chai Fung, S. C. Tseung, Mixture of experts models for multilevel data: modelling framework and approxi-mation theory, arXiv e-prints (2022) arXiv–2209 doi:10.48550/arXiv.2209.15207 .[9] J. Guo, D. J. Shah, R. Barzilay, Multi-source domain adaptation with mixture of experts, arXiv preprint arXiv:1809.02256 (2018). doi:10.48550/arXiv.1809.02256 .[10] Z. Hu, V. Gutiérrez-Basulto, Z. Xiang, R. Li, J. Z. Pan, Multi-level mixture of experts for multimodal entity linking, in: Proceedings of the 31st ACM SIGKDD Conference on Knowledge Discovery and Data Mining V. 2, 2025, pp. 979–990. doi:10.1145/3711896.3737060 .[11] M. I. Jordan, R. A. Jacobs, Hierarchical mixtures of experts and the em algorithm, Neural computation 6 (2) (1994) 181–214. doi:10.1162/neco.1994.6.2.181 .[12] R. A. Jacobs, F. Peng, M. A. Tanner, A bayesian approach to model selection in hierarchical mixtures-of-experts architectures, Neural Networks 10 (2) (1997) 231–241. doi:10.1016/s0893-6080(96)00050-0 .[13] H. Nguyen, P. Akbarian, T. Nguyen, N. Ho, A general theory for softmax gating multinomial logistic mixture of experts, arXiv preprint arXiv:2310.14188 (2023). doi:10.48550/arXiv.2310.14188 .[14] H. Nguyen, T. Nguyen, N. Ho, Demystifying softmax gating function in gaussian mixture of experts, Advances in Neural Information Processing Systems 36 (2023) 4624–4652. doi:10.52202/075280-0206 .[15] J. Piwko, J. Ruci´ nski, D. Płudowski, A. Zajko, P. ˙ Zak, M. Zacharecki, A. Kozak, K. Wo´ znica, Divide, specialize, and route: A new approach to e ffi cient ensemble learning, arXiv preprint arXiv:2506.20814 (2025). doi: 10.48550/arXiv.2506.20814 .[16] C. Rasmussen, Z. Ghahramani, Infinite mixtures of gaussian process experts, Advances in neural information processing systems 14 (2001). [17] D. Eigen, M. Ranzato, I. Sutskever, Learning factored representations in a deep mixture of experts, arXiv preprint arXiv:1312.4314 (2013). doi:10.48550/arXiv.1312.4314 .[18] N. Shazeer, A. Mirhoseini, K. Maziarz, A. Davis, Q. Le, G. Hinton, J. Dean, Outrageously large neural networks: The sparsely-gated mixture-of-experts layer, arXiv preprint arXiv:1701.06538 (2017). doi:10.48550/arXiv. 1701.06538 .[19] C. Riquelme, J. Puigcerver, B. Mustafa, M. Neumann, R. Jenatton, A. Susano Pinto, D. Keysers, N. Houlsby, Scaling vision with sparse mixture of experts, Advances in Neural Information Processing Systems 34 (2021) 8583–8595. doi:10.48550/arXiv.2106.05974 .[20] D. Dai, C. Deng, C. Zhao, R. Xu, H. Gao, D. Chen, J. Li, W. Zeng, X. Yu, Y. Wu, et al., Deepseekmoe: Towards ultimate expert specialization in mixture-of-experts language models, arXiv preprint arXiv:2401.06066 (2024). 
+
+doi:10.48550/arXiv.2401.06066 .[21] Z. Qiu, Z. Huang, B. Zheng, K. Wen, Z. Wang, R. Men, I. Titov, D. Liu, J. Zhou, J. Lin, Demons in the detail: On implementing load balancing loss for training specialized mixture-of-expert models, arXiv preprint arXiv:2501.11873 (2025). doi:10.48550/arXiv.2501.11873 .[22] S. Gururangan, M. Lewis, A. Holtzman, N. A. Smith, L. Zettlemoyer, DEMix layers: Disentangling domains for modular language modeling, in: Proceedings of the 2022 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, 2022, pp. 5557–5576. doi: 10.18653/v1/2022.naacl-main.407 .21 [23] M. Li, S. Gururangan, T. Dettmers, M. Lewis, T. Altho ff , N. A. Smith, L. Zettlemoyer, Branch-train-merge: Embarrassingly parallel training of expert language models, arXiv preprint arXiv:2208.03306 (2022). doi: 10.48550/arXiv.2208.03306 .[24] S. Gururangan, M. Li, M. Lewis, W. Shi, T. Altho ff , N. A. Smith, L. Zettlemoyer, Scaling expert language models with unsupervised domain discovery, arXiv preprint arXiv:2303.14177 (2023). doi:10.48550/arXiv. 2303.14177 .[25] S. Sukhbaatar, O. Golovneva, V. Sharma, H. Xu, X. V. Lin, B. Rozière, J. Kahn, D. Li, W.-t. Yih, J. Weston, et al., Branch-train-mix: Mixing expert LLMs into a mixture-of-experts LLM, in: First Conference on Language Modeling, 2024. doi:10.48550/arXiv.2403.07816 .[26] N. Muennigho ff , L. Soldaini, D. Groeneveld, K. Lo, J. Morrison, S. Min, W. Shi, P. Walsh, O. Tafjord, N. Lam-bert, et al., OLMoE: Open mixture-of-experts language models, in: The Thirteenth International Conference on Learning Representations, 2025. doi:10.48550/arXiv.2409.02060 .[27] X. Shi, S. Wang, Y. Nie, D. Li, Z. Ye, Q. Wen, M. Jin, Time-MoE: Billion-scale time series foundation models with mixture of experts, in: The Thirteenth International Conference on Learning Representations, 2025. doi: 10.48550/arXiv.2409.16040 .[28] X. Liu, J. Liu, G. Woo, T. Aksu, Y. Liang, R. Zimmermann, C. Xiong, S. Savarese, D. Sahoo, Moirai-MoE: Empowering time series foundation models with sparse mixture of experts, in: Forty-second International Con-ference on Machine Learning, 2025. doi:10.48550/arXiv.2410.10469 .[29] B. Zoph, Q. V. Le, Neural architecture search with reinforcement learning, arXiv preprint arXiv:1611.01578 (2016). doi:10.48550/arXiv.1611.01578 .[30] B. Baker, O. Gupta, N. Naik, R. Raskar, Designing neural network architectures using reinforcement learning, arXiv preprint arXiv:1611.02167 (2016). doi:10.48550/arXiv.1611.02167 .[31] B. Zoph, V. Vasudevan, J. Shlens, Q. V. Le, Learning transferable architectures for scalable image recognition, in: Proceedings of the IEEE conference on computer vision and pattern recognition, 2018, pp. 8697–8710. 
+
+doi:10.1109/cvpr.2018.00907 .[32] E. Real, A. Aggarwal, Y. Huang, Q. V. Le, Regularized evolution for image classifier architecture search, in: Proceedings of the aaai conference on artificial intelligence, Vol. 33, 2019, pp. 4780–4789. doi:10.1609/ aaai.v33i01.33014780 .[33] Z. Yang, Y. Wang, X. Chen, B. Shi, C. Xu, C. Xu, Q. Tian, C. Xu, Cars: Continuous evolution for e ffi cient neural architecture search, in: Proceedings of the IEEE /CVF conference on computer vision and pattern recognition, 2020, pp. 1829–1838. doi:10.1109/cvpr42600.2020.00190 .[34] X. Chen, C.-J. Hsieh, Stabilizing di ff erentiable architecture search via perturbation-based regularization, in: International conference on machine learning, PMLR, 2020, pp. 1554–1565. doi:10.48550/arXiv.2002. 05283 .[35] S. You, T. Huang, M. Yang, F. Wang, C. Qian, C. Zhang, Greedynas: Towards fast one-shot nas with greedy supernet, in: Proceedings of the IEEE /CVF Conference on Computer Vision and Pattern Recognition, 2020, pp. 1999–2008. doi:10.1109/CVPR42600.2020.00207 .[36] N. Nayman, A. Noy, T. Ridnik, I. Friedman, R. Jin, L. Zelnik, Xnas: Neural architecture search with expert advice, Advances in neural information processing systems 32 (2019). doi:10.48550/arXiv.1906.08031 .[37] G. Jawahar, S. Mukherjee, X. Liu, Y. J. Kim, M. Abdul-Mageed, L. V. Lakshmanan, A. H. Awadallah, S. Bubeck, J. Gao, Automoe: Heterogeneous mixture-of-experts with adaptive computation for e ffi cient neural machine translation, arXiv preprint arXiv:2210.07535 (2022). doi:10.48550/arXiv.2210.07535 .22 [38] Y. Zhou, N. Du, Y. Huang, D. Peng, C. Lan, D. Huang, S. Shakeri, D. So, A. Dai, Y. Lu, Z. Chen, Q. Le, C. Cui, J. Laudon, J. Dean, Brainformers: Trading simplicity for e ffi ciency, arXiv preprint arXiv:2306.00008 (2023). 
+
+doi:10.48550/arXiv.2306.00008 .[39] Y. R. Lukhi, H. R. Moradiya, R. Timofte, D. Ignatov, Systematic exploration of 4-expert heterogeneous mixture-of-experts via automated pipeline search, arXiv preprint arXiv:2606.23739 (2026). doi:10.48550/arXiv. 2606.23739 .[40] S. Han, S. Liu, S. Du, M. Li, Z. Ye, X. Xu, Y. Li, Z. Wang, D. Shang, Cmn: a co-designed neural architec-ture search for e ffi cient computing-in-memory-based mixture-of-experts, Science China Information Sciences 67 (10) (2024) 200405. doi:10.1007/s11432-024-4144-y .[41] L. A. Mecharbat, A. Marchisio, M. Shafique, M. M. Ghassemi, T. Alhanai, Moenas: Mixture-of-expert based neural architecture search for jointly accurate, fair, and robust edge deep neural networks, arXiv preprint arXiv:2502.07422 (2025). doi:10.48550/arXiv.2502.07422 .[42] H. Li, S. Lin, L. Duan, Y. Liang, N. B. Shro ff , Theory on mixture-of-experts in continual learning, arXiv preprint arXiv:2406.16437 (2024). doi:10.48550/arXiv.2406.16437 .[43] Y. Zhou, T. Lei, H. Liu, N. Du, Y. Huang, V. Zhao, A. M. Dai, Q. V. Le, J. Laudon, et al., Mixture-of-experts with expert choice routing, Advances in Neural Information Processing Systems 35 (2022) 7103–7114. doi: 10.52202/068431-0515 .[44] A. P. Dempster, N. M. Laird, D. B. Rubin, Maximum likelihood from incomplete data via the EM algorithm, Journal of the Royal Statistical Society, Series B 39 (1) (1977) 1–38. doi:10.1111/j.2517-6161.1977. tb01600.x .[45] C. F. J. Wu, On the convergence properties of the EM algorithm, The Annals of Statistics 11 (1) (1983) 95–103. 
+
+doi:10.1214/aos/1176346060 .[46] O. Cappé, É. Moulines, On-line expectation–maximization algorithm for latent data models, Journal of the Royal Statistical Society, Series B 71 (3) (2009) 593–613. doi:10.1111/j.1467-9868.2009.00698.x .[47] R. Godahewa, C. Bergmeir, G. I. Webb, R. J. Hyndman, P. Montero-Manso, Monash time series forecasting archive, in: Proceedings of the Neural Information Processing Systems Track on Datasets and Benchmarks, 2021. doi:10.48550/arXiv.2105.06643 .[48] R. Ni, Z. Lin, S. Wang, G. Fanti, Mixture-of-linear-experts for long-term time series forecasting, in: International Conference on Artificial Intelligence and Statistics (AISTATS), 2024. doi:10.48550/arXiv.2312.06786 .[49] H. Robbins, D. Siegmund, A convergence theorem for non negative almost supermartingales and some ap-plications, in: Optimizing Methods in Statistics, Academic Press, 1971, pp. 233–257. doi:10.1007/ 978-1-4612-5110-1_10 .23
