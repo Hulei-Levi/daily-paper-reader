@@ -6,47 +6,29 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-09-01
-- 运行时间：2026-09-01 23:07:58 UTC
+- 最新运行日期：2026-09-02
+- 运行时间：2026-09-02 23:08:29 UTC
 - 运行状态：成功
-- 本次总论文数：9
-- 精读区：6
-- 速读区：3
+- 本次总论文数：3
+- 精读区：2
+- 速读区：1
 
 ### 今日简报（AI）
-今日精读9篇，焦点集中在Mixture of Experts（MoE）架构优化及其在多任务与多模态场景中的应用。最值得关注的是两项9分工作：HiVe提出基于层级垂直MoE的动态提示机制，超越静态提示实现多任务学习；另一项研究则用结构感知神经架构搜索自动设计MoE结构。建议普通读者优先了解MoE如何通过动态路由与层级设计提升模型效率，这是当前大模型架构演进的关键方向。
-- 详情：[/202609/01/README](/202609/01/README)
+今日精读3篇MoE论文，聚焦模块化专家路由与推理优化新思路。最值得关注的是对比路由机制（9.0分）和细粒度路径组合（8.0分），均旨在突破传统专家选择的效率瓶颈。想快速上手MoE改进，可从这两篇的轻量路由设计入手，再对比压缩剪枝方案。
+- 详情：[/202609/02/README](/202609/02/README)
 
 ### 精读区论文标签
-1. [HiVe: Beyond Static Prompts for Multitask Learning via Hierarchy-based Vertical Mixture-of-Experts](/202609/01/2608.29790v1-hive-beyond-static-prompts-for-multitask-learning-via-hierarchy-based-vertical-mixture-of-experts)  
+1. [Beyond Magnitude: Contrastive Routing for Modular Mixture-of-Experts](/202609/02/2609.01100v1-beyond-magnitude-contrastive-routing-for-modular-mixture-of-experts)  
    标签：评分：9.0/10、query:moe-special
-   evidence：垂直混合专家机制实现自适应提示专业化
-2. [Structure Aware Neural Architecture Search for Mixture of Experts](/202609/01/2608.29817v1-structure-aware-neural-architecture-search-for-mixture-of-experts)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：面向MoE的结构感知架构搜索，联合优化专家分配与专家架构
-3. [A.X K2 Technical Report](/202609/01/2608.30181v1-ax-k2-technical-report)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：688B参数的MoE语言模型，引入稀疏门控注意力
-4. [PRIME: Mitigating Subgroup Optimization Competition in Shared CTR Top Networks with Plug-in Residual Input-Conditioned Mixture of Expert](/202609/01/2608.30449v1-prime-mitigating-subgroup-optimization-competition-in-shared-ctr-top-networks-with-plug-in-residual-input-conditioned-mixture-of-expert)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：输入条件混合专家以缓解子群竞争，促进专家专门化
-5. [TuringLLM: Efficiently Scaling Foundation Models Toward Physical AI](/202609/01/2608.30567v1-turingllm-efficiently-scaling-foundation-models-toward-physical-ai)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：采用分位数路由的混合专家模型，实现token自适应的专家分配
-6. [Evolutionary Soups: Evolving Mixture-of-Experts for Multi-Objective LLM Alignment](/202609/01/2608.29978v1-evolutionary-soups-evolving-mixture-of-experts-for-multi-objective-llm-alignment)  
+   evidence：直接指出绝对幅值路由限制专家专业化，并提出对比路由CoRM加以改善。
+2. [PCoMoE: Shifting MoE Inference from Monolithic Expert Selection to Fine-Grained Path Composition](/202609/02/2609.01024v1-pcomoe-shifting-moe-inference-from-monolithic-expert-selection-to-fine-grained-path-composition)  
    标签：评分：8.0/10、query:moe-special
-   evidence：进化门控MoE框架，动态生成专家合并系数
+   evidence：以MoE专家选择为核心，用细粒度路径组合替代整体专家选择，提升稀疏MoE推理效率
 
 ### 速读区论文标签
-1. [On the Design of Qwen3.8-Next Architecture: Evaluation, Efficiency, and Training Stability](/202609/01/2608.30320v1-on-the-design-of-qwen38-next-architecture-evaluation-efficiency-and-training-stability)  
-   标签：评分：8.0/10、query:moe-special
-   evidence：稀疏混合专家架构及其效率与训练稳定性分析
-2. [Multimodal Adaptive Expert Selection with Text Routing and Ordinal Prototype Optimization for Sentiment Analysis](/202609/01/2608.30726v1-multimodal-adaptive-expert-selection-with-text-routing-and-ordinal-prototype-optimization-for-sentiment-analysis)  
-   标签：评分：8.0/10、query:moe-special
-   evidence：多模态自适应专家选择与文本路由
-3. [Adaptive Hierarchical Representation Alliance for Multimodal Learning](/202609/01/2608.22863v2-adaptive-hierarchical-representation-alliance-for-multimodal-learning)  
+1. [Residual Sparsification via Output Importance for Compressing Mixture-of-Experts LLMs](/202609/02/2609.00575v1-residual-sparsification-via-output-importance-for-compressing-mixture-of-experts-llms)  
    标签：评分：6.0/10、query:moe-special
-   evidence：层级共享-私有专家框架，涉及专家专业化但不含MoE路由
+   evidence：按输出重要性对专家残差稀疏化，以压缩稀疏MoE大模型
 
 
 <div class="dpr-home-promo-card">

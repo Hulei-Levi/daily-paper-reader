@@ -1,0 +1,531 @@
+Title: PCoMoE: Shifting MoE Inference from Monolithic Expert Selection to Fine-Grained Path Composition
+
+URL Source: https://arxiv.org/pdf/2609.01024v1
+
+Published Time: Wed, 02 Sep 2026 01:08:38 GMT
+
+Number of Pages: 11
+
+Markdown Content:
+# PCoMoE: Shifting MoE Inference from Monolithic Expert Selection to Fine-Grained Path Composition 
+
+Ziyan Gan 1,∗, Fangxin Liu 1,∗,†, Chenyang Guan 1, Junjie Wang 1, Ning Yang 1,Haomin Li 1, Xiang Li 2, Siran Yang 2, Jiamang Wang 2, Lin Qu 2,Zongwu Wang 1, Li Jiang 1,†, Haibing Guan 11Shanghai Jiao Tong University, China 2Alibaba Group, China 
+
+> ∗
+
+Equal contribution †Corresponding authors {Aquarius.o, liufangxin, ljiang_cs, hbguan}@sjtu.edu.cn 
+
+Abstract 
+
+Mixture-of-Experts (MoE) architectures scale Large Language Model (LLM) capacity ef-ficiently by activating a sparse subset of ex-perts per token. However, modern MoE infer-ence remains heavily constrained by the rigid, whole-expert abstraction. Existing frameworks manage, schedule, or prune experts as atomic execution units, which fixes the optimization boundary too early and leaves fine-grained intra-expert computational redundancy under-explored. In this work, we present PCoMoE , a path-compositional execution framework that shifts MoE inference from coarse-grained ex-pert selection to fine-grained path composi-tion. PCoMoE incorporates a path-level formu-lation of expert computation, a compatibility-aware layer-wise pruning strategy to suppress low-value path combinations, and a hardware-friendly execution engine to exploit reusable sub-expert structures under strictly bounded overheads. Experimental results demonstrate that PCoMoE achieves up to a 1.31 × end-to-end inference speedup while enhancing model accuracy by 10%. The code is available at 
+
+https://github.com/gzyyy0/PCoMoE 
+
+1 Introduction 
+
+Recent advances in Large Language Models (LLMs) demonstrate that scaling parameter capac-ity directly drives model capability (Kaplan et al., 2020; Brown et al., 2020; Hoffmann et al., 2022). Among existing scaling paradigms, the Mixture-of-Experts (MoE) architecture has emerged as a dom-inant design by decoupling total parameter count from per-token activated computation. By execut-ing only a sparse subset of experts for each input token, MoE models scale model capacity without proportionally increasing training and inference computational costs (Shazeer et al., 2017; Lepikhin et al., 2020; Fedus et al., 2022; Du et al., 2022). Consequently, MoE has become a cornerstone for modern high-throughput LLM serving. Expert Sub-router Sub-proj 1 Intra-expert             
+
+> Input
+> E1 Router
+> Monolithic Expert Optimization (Vanilla)
+> h
+> Offline planning top-k → top-(k-1)
+> E4 E5 E2 E3 E6
+> Expert pool (Nexperts) Input
+> Fine-Grained Path Optimization (PCoMoE)
+> Output
+> h'
+> pruned low precision shared offload
+> GPU CPU shared params
+> Sub-proj 2 Output
+> h'
+> Router h
+
+Figure 1: Inter-expert vs. intra-expert optimization in MoE inference. Inter-expert approaches operate on rout-ing decisions and complete experts, whereas intra-expert optimization exposes sub-structures within each expert. 
+
+However, theoretical computational sparsity does not automatically translate into end-to-end system efficiency (Liu et al., 2021). MoE infer-ence introduces severe dynamic execution over-heads, where irregular token-to-expert routing pat-terns vary drastically across different tokens and layers (Xue et al., 2024; Tang et al., 2024). Ex-isting optimization frameworks primarily adopt an inter-expert perspective to mitigate these over-heads. Complementary model-level acceleration techniques further explore adaptive layer skip-ping (Liu et al., 2025) and precision-aware compu-tation (Liu et al., 2024). As illustrated in Figure 1, these approaches focus on optimizing schedul-ing, expert caching, offloading, or expert-level skipping and reuse. Specifically, prior work has explored multiple directions, including simplify-ing expert selection (Zhong et al., 2024; Chitty-Venkata et al., 2025), caching and offloading ex-perts (Xue et al., 2024; Tang et al., 2024), improv-ing expert placement and prefetching (Fang et al., 2025; Liu et al., 2026), and enabling expert-level sharing and reuse (Vankov et al., 2026; Tan et al., 2025). While effective at the macro level, these methods treat each expert as an atomic, indivisible execution unit. This coarse-grained, expert-centric abstraction implicitly assumes that expert compu-tation can only be managed or pruned as a whole, arXiv:2609.01024v1 [cs.CL] 1 Sep 2026 fixing the optimization boundary too early and over-looking the fine-grained computational redundancy buried inside individual experts. We argue that treating MoE experts as compu-tationally atomic restricts the optimization space and leads to suboptimal efficiency-quality trade-offs. An MoE expert typically consists of struc-tured Feed-Forward Network (FFN) transforma-tions with coupled sub-layers that exhibit distinct semantic roles, computation costs, and quality sen-sitivities. Restricting optimizations to the inter-expert boundary forces a binary choice between executing or skipping an entire expert, thereby in-troducing severe representation bottlenecks or un-necessary computation. Breaking this monolithic boundary allows systems to expose finer-grained opportunities for intra-expert reuse and reorganiza-tion, which is essential to jointly eliminate compu-tational redundancy and maintain model accuracy. To exploit these fine-grained opportunities, we present PCoMoE , a path-compositional execution framework that optimizes MoE inference via intra-expert sub-transformation composition. PCoMoE decomposes monolithic experts into composable in-ternal sub-structures, transforming standard expert-level selection into path-level composition over an expanded path space. Instead of relying on rigid expert boundaries, PCoMoE adaptively reorganizes internal expert computations to maximize inference efficiency. To regulate the expanded path space without introducing execution chaos, PCoMoE in-corporates compatibility-aware path routing and layer-wise pruning to suppress low-value combi-nations based on layer-specific sensitivity. Fur-thermore, we co-design a hardware-friendly path execution engine that groups dispatches by source and shares expansion-side operations, converting path-level flexibility into real end-to-end speedups under strictly bounded system overheads. Our main contributions are threefold. (1) Path-Level Com-position: We reformulate MoE inference from vanilla monolithic selection to fine-grained sub-transformation composition, unlocking latent intra-expert execution trajectories while preserving base-line vanilla pathways. (2) Compatibility-Aware Gating: We introduce structured compatibility gat-ing with iterative structural pruning to suppress low-value off-diagonal routes, minimizing combi-natorial scheduling overheads while guaranteeing representation fidelity. (3) Hardware-Efficient Runtime: We develop an execution pipeline map-ping active compositional paths directly to source-Projection  to hidden dimension Expanded  intermediate space Gate Projection    
+
+> （Wgate ）
+> Up Projection
+> （Wup ）
+> Input h
+> SiLU Down Projection
+> （Wdown ）Output
+> MoE Expert Structure
+
+Figure 2: Representative internal structure of an MoE expert, illustrated with a SwiGLU-style gated FFN. 
+
+grouped compute clusters, translating algorithmic flexibility into deterministic acceleration. Compre-hensive evaluations show that PCoMoE achieves up to a 1.31 × serving speedup while consistently outperforming vanilla MoE baselines across down-stream tasks by up to 10% in accuracy. 
+
+2 Background 
+
+A vanilla MoE layer consists of a router and a set of sparse feed-forward experts (Shazeer et al., 2017; Lepikhin et al., 2020; Fedus et al., 2022). Given the hidden representation h of an input token, the router computes routing scores to select the top-k experts for execution. Denoting the selected expert set by E(h), the output of the MoE layer is formulated as 
+
+y = X
+
+> e∈E (h)
+
+αe Fe(h),
+
+where αe is the routing weight assigned to expert 
+
+e, and Fe(·) denotes the non-linear transformation implemented by expert e. At runtime, tokens are dispatched according to routing decisions, grouped by expert for batched execution, and scattered back before weighted aggregation. This mechanism dic-tates that a vanilla MoE layer operates on a rigid dispatch-execute-combine pipeline (Lepikhin et al., 2020; Xue et al., 2024). Consequently, MoE infer-ence introduces highly input-dependent execution footprints, where activated expert profiles vary dy-namically across tokens and layers. Although vanilla MoE is traditionally managed at the expert selection level, each individual expert is a structured feed-forward module rather than an atomic computational primitive. Modern MoE models predominantly employ the SwiGLU-style gated FFN architecture (Shazeer, 2020) as their core expert instantiation, a design validated in rep-resentative open-source models including Mixtral and Qwen-MoE (Jiang et al., 2024; Qwen Team, 2024). For an input hidden state h, the computation of expert e is defined as 
+
+Fe(h) = W (e)down 
+
+
+
+SiLU 
+
+
+
+W (e)gate h
+
+
+
+⊙
+
+
+
+W (e)up h
+
+ 
+
+,
+
+where W (e)gate and W (e)up project the input tensor into an expanded intermediate space, ⊙ denotes element-wise multiplication, and W (e)down maps the fused activations back to the hidden dimension. Figure 2 illustrates this intra-expert computa-tional layout. The gate and up branches execute parallel matrix multiplications on the expansion side, followed by element-wise activation fusion and a final down projection. Mechanistically, these parallel branches serve distinct algorithmic roles: the gate branch modulates activation thresholds, the up branch extracts expanded feature represen-tations, and the down branch aggregates these fea-tures back into the model dimension. This inner layout implies that the computational workload within an MoE expert can be reorganized at a finer granularity than the atomic whole-expert interface enforced by vanilla routing. In actual hardware deployments, end-to-end MoE execution latency is governed by system-level orchestrations beyond raw arithmetic FLOPs. It encompasses routing overhead, token dispatch, expert-wise packing, batched kernel launches, result scattering, and weighted tensor aggrega-tion (Xue et al., 2024; Tang et al., 2024). Existing hardware-aware optimizations generally target two distinct granularities: minimizing the expert com-putation exposed by the router through pruning or skipping, or maximizing the execution efficiency of selected experts via batched routing, sharing, caching, or prefetching. Despite mitigating dif-ferent system bottlenecks, these frameworks con-sistently preserve the whole-expert abstraction as their basic execution unit. This rigid boundary arti-ficially restricts the optimization space, concealing critical opportunities for structural reorganization and cross-expert computation reuse within individ-ual sub-expert layers. 
+
+3 Motivation 
+
+Vanilla MoE inference restricts routing to mono-lithic expert boundaries. While computationally convenient, this coarse abstraction overlooks the structural misalignment between sparsity-induced redundancy and indivisible expert modules. 0 4 8 12 16 20 24 28      
+
+> Layer of expert-level cut
+> 0.00 0.01 0.02 0.03 0.04 0.05
+> ∆PPL
+> (a) Mixtral
+> mean
+> 04812 16 20
+> Layer of expert-level cut
+> 0.000 0.002 0.004 0.006 0.008
+> (b) Qwen1.5-MoE
+> mean
+
+Figure 3: Quality impact of single-layer whole-expert reduction. Each bar reports the ∆PPL after changing top-k to top-(k − 1) routing at one MoE layer; darker bars indicate larger values. 0 4 8 12 16 20 24 28 32       
+
+> Modified layers ( Lr)
+> 0.00 0.25 0.50 0.75 1.00
+> ∆PPL
+> 25% layers PPL = 0.14
+> 50% layers PPL = 0.41
+> all layers PPL = 0.89
+> (a) Mixtral
+> 04812 16 20 24
+> Modified layers ( Lr)
+> 0.000 0.025 0.050 0.075 0.100
+> 33% layers PPL = 0.026
+> 67% layers PPL = 0.075
+> all layers PPL = 0.091
+> (b) Qwen1.5-MoE
+
+Figure 4: Cumulative quality impact of reducing one activated expert across multiple MoE layers. 
+
+3.1 Inefficiency of Coarse-Grained Routing 
+
+Traditional MoE acceleration relies on eliminating entire expert executions. Since the vanilla MoE interface exposes computation via top-k routing, a baseline replaces top-k routing with top-(k − 1) 
+
+routing to decrease the number of activated experts per token. We sweep individual layers to profile the perplexity impact of this single-layer pruning. As shown in Figure 3, imposing the same expert-level pruning across different layers yields highly divergent quality degradation. Certain layers ex-hibit minimal perplexity increases, whereas others incur substantial degradation that exceeds the av-erage trend, proving that whole-expert reduction is neither uniformly safe nor uniformly detrimen-tal. This variation demonstrates that inter-expert redundancy is highly non-homogeneous and layer-dependent. While specific layers tolerate complete expert deletion, this local redundancy cannot be generalized into a fixed global pruning rule. Multi-layer reduction compounds these errors. As illustrated in Figure 4, local errors compound catastrophically across deep networks when expert reduction is extended globally. Although the abso-lute degradation scales differently across models, the underlying trend remains consistent: locally tol-erable approximations aggregate into severe end-to-end quality drops. Consequently, repeated whole-expert reduction rapidly depletes safe redundancy, proving that monolithic expert boundaries are too coarse for optimal efficiency-quality trade-offs. The central challenge is therefore not merely Gate Up Down Gate Up Down Gate Up Down Expert 1 Expert 2 Expert n       
+
+> ⋮
+> (a) Operator-level composition
+> large composition space
+> Wgate
+> Wup
+> Wdown
+> Gate Up Down
+> (b) Operator cost asymmetry
+> Gate + Up dominate expert computation Expansion side Projection side
+> expansion (large reuse) projection
+
+Figure 5: Intra-expert composition and cost asymmetry. (a) Separately composing Gate, Up, and Down expands the routing decisions. (b) Grouping Gate and Up as the expansion side, and Down as the projection side, exposes a structured reuse boundary with asymmetric computational costs. 
+
+adjusting the number of reduced experts, but break-ing the whole-expert abstraction to exploit finer computational granularities. 
+
+3.2 Intra-Expert Operator Asymmetry 
+
+To bypass these bottlenecks, we analyze the inter-nal computational structures of individual experts. A vanilla SwiGLU expert maps inputs through par-allel gate and up projections on the expansion side (comprising two-thirds of total expert FLOPs) be-fore a final down projection back to the hidden dimension. Directly treating these operators as independent, unconstrained composition units (Fig-ure 5(a)) introduces prohibitive control-flow over-heads. Instead, the intrinsic expansion-projection boundary (Figure 5(b)) defines a structured middle ground. In a top-2 Mixtral architecture, reusing the expansion side eliminates approximately one-third of total expert computation, whereas reusing the projection side saves only one-sixth, concentrating potential efficiency gains on the expansion side. Profiling operator substitution on Mixtral con-firms that this compute-dense expansion side also exhibits superior structural tolerance for represen-tation sharing. Substituting the gate and up pro-jections with an alternative source expert yields lower representation error in 23 out of 32 layers under optimal independent pairing. Under a stricter constraint where all experts within a layer share a single replacement source, 25 out of 32 layers still favor expansion-side substitution. This dual com-putational and structural asymmetry demonstrates that the expansion-projection boundary serves as an optimal abstraction, avoiding the accuracy drops of whole-expert dropping while circumscribing the irregular execution overheads of arbitrary operator splitting. However, translating this theoretical boundary into serving gains introduces three critical co-design challenges: (1) the path search space scales combinatorially compared to vanilla expert selec-tion, (2) additional control logic or dynamic index-ing can easily offset computational savings under strict latency constraints, and (3) compositional sta-bility varies heavily across layers, threatening fea-ture fidelity. Addressing these hardware-software trade-offs requires an execution framework that si-multaneously regulates the path composition space, minimizes runtime dispatch overheads, and guaran-tees model quality. 
+
+4 Design 
+
+Figure 6 illustrates the PCoMoE overview, which bypasses the monolithic constraints of vanilla MoE inference via fine-grained sub-transformation com-position. While preserving the vanilla routing-compatible interface at the layer boundary, PCo-MoE decouples each internal expert into standalone expansion-side and projection-side operators. For an MoE layer with n experts, cross-composing these operators expands the optimization landscape into an n × n compositional path space. Within this matrix, diagonal trajectories maintain the orig-inal expert computations to anchor baseline sta-bility, whereas off-diagonal paths represent newly synthesized execution routes that introduce zero parameter or storage overheads. To prevent this expanded space from induc-ing combinatorial scheduling overheads, PCo-MoE actively filters candidate trajectories via a compatibility-guided pruning mechanism. The framework assigns each path a composite score that balances vanilla routing priors with learned source-to-target compatibility. This scoring func-tion actively suppresses low-value off-diagonal tra-jectories, confining the search space to a compact, high-fidelity set of active execution paths. The remaining active paths map directly onto a hardware-efficient pipeline that eliminates redun-dant kernel launches through source-grouped com-putation reuse. Instead of executing each path in isolation, PCoMoE aggregates tokens sharing iden-tical expansion-side operators, allowing them to reuse a single compute footprint before dynamic dispatching to their respective projection-side des-tinations. This hardware-software co-design seam-lessly translates algorithmic path-level flexibility into end-to-end serving acceleration under strictly bounded runtime overheads. Standard MoE Virtual Paths Score • Prune • Execute 
+
+➔ ➔       
+
+> Input h
+> Router (top-k)
+> E1E2…En
+> +
+> Output
+> Whole-expert routing
+> Expansion
+> (U) Virtual path space ( n×n)
+> Projection
+> (D)
+> U1
+> U2
+> Un
+
+⋮
+
+> D1
+> D2
+> Dn
+
+⋮                         
+
+> D1D2…Dn
+> (1,1) (1,2) …(1,n) (2,1) (2,2) …(2,n)
+> ⋮⋮⋮⋮
+> (n,1) (n,2) …(n,n)
+> →→→→→→
+> Original paths (diagonal) Recomposed paths (off-diagonal)
+> Pi,j (h) = Dj(Ui(h))
+> n experts → n × n virtual paths
+> 1) Path scoring
+> si,j (h) = gbase,i (h) + bi,j + λ gtgt,j (h)
+> 2) Compatibility matrix → Pruned active mask
+> B(learned) M(active mask)
+> D1D2…Dn
+> U1
+> U2
+> ⋮
+> Un
+
+→     
+
+> D1D2…Dn
+> U1
+> U2
+> ⋮
+> Un
+> 3) Source-grouped expansion-side reuse
+> Compact paths enable reuse-aware inference
+
+Figure 6: Overview of PCoMoE. PCoMoE decomposes each expert into expansion-side and projection-side operators, forming an expanded path space over their cross-compositions. To make this space practical, PCoMoE scores compositional paths via learned compatibility, prunes low-value paths into a compact active set, and executes the remaining paths through source-grouped expansion-side reuse. 
+
+4.1 Compositional Path Formulation 
+
+PCoMoE redefines the computational granular-ity of the MoE layer by decoupling SwiGLU experts along their structural asymmetry bound-aries. The expansion-side operator aggregates the compute-dominant gate and up projections, while the projection-side operator maps intermediate ac-tivations back to the hidden dimension. Formu-lating their ordered combination as a composi-tional path concentrates optimization capabilities precisely where computational reuse potential is maximized, shifting the execution paradigm from monolithic expert selection to flexible path compo-sition. For an MoE layer containing n physical experts, the computation of an individual expert e is decou-pled into an expansion-side function Ue(h) and a projection-side function De(z). We express the expansion side as 
+
+Ue(h) = SiLU 
+
+
+
+W (e)gate h
+
+
+
+⊙
+
+
+
+W (e)up h
+
+
+
+,
+
+and the projection side as 
+
+De(z) = W (e)down z, 
+
+which reconstructs the original vanilla expert trans-formation via 
+
+Fe(h) = De(Ue(h)) .
+
+We define the pools of reusable expansion and projection operators across the layer as U =
+
+{U1, . . . , U n} and D = {D1, . . . , D n}, respec-tively. A compositional path Pi,j (h) represents the ordered composition of an expansion source i
+
+and a projection target j:
+
+Pi,j (h) = Dj (Ui(h)) , i, j ∈ { 1, . . . , n }.
+
+This formulation expands the available computa-tional trajectories from n physical modules to an 
+
+n2 compositional space. The diagonal path Pi,i 
+
+represents the original vanilla expert Fi, while an off-diagonal path Pi,j (i̸ = j) synthesizes a new computational trajectory combining the expansion side of expert i with the projection side of expert j.This optimization landscape is purely architec-tural and introduces zero parameter or storage over-heads. All routes are dynamically synthesized by recombining existing physical operators without creating new weights. Restricting execution to di-agonal paths naturally reduces PCoMoE back to the vanilla MoE layer, whereas off-diagonal paths serve as selectively activated candidates to maxi-mize efficiency-quality trade-offs. Consequently, the MoE layer output generalizes from expert-level routing to path-level aggregation. Let Π( h) ⊆ { 1, . . . , n }×{ 1, . . . , n } denote the ac-tive compositional paths selected for a token hidden state h, and let βi,j (h) represent the corresponding path weight. The PCoMoE layer output is formu-lated as 
+
+y = X
+
+> (i,j )∈Π( h)
+
+βi,j (h)Pi,j (h).
+
+The vanilla MoE layer remains a strict subset of this generalized formulation, where setting Π( h) = 
+
+{(e, e ) | e ∈ E (h)} and βe,e (h) = αe(h) exactly recovers the original weighted expert summation. Although this formulation unlocks a fine-grained optimization landscape, evaluating the entire n2
+
+space introduces prohibitive computational over-heads. PCoMoE treats this matrix strictly as a can-didate space, using a compatibility-driven pruning mechanism to isolate a compact, high-value active path set for execution. Input h gate_base gate_tgt    
+
+> source-side prior over Ui
+> target-side prior over Dj
+> bias
+> gbase (h)
+> over Ui
+> i1
+> i2
+> i3
+> i4
+> ⋮
+
++   
+
+> B
+> i1
+> i2
+> i3
+> i4
+> j1j2j3j4
+
++          
+
+> λgtgt (h)
+> over Dj
+> …
+> j1j2j3j4
+> S(h)
+> i1
+> i2
+> i3
+> i4
+> j1j2j3j4
+> si,j (h) = gbase,i (h) + bi,j + λ gtgt,j (h)
+> Selected paths Masked top-k
+> diag = 0, off-diag: init = c + noise
+
+Figure 7: Compatibility-aware path gate for scoring source-to-target compositional paths. 
+
+4.2 Compatibility-Aware Path Routing 
+
+The compositional path formulation expands the architectural search landscape into an n×n routing matrix. To suppress noisy off-diagonal recomposi-tions and bound runtime dispatch complexity, PCo-MoE introduces a compatibility-aware path gating mechanism (Figure 7) that factors each trajectory score into a source-side routing prior, a target-side routing prior, and a learned pairwise compatibility bias. For a compositional path P (ℓ)
+
+i,j in layer ℓ, the gating function computes the composite routing score as 
+
+s(ℓ)
+
+i,j (h) = g(ℓ)base ,i (h) + b(ℓ)
+
+i,j + λg (ℓ)tgt ,j (h),
+
+where g(ℓ)base (h) ∈ Rn denotes the base expert-routing signal, B(ℓ) = [ b(ℓ)
+
+i,j ] ∈ Rn×n represents the learned compatibility bias, g(ℓ)tgt (h) ∈ Rn provides a projection-side prior, and λ scales this target-side preference. The base routing signal anchors the op-timization to the pretrained vanilla checkpoints by broadcasting across source indices, while the target prior regularizes projection choices. Crucially, the compatibility matrix B(ℓ) parameterizes the struc-tural alignment between expansion source Ui and projection target Dj , transforming the raw Carte-sian product into a filtered execution topology. PCoMoE initializes this compatibility matrix to strictly prioritize vanilla computational trajectories. Diagonal entries are zero-initialized via b(ℓ)
+
+i,i = 0 
+
+to safeguard baseline expert behavior, whereas off-diagonal elements receive a negative offset with bounded random noise: 
+
+b(ℓ)
+
+i,j ∼ c + ϵ, i̸ = j, c < 0.
+
+This negative prior prevents unoptimized off-diagonal trajectories from disrupting early training h       
+
+> Active-path routing
+> masked selection
+> Source grouping Reuse-aware execution
+> compute once
+> Weighted sum
+> outputs
+> path scores S
+> masked top-k
+> Selected Paths
+> (i,j1) ( i,j2) ( p,q1) …
+> Ui
+> Up{Dq1 }
+> Ui(h)
+> Dj1
+> Dj2
+> wi,j1
+> wi,j2
+> Up(h)Dq1
+> wp,q1
+> ⋮
+> wi,j2
+> wp,q1
+
+y+         
+
+> Cached layer-static metadata
+> active paths, source ids, target ids, grouped layout
+> Diagonal fallback
+> original path
+> {Dj1 }{Dj2 }
+> by source
+> mask M
+> 101110111
+
+Figure 8: Hardware-efficient inference execution of active compositional paths in PCoMoE. 
+
+phases while breaking structural symmetry. Dur-ing fine-tuning, this bias is dynamically converted into a layer-specific active mask M (ℓ) ∈ { 0, 1}n×n.Rather than applying a post-hoc, one-shot pruning step, PCoMoE iteratively tightens a structural spar-sity criterion at progressive training intervals to fil-ter low-value off-diagonal routes while hard-coding 
+
+m(ℓ)
+
+i,i = 1 . This continuous regularization allows the remaining routing weights to co-adapt with the contracting active path set, preserving model con-vergence stability. The active mask operates independently across layers on routing eligibility rather than on physical parameters, enabling each layer to autonomously converge to its optimal path density based on local feature sensitivity. Because no physical weights are deleted, suppressed paths are merely excluded from the active runtime dispatch graph. During in-ference, inactive paths are masked out prior to gat-ing, ensuring that the online router evaluates only the optimized, compact set of active trajectories induced by M (ℓ), thereby successfully minimizing control-flow overheads. 
+
+4.3 Hardware-Efficient Path Execution 
+
+To translate the pruned path space into physical serving gains, PCoMoE decouples its runtime exe-cution into a routing phase and a source-grouped reuse phase (Figure 8). 
+
+Compositional Path Routing. During infer-ence, the framework isolates active trajectories by masking the n × n routing matrix with the pruned path set A(ℓ) = {(i, j ) | m(ℓ)
+
+i,j = 1 }. The router selects the active path subset via 
+
+Π(ℓ)(h) = TopK (i,j )∈A (ℓ) s(ℓ)
+
+i,j (h),
+
+collapsing dense evaluation into a sparse search. PCoMoE materializes path indices, source-to-target layouts, and grouped dispatch metadata of-Table 1: Zero-shot accuracy across MoE backbones (higher is better).                                                                                                                                         
+
+> Model Method BoolQ ARC-E ARC-C HellaSwag WinoGrande Avg.
+> Mixtral-8x7B Vanilla 85.93 82.62 59.56 84.10 77.11 77.86 Vanilla-FT 86.45 83.78 61.68 83.34 76.56 78.36 MoE-I 282.60 78.20 52.20 61.10 71.50 69.10 MoE-Pruner 86.00 81.90 53.30 62.30 75.50 71.80 MoEITS 87.33 83.08 55.89 82.83 80.98 78.02
+> PCoMoE 88.38 85.06 62.71 85.46 78.22 79.97
+> ∆vs Vanilla-FT +1.93 +1.28 +1.03 +2.12 +1.66 +1.61 Qwen1.5-MoE Vanilla 79.72 69.28 44.20 77.25 69.06 67.90 Vanilla-FT 82.02 77.01 51.10 74.96 69.06 70.83 MoE-I 275.08 71.68 41.13 53.08 66.54 61.50 MoE-Pruner 69.14 52.02 29.10 42.99 59.12 50.47 MoEITS 75.20 72.30 36.01 61.27 67.46 62.45
+> PCoMoE 86.18 80.43 52.30 77.67 71.90 73.70
+> ∆vs Vanilla-FT +4.16 +3.42 +1.20 +2.71 +2.84 +2.87 DeepSeek-V2-Lite Vanilla 80.61 74.16 46.33 77.74 71.27 70.02 Vanilla-FT 81.83 75.32 47.94 76.23 70.40 70.34 MoE-I 276.79 71.80 42.58 55.16 67.64 62.79 MoE-Pruner 76.61 71.89 40.02 50.94 67.64 61.42 MoEITS 80.03 77.61 43.77 70.80 67.72 67.99
+> PCoMoE 83.94 79.59 51.02 76.66 71.19 72.48
+> ∆vs Vanilla-FT +2.11 +4.27 +3.08 +0.43 +0.79 +2.14
+
+fline. Based on this cached layout, the fusion opti-mization combines online filtering, top-k selection, and dispatch preparation into a single lightweight indexing operation, avoiding reconstruction of the full n × n path space. Because all diagonal paths remain active, the routing graph automatically falls back to vanilla expert execution under low-confidence scenarios, preserving the native MoE interface. 
+
+Source-Grouped Compute Reuse. Following routing, PCoMoE aggregates active trajectories by their expansion-side sources to eliminate redundant tensor evaluations. This source-grouped dispatch changes the dispatch unit from individual paths 
+
+(i, j ) to source groups, allowing paths that share the same expansion-side operator to be scheduled together. Denoting the unique selected sources as 
+
+S(ℓ)(h) = {i | ∃ j, (i, j ) ∈ Π(ℓ)(h)} and their asso-ciated projection targets as T (ℓ) 
+
+> i
+
+(h) = {j | (i, j ) ∈
+
+Π(ℓ)(h)}, the final layer output is formulated as: 
+
+y = X
+
+> i∈S (ℓ)(h)
+
+X  
+
+> j∈T (ℓ)
+> i(h)
+
+β(ℓ) 
+
+> i,j
+
+(h) Dj (Ui(h)) .
+
+By executing each compute-heavy expansion oper-ator Ui(h) exactly once per unique source, expan-sion evaluations scale with the active source count 
+
+|S (ℓ)(h)| instead of the total path budget |Π(ℓ)(h)|.This hardware-software co-design converts struc-tural sharing into deterministic latency reductions. 
+
+5 Evaluation 
+
+5.1 Experimental Setup Implementation. Performance profiling is con-ducted on a server equipped with NVIDIA H20 GPUs and Intel Xeon 6759P-C CPUs. All eval-uations are performed on a single GPU under a unified precision and software environment. 
+
+Models. We validate PCoMoE across three MoE models spanning diverse routing granularities: Qwen1.5-MoE-A2.7B ( 60 routed experts, top-4 ac-tivation) (Qwen Team, 2024), Mixtral-8x7B-v0.1 (8 routed experts, top-2 activation) (Jiang et al., 2024), and DeepSeek-V2-Lite ( 64 routed experts, top-6 activation) (DeepSeek-AI et al., 2024). 
+
+Fine-tuning. We use a 25K-example mixture of Alpaca and SQuAD with AdamW. Vanilla-FT and PCoMoE use the same LoRA configuration for gat-ing adaptation, with rank 16 and a batch size of 32, while all expert weights remain frozen. PCo-MoE additionally learns path compatibility biases for compositional routing and progressive pruning. 
+
+Datasets. Downstream model quality is veri-fied on five benchmarks: BoolQ (Clark et al., 2019), ARC-Easy, ARC-Challenge (Clark et al., 2018), HellaSwag (Zellers et al., 2019), and Wino-Grande (Sakaguchi et al., 2019). We report stan-dard accuracy for BoolQ and WinoGrande, normal-ized accuracy for ARC and HellaSwag, and the macro average across all five tasks as the aggregate representation fidelity metric. Qwen Mixtral DeepSeek 02000 4000 6000 8000        
+
+> Throughput (tokens/s)  Prefill
+> Qwen Mixtral DeepSeek 010 20 30 40
+> Decode
+> Qwen Mixtral DeepSeek 050 100 150 200
+> End-to-end
+> 0.6 0.8 1.0 1.2 1.4
+> Speedup
+> 0.6 0.8 1.0 1.2 1.4
+> Speedup
+> 0.6 0.8 1.0 1.2 1.4
+> Speedup
+> Baseline PCoMoE Speedup 1.0× reference
+
+Figure 9: Token throughput and speedup of PCoMoE against vanilla MoE baselines. 
+
+5.2 Quality and Efficiency Accuracy. Table 1 lists zero-shot accuracy across five benchmarks. We compare PCoMoE with MoE-I2 (Yang et al., 2024), MoE-Pruner (Xie et al., 2024), and MoEITS (Balderas et al., 2026). On Qwen1.5-MoE, PCoMoE improves the macro aver-age score from 67.90 to 73.70, corresponding to a +5.80-point gain over Vanilla. Under the matched fine-tuning setting, PCoMoE further outperforms Vanilla-FT by +2.87 points. For Mixtral-8x7B and DeepSeek-V2-Lite, PCoMoE improves over Vanilla by +2.10 and +2.46 points, respectively, while retaining +1.61 and +2.14-point gains over their matched Vanilla-FT baselines. These results indicate that the activated off-diagonal paths in-troduce viable execution trajectories beyond the gains from standard fine-tuning without disrupting representation capacity. 
+
+Inference Acceleration. Figure 9 details stage-specific token throughput. PCoMoE yields up to a 1.305 × decode speedup and a 1.294 × end-to-end speedup over vanilla baselines. On Mixtral-8x7B, decoding speed increases from 26.50 to 34.58 tokens per second, and end-to-end gener-ation increases from 133.43 to 172.72 tokens per second. PCoMoE delivers over 20% throughput improvements on Qwen1.5-MoE and maintains ef-ficiency gains under the top-6 routing of DeepSeek-V2-Lite. Prefill performance remains identical to vanilla models because the layer-static masking and source-grouped compute reuse loop strictly target the autoregressive decoding phase. 
+
+5.3 Ablation and Sensitivity Study Design Ablation. Table 2 isolates the effects of matched fine-tuning, router adaptation, path com-position, and learned compatibility on Qwen1.5-MoE. Vanilla-FT improves the average accuracy from 67.90 to 70.83, showing that standard adapta-tion contributes part of the quality gain. However, Router-Only FT does not reproduce the improve-ment of PCoMoE, while composition with frozen compatibility biases increases Decode throughput but substantially degrades accuracy to 55.50. Full 
+
+Table 2: Design ablation on Qwen1.5-MoE. Decode throughput is measured in tokens/s.                   
+
+> Method Avg. Acc. (%) Decode Speedup
+> Vanilla 67.90 31.42 1.000 ×
+> Vanilla-FT 70.83 31.71 1.009 ×
+> Router-Only FT 67.51 32.37 1.030 ×
+> Frozen-Bias 55.50 40.41 1.286 ×
+> PCoMoE 73.70 38.90 1.238 ×
+
+Table 3: Ablation of PCoMoE execution optimizations on Qwen1.5-MoE. Throughput is measured in tokens/s.                 
+
+> Configuration Throughput Speedup
+> Base PCoMoE 110.7 1.00 ×
+> + Routing 127.3 1.15 ×
+> + Fusion 141.7 1.28 ×
+> + Dispatch 160.5 1.45 ×
+> + Routing + Dispatch 171.6 1.55 ×
+> + Fusion + Dispatch 179.4 1.62 ×
+> All Optimizations 191.4 1.73 ×
+
+PCoMoE further improves over Vanilla-FT by 2.87 points while retaining a 1.238 × Decode speedup, indicating that learned path compatibility is critical to the final quality–efficiency balance. 
+
+Execution Ablation. Table 3 isolates the end-to-end throughput impacts of PCoMoE execution optimizations on Qwen1.5-MoE. Base PCoMoE de-notes the path-compositional model after expert de-coupling and path construction, but before enabling the execution optimizations in Table 3. Path rout-ing, fusion, and source-grouped dispatch individu-ally yield 1.15 ×, 1.28 ×, and 1.45 × speedups over this reference. Combining these components com-pounds efficiency, culminating in a 1.73 × cumula-tive acceleration (191.4 tokens/s). Thus, hardware-aligned scheduling is required to translate path ex-pansion into throughput gains. 
+
+Pruning Sensitivity. Figure 10(a) tracks active path density across layers. The initial two MoE blocks maintain high density because insepara-ble compatibility biases render early sparsification lossy. From the third block onward, active paths contract sharply due to the high separability of re-dundant routes. PCoMoE thus preserves the native configuration in the first two layers and executes L0 L1                     
+
+> Skipped layers
+> 0500 1000 1500 2000
+> Alive paths
+> dense
+> L2 L4 L6 L8 L10 L12 L14 L16 L18 L20 L22
+> PCoMoE pruning region
+> 0100 200 300 400
+> mean compact regime
+> L2 L4 L6 L8 L10 L12 L14 L16 L18 L20 L22
+> Layer index
+> 10% 15% 20% 25% 30%
+> Expansion saving (%)
+> Mean = 20.6%
+> (a) Active path density (b) Layer-wise computation savings
+
+Figure 10: Layer-wise sensitivity analysis. 
+
+structural pruning exclusively from the third block onward. 
+
+Reuse Heterogeneity. Figure 10(b) shows the layer-wise arithmetic savings achieved by expansion-side reuse on Qwen1.5-MoE. Reduc-tions average 20.6% but vary from 15% to 27% across blocks, confirming that efficiency gains are non-uniform across the hierarchy. PCoMoE leverages this variance to dynamically allocate layer-wise path budgets based on local compati-bility scores, improving overall throughput while avoiding excessive pruning in sensitive regions. 
+
+6 Conclusion 
+
+This paper introduces PCoMoE , an execu-tion framework that shifts MoE inference from monolithic expert selection to fine-grained sub-transformation composition. By integrating struc-tural path decomposition, compatibility-guided gat-ing, and source-grouped compute reuse, PCoMoE leverages intra-expert computational redundancy while strictly maintaining native MoE layer inter-faces. Evaluations show that PCoMoE improves both inference throughput and downstream repre-sentation fidelity over vanilla MoE baselines. 
+
+Acknowledgments 
+
+This work was partially supported by the National Key Research and Development Program of China (2024YFE0204300), the National Natural Science Foundation of China (Grant No. 62402311), the Natural Science Foundation of Shanghai (Grant No. 24ZR1433700), and the Key Research and Devel-opment Program of Shanghai (25LN3201200). 
+
+Limitations 
+
+First, while we demonstrate PCoMoE using stan-dard SwiGLU-style MoE structures common in prevailing open-source LLMs, the underlying prin-ciple of path composition is generic and can be extended to alternative expert internals by adapt-ing the operator boundaries. Second, our current system primarily optimizes autoregressive decod-ing, the primary latency bottleneck in MoE serv-ing; integrating PCoMoE with complementary dis-tributed or prefill-stage optimizations represents a promising and orthogonal future direction. Fi-nally, although the offline calibration stage incurs zero inference-time overhead, further incorporat-ing this process into automated end-to-end model compilation pipelines will help streamline broader deployments. 
+
+References 
+
+Luis Balderas, Miguel Lastra, and José M. Benítez. 2026. Moeits: A green ai approach for simplifying moe-llms. arXiv preprint arXiv:2604.10603 .Tom B. Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, Sandhini Agarwal, Ariel Herbert-Voss, Gretchen Krueger, Tom Henighan, Rewon Child, Aditya Ramesh, Daniel Ziegler, Jeffrey Wu, Clemens Winter, and 12 others. 2020. Language models are few-shot learners. In Advances in Neural Informa-tion Processing Systems .Krishna Teja Chitty-Venkata, Sandeep Madireddy, Mu-rali Emani, and Venkatram Vishwanath. 2025. LExI: Layer-adaptive active experts for efficient moe model inference. arXiv preprint arXiv:2509.02753 .Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and Kristina Toutanova. 2019. Boolq: Exploring the surprising difficulty of natural yes/no questions. In Proceedings of the 2019 Conference of the North American Chap-ter of the Association for Computational Linguistics .Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. 2018. Think you have solved question an-swering? try arc, the ai2 reasoning challenge. arXiv preprint arXiv:1803.05457 .DeepSeek-AI, Aixin Liu, Bei Feng, Bin Wang, Bingx-uan Wang, Bo Liu, Chenggang Zhao, Chengqi Deng, Chong Ruan, Damai Dai, Daya Guo, Dejian Yang, Deli Chen, Dongjie Ji, Erhang Li, Fangyun Lin, Fuli Luo, Guangbo Hao, Guanting Chen, and 138 oth-ers. 2024. Deepseek-v2: A strong, economical, and efficient mixture-of-experts language model. arXiv preprint arXiv:2405.04434 .Nan Du, Yanping Huang, Andrew M. Dai, Simon Tong, Dmitry Lepikhin, Yuanzhong Xu, Maxim Krikun, Yanqi Zhou, Adams Wei Yu, Orhan Firat, Barret Zoph, Liam Fedus, Maarten P. Bosma, Zongwei Zhou, Tao Wang, Emma Wang, Kellie Webster, Marie Pellat, Kevin Robinson, and 8 others. 2022. GLaM: Efficient scaling of language models with mixture-of-experts. In Proceedings of the 39th International Conference on Machine Learning , pages 5547–5569. Zhiyuan Fang, Zicong Hong, Yuegui Huang, Yufeng Lyu, Wuhui Chen, Yue Yu, Fan Yu, and Zibin Zheng. 2025. Fate: Fast edge inference of mixture-of-experts models via cross-layer gate. arXiv preprint arXiv:2502.12224 .William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23(120):1–39. Jordan Hoffmann, Sebastian Borgeaud, Arthur Mensch, Elena Buchatskaya, Trevor Cai, Eliza Rutherford, Diego de Las Casas, Lisa Anne Hendricks, Johannes Welbl, Aidan Clark, Tom Hennigan, Eric Noland, Katie Millican, George van den Driessche, Bogdan Damoc, Aurelia Guy, Simon Osindero, Karen Si-monyan, Erich Elsen, and 3 others. 2022. Train-ing compute-optimal large language models. In Ad-vances in Neural Information Processing Systems .Albert Q. Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch, Blanche Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Emma Bou Hanna, Florian Bressand, Gi-anna Lengyel, Guillaume Bour, Guillaume Lam-ple, Lélio Renard Lavaud, Lucile Saulnier, Marie-Anne Lachaux, Pierre Stock, Sandeep Subramanian, Sophia Yang, and 7 others. 2024. Mixtral of experts. 
+
+arXiv preprint arXiv:2401.04088 .Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B. Brown, Benjamin Chess, Rewon Child, Scott Gray, Alec Radford, Jeffrey Wu, and Dario Amodei. 2020. Scaling laws for neural language models. arXiv preprint arXiv:2001.08361 .Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu, Dehao Chen, Orhan Firat, Yanping Huang, Maxim Krikun, Noam Shazeer, and Zhifeng Chen. 2020. Gshard: Scaling giant models with conditional com-putation and automatic sharding. arXiv preprint arXiv:2006.16668 .Fangxin Liu, Junjie Wang, Ning Yang, Zongwu Wang, Junping Zhao, Li Jiang, and Haibing Guan. 2025. ASTER: Adaptive dynamic layer-skipping for effi-cient transformer inference via markov decision pro-cess. In Proceedings of the 33rd ACM International Conference on Multimedia , pages 11853–11861. Fangxin Liu, Ning Yang, Haomin Li, Zongwu Wang, Zhuoran Song, Songwen Pei, and Li Jiang. 2024. SPARK: Scalable and precision-aware acceleration of neural networks via efficient encoding. In 2024 IEEE International Symposium on High-Performance Computer Architecture (HPCA) , pages 1029–1042. Fangxin Liu, Ning Yang, Jingkui Yang, Zongwu Wang, Chenyang Guan, Yu Feng, Li Jiang, and Haibing Guan. 2026. EARTH: An efficient MoE accelerator with entropy-aware speculative prefetch and result reuse. In Proceedings of the 31st ACM International Conference on Architectural Support for Program-ming Languages and Operating Systems, Volume 2 ,pages 633–646. Fangxin Liu, Wenbo Zhao, Zhezhi He, Yanzhi Wang, Zongwu Wang, Changzhi Dai, Xiaoyao Liang, and Li Jiang. 2021. Improving neural network efficiency via post-training quantization with adaptive floating-point. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) , pages 5281– 5290. Qwen Team. 2024. Qwen1.5-moe: Matching 7b model performance with 1/3 activated parameters. Qwen Blog. Qwen1.5-MoE-A2.7B model release. Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhaga-vatula, and Yejin Choi. 2019. Winogrande: An ad-versarial winograd schema challenge at scale. arXiv preprint arXiv:1907.10641 .Noam Shazeer. 2020. Glu variants improve transformer. 
+
+arXiv preprint arXiv:2002.05202 .Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc V. Le, Geoffrey E. Hinton, and Jeff Dean. 2017. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. arXiv preprint arXiv:1701.06538 .Zheyue Tan, Zhiyuan Li, Tao Yuan, Dong Zhou, Weilin Liu, Yueqing Zhuang, Yadong Li, Guowei Niu, Cheng Qin, Zhuyu Yao, Congyi Liu, Haiyang Xu, Boxun Li, Guohao Dai, Bo Zhao, and Yu Wang. 2025. ReXMoE: Reusing experts with minimal overhead in mixture-of-experts. arXiv preprint arXiv:2510.17483 .Peng Tang, Jiacheng Liu, Xiaofeng Hou, Yifei Pu, Jing Wang, Pheng-Ann Heng, Chao Li, and Minyi Guo. 2024. Hobbit: A mixed precision expert offload-ing system for fast moe inference. arXiv preprint arXiv:2411.01433 .Daniil Vankov, Nikita Ivkin, Kyle Ulrich, Xiang Song, Ashish Khetan, and George Karypis. 2026. Xshare: Collaborative in-batch expert sharing for faster moe inference. arXiv preprint arXiv:2602.07265 .Yanyue Xie, Zhi Zhang, Ding Zhou, Cong Xie, Ziang Song, Xin Liu, Yanzhi Wang, Xue Lin, and An Xu. 2024. Moe-pruner: Pruning mixture-of-experts large language model using the hints from its router. arXiv preprint arXiv:2410.12013 .Leyang Xue, Yao Fu, Zhan Liu, and Mahesh K. Ma-rina. 2024. Moe-infinity: Activation-aware expert offloading for efficient moe serving. arXiv preprint arXiv:2401.14361 .Cheng Yang, Yang Sui, Jinqi Xiao, Lingyi Huang, Yu Gong, Yuanlin Duan, Wenqi Jia, Miao Yin, Yu Cheng, and Bo Yuan. 2024. Moe-i2: Compress-ing mixture of experts models through inter-expert pruning and intra-expert low-rank decomposition. In 
+
+Findings of the Association for Computational Lin-guistics: EMNLP .Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. 2019. Hellaswag: Can a machine really finish your sentence? In Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics .Shuzhang Zhong, Ling Liang, Yuan Wang, Runsheng Wang, Ru Huang, and Meng Li. 2024. Adapmoe: Adaptive sensitivity-based expert gating and man-agement for efficient moe inference. arXiv preprint arXiv:2408.10284 .
