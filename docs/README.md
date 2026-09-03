@@ -6,29 +6,40 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-09-02
-- 运行时间：2026-09-02 23:08:29 UTC
+- 最新运行日期：2026-09-03
+- 运行时间：2026-09-03 22:58:31 UTC
 - 运行状态：成功
-- 本次总论文数：3
-- 精读区：2
-- 速读区：1
+- 本次总论文数：6
+- 精读区：3
+- 速读区：3
 
 ### 今日简报（AI）
-今日精读3篇MoE论文，聚焦模块化专家路由与推理优化新思路。最值得关注的是对比路由机制（9.0分）和细粒度路径组合（8.0分），均旨在突破传统专家选择的效率瓶颈。想快速上手MoE改进，可从这两篇的轻量路由设计入手，再对比压缩剪枝方案。
-- 详情：[/202609/02/README](/202609/02/README)
+今日聚焦MoE技术：从视频检索的时间感知到多模态安全对齐，共6篇研究入选，其中2篇精读获高分。  
+最值得关注《TAME》以时间感知专家提升文本-视频检索精度，以及《SEAL》通过共享专家对齐强化MoE全局安全，代表应用与安全双主线。  
+建议普通读者先读这2篇精读论文，速读的三篇则适合关注多模态冲突、量化与推理优化的进阶者。
+- 详情：[/202609/03/README](/202609/03/README)
 
 ### 精读区论文标签
-1. [Beyond Magnitude: Contrastive Routing for Modular Mixture-of-Experts](/202609/02/2609.01100v1-beyond-magnitude-contrastive-routing-for-modular-mixture-of-experts)  
+1. [TAME: Temporal-Aware Mixture-of-Experts for Text-Video Retrieval](/202609/03/2609.02204v1-tame-temporal-aware-mixture-of-experts-for-text-video-retrieval)  
    标签：评分：9.0/10、query:moe-special
-   evidence：直接指出绝对幅值路由限制专家专业化，并提出对比路由CoRM加以改善。
-2. [PCoMoE: Shifting MoE Inference from Monolithic Expert Selection to Fine-Grained Path Composition](/202609/02/2609.01024v1-pcomoe-shifting-moe-inference-from-monolithic-expert-selection-to-fine-grained-path-composition)  
+   evidence：在CLIP编码器中引入稀疏混合专家层，使用帧一致路由让视觉专家按帧级模式专门化
+2. [SEAL: Reinforcing Global Safety in Mixture-of-Experts through Shared Expert ALignment](/202609/03/2609.02293v1-seal-reinforcing-global-safety-in-mixture-of-experts-through-shared-expert-alignment)  
    标签：评分：8.0/10、query:moe-special
-   evidence：以MoE专家选择为核心，用细粒度路径组合替代整体专家选择，提升稀疏MoE推理效率
+   evidence：直接研究MoE中的稀疏路由与专家激活选择，并提出共享专家对齐以强化全局安全
+3. [Evidence for Shared Routing Geometry and Dynamics in Sparse Mixture-of-Experts](/202609/03/2609.02404v1-evidence-for-shared-routing-geometry-and-dynamics-in-sparse-mixture-of-experts)  
+   标签：评分：8.0/10、query:moe-special
+   evidence：研究稀疏MoE路由器的控制子空间及跨层共享路由几何
 
 ### 速读区论文标签
-1. [Residual Sparsification via Output Importance for Compressing Mixture-of-Experts LLMs](/202609/02/2609.00575v1-residual-sparsification-via-output-importance-for-compressing-mixture-of-experts-llms)  
+1. [Beyond Modality Harmony: Orthogonal Purification and Topology-Guided MoE for Conflict-Aware Multimodal Recommendation](/202609/03/2609.02152v1-beyond-modality-harmony-orthogonal-purification-and-topology-guided-moe-for-conflict-aware-multimodal-recommendation)  
+   标签：评分：7.0/10、query:moe-special
+   evidence：采用拓扑引导的混合专家模型处理多模态推荐冲突，与mixture-of-experts query相关
+2. [Q-Strata: Hierarchical Bit Allocation for Mixed-Precision Quantization of Mixture-of-Experts LLMs](/202609/03/2608.30564v1-q-strata-hierarchical-bit-allocation-for-mixed-precision-quantization-of-mixture-of-experts-llms)  
    标签：评分：6.0/10、query:moe-special
-   evidence：按输出重要性对专家残差稀疏化，以压缩稀疏MoE大模型
+   evidence：面向MoE大语言模型的跨专家比特分配，直接围绕混合专家模型展开
+3. [DynaNDE: Dynamic Near-Data Expert Scheduling for Batched MoE Inference](/202609/03/2609.00407v1-dynande-dynamic-near-data-expert-scheduling-for-batched-moe-inference)  
+   标签：评分：6.0/10、query:moe-special
+   evidence：面向批量MoE推理的专家级动态调度与选择，利用NPU与近数据处理协同
 
 
 <div class="dpr-home-promo-card">
