@@ -6,40 +6,29 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-09-03
-- 运行时间：2026-09-03 22:58:31 UTC
+- 最新运行日期：2026-09-04
+- 运行时间：2026-09-04 22:39:05 UTC
 - 运行状态：成功
-- 本次总论文数：6
-- 精读区：3
-- 速读区：3
+- 本次总论文数：2
+- 精读区：2
+- 速读区：0
 
 ### 今日简报（AI）
-今日聚焦MoE技术：从视频检索的时间感知到多模态安全对齐，共6篇研究入选，其中2篇精读获高分。  
-最值得关注《TAME》以时间感知专家提升文本-视频检索精度，以及《SEAL》通过共享专家对齐强化MoE全局安全，代表应用与安全双主线。  
-建议普通读者先读这2篇精读论文，速读的三篇则适合关注多模态冲突、量化与推理优化的进阶者。
-- 详情：[/202609/03/README](/202609/03/README)
+今日精读两篇MoE研究：一篇构建统计理解框架，一篇诊断MoE+LoRA微调的内部冲突。  
+9.0分文章将MoE行为纳入统计模型解释；8.0分文章则发现路由之外，适配器子空间争用才是微调真正瓶颈。  
+建议先读第一篇建立理论直觉，再借第二篇规避实际微调中的隐性坑。
+- 详情：[/202609/04/README](/202609/04/README)
 
 ### 精读区论文标签
-1. [TAME: Temporal-Aware Mixture-of-Experts for Text-Video Retrieval](/202609/03/2609.02204v1-tame-temporal-aware-mixture-of-experts-for-text-video-retrieval)  
+1. [Towards a Statistical Understanding of Mixture-of-Experts](/202609/04/2609.03501v1-towards-a-statistical-understanding-of-mixture-of-experts)  
    标签：评分：9.0/10、query:moe-special
-   evidence：在CLIP编码器中引入稀疏混合专家层，使用帧一致路由让视觉专家按帧级模式专门化
-2. [SEAL: Reinforcing Global Safety in Mixture-of-Experts through Shared Expert ALignment](/202609/03/2609.02293v1-seal-reinforcing-global-safety-in-mixture-of-experts-through-shared-expert-alignment)  
+   evidence：从理论上分析稀疏MoE的路由、稀疏激活与共享专家，是稀疏混合专家与路由机制的核心文献
+2. [Routing Is Not Enough: Diagnosing Intra-Adapter Subspace Contention in MoE+LoRA Fine-Tuning](/202609/04/2609.03150v1-routing-is-not-enough-diagnosing-intra-adapter-subspace-contention-in-moelora-fine-tuning)  
    标签：评分：8.0/10、query:moe-special
-   evidence：直接研究MoE中的稀疏路由与专家激活选择，并提出共享专家对齐以强化全局安全
-3. [Evidence for Shared Routing Geometry and Dynamics in Sparse Mixture-of-Experts](/202609/03/2609.02404v1-evidence-for-shared-routing-geometry-and-dynamics-in-sparse-mixture-of-experts)  
-   标签：评分：8.0/10、query:moe-special
-   evidence：研究稀疏MoE路由器的控制子空间及跨层共享路由几何
+   evidence：研究MoE中词元级路由能否真正分离领域专家，并诊断MoE+LoRA微调中路由隔离不足以防止负迁移的现象
 
 ### 速读区论文标签
-1. [Beyond Modality Harmony: Orthogonal Purification and Topology-Guided MoE for Conflict-Aware Multimodal Recommendation](/202609/03/2609.02152v1-beyond-modality-harmony-orthogonal-purification-and-topology-guided-moe-for-conflict-aware-multimodal-recommendation)  
-   标签：评分：7.0/10、query:moe-special
-   evidence：采用拓扑引导的混合专家模型处理多模态推荐冲突，与mixture-of-experts query相关
-2. [Q-Strata: Hierarchical Bit Allocation for Mixed-Precision Quantization of Mixture-of-Experts LLMs](/202609/03/2608.30564v1-q-strata-hierarchical-bit-allocation-for-mixed-precision-quantization-of-mixture-of-experts-llms)  
-   标签：评分：6.0/10、query:moe-special
-   evidence：面向MoE大语言模型的跨专家比特分配，直接围绕混合专家模型展开
-3. [DynaNDE: Dynamic Near-Data Expert Scheduling for Batched MoE Inference](/202609/03/2609.00407v1-dynande-dynamic-near-data-expert-scheduling-for-batched-moe-inference)  
-   标签：评分：6.0/10、query:moe-special
-   evidence：面向批量MoE推理的专家级动态调度与选择，利用NPU与近数据处理协同
+- 本次无速读推荐。
 
 
 <div class="dpr-home-promo-card">
