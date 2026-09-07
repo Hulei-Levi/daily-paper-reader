@@ -1,0 +1,585 @@
+Title: When Load-Balancing Goes Too Far: Expert Pruning in Over-Dispersed Mixture-of-Experts Models
+
+URL Source: https://arxiv.org/pdf/2609.04453v1
+
+Published Time: Mon, 07 Sep 2026 00:12:22 GMT
+
+Number of Pages: 22
+
+Markdown Content:
+# When Load-Balancing Goes Too Far: Expert Pruning in Over-Dispersed Mixture-of-Experts Models 
+
+Berkcan Kapusuzoglu ∗ Connor Pryor Sangwoo Cho Supriyo Chakraborty Shi-Xiong Zhang Sambit Sahu Milind Naphade 
+
+Capital One, AI Foundations, McLean, VA 22102, USA 
+
+## Abstract 
+
+Expert pruning reduces the memory and serving cost of Mixture-of-Experts (MoE) models by removing low-importance experts identified by the router. This ap-proach assumes that router probabilities provide a reliable importance signal. We observe that this assumption breaks down under over-dispersed routing , a regime associated with aggressive load-balancing during training, in which tokens are distributed nearly uniformly across experts and importance signals collapse. In this regime, perplexity does not predict downstream task accuracy. On gpt-oss-20B, the lowest-perplexity pruning configuration yields the worst mathematical reasoning performance, while the highest-perplexity configuration preserves it. This behavior does not occur under standard routing (e.g., Mixtral-8x7B-Instruct), where per-plexity and accuracy degrade together as expected. We further show that under over-dispersed routing, pruning exposes a capability trade-off: no single scoring metric dominates across tasks. Activation-aware scoring preserves mathematical reasoning but severely degrades knowledge-intensive science tasks (an 18% gap on GPQA), whereas frequency-based scoring exhibits the reverse. To navigate this trade-off, we propose Minimax Expert Score Allocation (MESA), a domain-aware pruning method that iteratively boosts importance scores for experts serving whichever domain is currently worst-affected, minimizing the worst-case domain degradation rather than optimizing average accuracy. At 25% expert pruning, MESA achieves the smallest worst-case degradation across domains, including an 18-point GPQA gap that activation-aware scoring incurs; on a per-benchmark basis, this translates to MESA outperforming activation-aware baselines on 7 of 11 benchmarks, at a correspondingly reduced memory footprint. This trade-off does not arise under standard routing, where all methods degrade proportionally and no domain-specific imbalance emerges. Our results indicate that over-dispersed routing is a qualitatively distinct pruning regime in which standard assumptions fail, and that recognizing this regime is a prerequisite for principled expert pruning of load-balanced MoE models. 
+
+## 1 Introduction 
+
+Mixture-of-Experts (MoE) architectures [22, 6, 25] achieve favorable compute–quality tradeoffs by activating only a subset of parameters per token. However, the large total parameter count of MoE models creates substantial memory and serving costs. Expert pruning , the structured removal of entire expert modules, is a natural strategy for reducing these costs [15, 7, 14], and recent work has shown it outperforms expert merging [13, 2] on generative tasks by preserving router-controlled specialization [12].  
+
+> ∗Correspondence to berkcan.kapusuzoglu@capitalone.com .Preprint. arXiv:2609.04453v1 [cs.LG] 3 Sep 2026
+
+Prior work on expert pruning has focused on models with well-balanced routing distributions, where expert importance varies meaningfully and low-importance experts can be safely removed [15, 9]. We identify a distinct regime that we term over-dispersed routing : models trained with unusually high auxiliary load-balancing loss coefficients (e.g., λaux = 0 .9). In over-dispersed models, the router distributes tokens nearly uniformly across all experts, creating two challenges for pruning: 1. Perplexity (PPL)–accuracy disconnect. Standard perplexity-based evaluation is unreliable for pruned over-dispersed models. Across five pruning configurations, we observe that the expected negative correlation between PPL and accuracy (lower PPL = better) does not hold: Spearman ρ is positive on GSM8K ( ρ = 0 .70 , p > 0.1) and near zero on GPQA (ρ = −0.10 ). The lowest-PPL configuration (random pruning, PPL =40.95) produces the worst task accuracy, while the highest-PPL method (REAP, PPL =145.04) retains strong performance. This is the opposite of standard pruning behavior, where PPL and accuracy are observed to degrade together (Section 4.2). 2. Domain unfairness. While macro-level routing appears near-uniform, experts retain subtle domain-specific characteristics that are critical for performance. Global importance scores average across all tokens, cancelling out these weak domain signals (as we visualize in Appendix E). Consequently, pruning based on global metrics degrades some domains disproportionately. Over-dispersed routing is not a corner case: production MoE systems increasingly use high auxiliary loss coefficients to ensure load balance across hardware [25, 6], and recent open-weight releases (gpt-oss-20b with λaux = 0 .9 [18]) ship models in this regime. As these models are deployed at scale, practitioners need pruning methods that account for the routing distribution rather than assuming standard expert specialization. To navigate this trade-off landscape, we propose Minimax Expert Score Allocation (MESA), a domain-fair scoring method. The algorithm iteratively boosts importance scores for experts serving whichever domain is currently worst-affected by the pruning plan, reducing the loss of the worst domain. We evaluate on gpt-oss-20b, and validate cross-architecture on Mixtral-8x7B-Instruct [10]. Our contributions: • We identify and characterize the over-dispersed routing regime ( λaux ≫ 0.01 ), in which we observe that the expected negative PPL–accuracy relationship breaks down (Spearman 
+
+ρ positive or near zero across tasks) and standard importance signals become unreliable. Cross-architecture experiments confirm this association is regime-specific: the behavior does not occur on Mixtral-8x7B-Instruct under standard routing. • We demonstrate a capability trade-off not examined in prior work: under over-dispersed routing, no single pruning metric dominates across tasks. Activation-aware methods (REAP) preserve competition math (AIME 2025 73%) but lose science tasks (GPQA 47.72% vs. 65.48%, an 18% gap), while frequency-based methods exhibit the reverse. • We propose MESA, a minimax domain-fair scoring algorithm that validates this charac-terization by explicitly minimizing the worst-affected domain’s degradation rather than average-case accuracy: it achieves the smallest worst-case degradation across domains at 
+
+r = 0 .25 , which on a per-benchmark basis corresponds to outperforming REAP on 7 of 11 benchmarks (5 statistically significant). 
+
+## 2 Related Work 
+
+Expert importance scoring. REAP [15] scores experts by the product of routing probability and activation ℓ2 norm, capturing both selection frequency and output magnitude. HEAPr extends this with hardware-aware expert placement. DiEP [7] demonstrates that simple router probability mass is competitive with more complex scores, and identifies layer-level sensitivity as a key factor. The concurrent SHAPE framework [9] reports 82.44% average accuracy on gpt-oss-20b at 20% expert pruning; however, its REAP baseline sets expert norms=1.0 , effectively reducing REAP to router probability alone and underestimating the true REAP signal. Our REAP implementation computes actual activation ℓ2 norms. 2Expert pruning and allocation. EvoESAP [14] uses a genetic algorithm to jointly optimize per-layer pruning counts, achieving state-of-the-art results on Mixtral and DeepSeek-V2. Uniform allocation (same count per layer) and global ranking (score all experts jointly) are common baselines. Recent work reveals a trade-off between multiple-choice (MC) and generative benchmark perfor-mance: expert merging methods [13, 2] excel on MC tasks (ARC, MMLU, HellaSwag), while pruning better preserves generative capabilities such as mathematical reasoning and code generation [12]. This MC–generative split motivates evaluation suites that span both task types. 
+
+Domain fairness in pruning. Most pruning methods optimize a single global metric (PPL or average task accuracy), which can mask severe degradation on minority domains. Minimax fairness has been applied to group-level training objectives [20] and to data selection during dense model pruning [5], but not to expert importance scoring in MoE models. MESA adapts the minimax principle to operate on expert scores rather than training losses, requiring no retraining. 
+
+Over-dispersed routing and load-balancing. The effect of auxiliary loss magnitude on MoE routing has been studied in the context of training stability [6, 25]. Omi et al. [17] show that SimBal rebalancing during fine-tuning can recover expert specialization lost to aggressive auxiliary losses. However, the implications for post-training pruning remain unexplored: when routing is near-uniform, standard importance signals degenerate and pruning decisions become arbitrary. MESA addresses this by incorporating domain-level feedback into the scoring loop, providing a post-training solution that does not require modifying the training pipeline. 
+
+Domain-fair compression. Deng et al. [5] introduce DRPruning, which applies distributionally robust optimization at the data level during structured pruning of dense models, upweighting un-derrepresented domains during fine-tuning. MESA operates at the expert level: it adjusts expert importance scores rather than training data weights, requiring no fine-tuning and applying to frozen post-training models. 
+
+## 3 Method 
+
+We describe MESA, our proposed domain-fair expert pruning method. 
+
+3.1 Over-Dispersed Routing and Its Consequences 
+
+Consider a standard MoE layer with E experts and top-k routing. Let πi(x) = softmax (Wr x)i
+
+denote the routing probability for expert i on input x. The auxiliary load-balancing loss [22] is: 
+
+Laux = λaux · E ·
+
+> E
+
+X
+
+> i=1
+
+fi · πi (1) where fi is the fraction of tokens routed to expert i and πi is the mean routing probability for expert i.In gpt-oss-20b, λaux = 0 .9, orders of magnitude larger than typical values ( ∼0.001 –0.01 in Mix-tral [10] and Switch Transformer [6]). This forces routing probabilities toward uniformity ( πi ≈ 1/E 
+
+for all i), which we term over-dispersed routing .
+
+Consequence 1: Pruning can improve local metrics. When routing is near-uniform with top-k
+
+selection, pruning low-contribution experts concentrates routing mass onto the remaining (poten-tially more specialized) experts. This can decrease perplexity while degrading downstream task performance, explaining the PPL–accuracy disconnect. 
+
+Consequence 2: Global importance scores cancel out micro-signals. While macro-level routing appears perfectly uniform (e.g., each of the 32 experts in gpt-oss-20b receives ∼3.1% of the global traffic), experts retain subtle domain-specific affinities. For example, the Math domain might route 
+
+3.8% of its tokens to Expert A, while the Code domain routes only 2.4% . A global importance score averages these micro-signals together, yielding the baseline 3.1% uniform prior and completely destroying the domain-specific signal (visualized via heatmaps in Appendix E). Consequently, pruning based on global scores accidentally removes critical domain specialists because they appear to be replacable generalists. The critical distinction between over-dispersed and normal routing is visible not in aggregate statistics (which can be misleading) but in per-token routing entropy. For each token x, we compute the entropy 30 5 10 15 20 25 30     
+
+> Layer index
+> 60 70 80 90 100
+> Routing entropy (% of max)
+> uniform 16.5pp gap
+> gpt-oss-20b ( aux = 0.9 , 32E)
+> Mixtral-8x7B ( aux 0.001 , 8E)
+
+Figure 1: Per-layer routing entropy (normalized to % of maximum) for gpt-oss-20b and Mixtral-8x7B-Instruct. gpt-oss maintains >82% across all layers (over-dispersed), while Mixtral drops to 64–68% in later layers as specialization emerges. This gap explains why global importance scores are informative for Mixtral but noisy for gpt-oss. of the full router softmax distribution: H(x) = − PEi=1 πi(x) log 2 πi(x). We then average over calibration tokens from all 6 domains. 
+
+Mixtral-8x7B-Instruct [10] ( λaux ≈ 0.001 , E = 8 , top-2): The mean per-token entropy is 
+
+¯Htoken = 2 .23 bits, only 74.3% of the theoretical maximum log 2(8) = 3 .0 bits. Per-token rout-ing is peaked : each token’s softmax concentrates mass on 2–3 experts, with the remaining experts receiving negligible probability. Entropy varies across depth (early layers ∼80% of max, late layers 
+
+∼65% ) and across tokens within a layer (per-layer std 0.28 –0.60 bits). The high token-level variance indicates that different tokens specialize to different experts; aggregate routing appears balanced because specialization averages out, not because individual routing decisions are uniform. 
+
+gpt-oss-20b (λaux = 0 .9, E = 32 , top-4): Mean per-token entropy is ¯Htoken = 4 .54 bits (90.8% of log 2(32) = 5 .0 bits), measured over 183K tokens. As shown in Figure 1, gpt-oss maintains 
+
+>82% entropy across all layers while Mixtral drops to 64–68%. Every expert receives approximately 
+
+k/E = 4 /32 = 12 .5% of routing probability per token , regardless of token content. This per-token view explains why standard pruning metrics fail on gpt-oss: in Mixtral, each token has clear “important” and “unimportant” experts (low H per token ⇒ high signal), so global importance scores reliably identify dispensable experts. In gpt-oss, no expert is distinctly unimportant for any individual token (high H per token ⇒ low signal), making global scores noisy and domain-conditional measurement essential. Pruning in this regime removes experts and forces the router to redistribute mass to the remaining experts, de-dispersing the routing distribution. We use ¯H > 0.85 · log 2 E as a practical diagnostic for identifying over-dispersed regimes, not a sharp physical threshold: it is a soft guideline that separates regimes where global importance signals remain reliable (Mixtral at 74.3%) from those where they degrade (gpt-oss at 90.8%), with an 11% margin between our two test architectures. Figure 8 (Appendix) shows that importance signal quality degrades sharply above this band in simulation, matching our observations. 
+
+3.2 MESA: Minimax Expert Score Allocation 
+
+Let R ∈ RL×E denote per-layer normalized router mass scores and Dd ∈ RL×E denote per-domain router mass for domain d ∈ { 1, . . . , D }. Given a target pruning ratio r, the minimax algorithm iteratively adjusts importance scores to protect whichever domain is currently worst-affected. Formally, we seek the pruning set that minimizes the worst-case fractional routing loss across domains: 
+
+min   
+
+> P⊆ [L]×[E],|P| =⌊r·L·E⌋
+
+max 
+
+> d∈D
+
+P 
+
+> (l,e )∈P
+
+Dd[l, e ]
+
+P 
+
+> l,e
+
+Dd[l, e ] (2) Algorithm 1 is a greedy heuristic solver for this objective, inspired by distributionally robust opti-mization [20], without formal convergence guarantees. In Algorithm 1, P denotes the set of experts 4Algorithm 1 MESA: Minimax Expert Score Allocation                                                                              
+
+> Require: Router mass R∈RL×E, domain scores {Dd}Dd=1 , ratio r, boost η0=0 .15 , steps T=20
+> Ensure: Pruning set P∗(experts to remove)
+> 1: S←R;S∗←R;ℓ∗← ∞
+> 2: for t= 1 to Tdo
+> 3: P ← ALLOCATE (S, r ){Global ranking }
+> 4: ℓd←P
+> (l,e )∈P Dd[l, e ]/P
+> l,e Dd[l, e ]{∀ d∈ { 1, . . . , D }}
+> 5: d∗←arg max dℓd{Worst domain }
+> 6: if ℓd∗< ℓ ∗then
+> 7: ℓ∗←ℓd∗;S∗←S
+> 8: end if
+> 9: ηt←η0·(1 −0.5t/ (T−1)) {Decay }
+> 10: S←ROW NORM (S+ηt·Dd∗){Boost + normalize }
+> 11: end for
+> 12: return S∗
+
+selected for removal (lowest combined scores). Line 4 computes ℓd, the fraction of domain d’s total routing mass contained in P, i.e., the fractional loss each domain would suffer from this pruning decision. Line 6 identifies the domain suffering the highest fractional loss and Line 10 boosts that domain’s scores, making its experts less likely to be pruned in subsequent iterations. Lines 6–7 record the best solution found so far, so the algorithm can explore aggressively without losing progress. The decaying boost rate starts with large adjustments and refines gradually. The full pipeline is: (1) profile per-domain routing mass from calibration data, (2) run Algorithm 1, (3) apply global ranking to select experts for removal. 
+
+## 4 Experiments 
+
+4.1 Setup Model. We evaluate on gpt-oss-20b [18], a 20B parameter MoE model with 24 transformer layers, 32 experts per layer (768 total), top-4 routing. For cross-architecture validation, we also evaluate on Mixtral-8x7B-Instruct [10] (32 layers, 8 experts, top-2 routing, λaux ≈ 0.001 ). 
+
+Over-dispersion. The model was trained with λaux = 0 .9 [18], approximately 900 × the default coefficient in Mixtral ( 0.001 ) and 90 × that of Switch Transformer ( 0.01 ). This produces nearly uniform routing distributions across all 32 experts at every layer. 
+
+Calibration data. Importance scoring uses 1000 calibration examples per domain drawn from 6 domains (math, coding, commonsense, science, instruction following, general knowledge). Calibra-tion data consists of topic-level domain text, not benchmark-formatted examples; several of the 11 evaluation benchmarks (e.g., MMLU-Pro, WinoGrande) do not have a dedicated matching calibration domain and are therefore genuinely held out with respect to calibration, so performance on them reflects generalization of the domain-fair scoring beyond the calibrated domains. 
+
+Evaluation. We evaluate pruned models on 11 benchmarks spanning math reasoning (GSM8K [4], AIME 2025), graduate-level science (GPQA-Diamond [19]), broad knowledge (MMLU [8], MMLU-Pro [23]), commonsense and science reasoning (ARC-Challenge, ARC-Easy [3], OpenBookQA [16], PIQA [1], WinoGrande [21]), and instruction following (IFEval [24], instruction-level loose accuracy). All evaluations use vLLM [11] with temperature 0.6, medium reasoning effort, 128K max tokens, and prefix caching enabled. WikiText-2 perplexity is reported separately as a local proxy metric. 
+
+Baselines. We compare against four baselines: RM-U NIFORM [7] ranks experts by aggregate router mass and prunes the lowest-scoring 25% uniformly from each layer; REAP [12] scores experts by activation-weighted routing probability with global budget allocation; EvoESAP [14] applies evolutionary search for non-uniform per-layer budget allocation using router-mass scores; and random expert pruning serves as a lower bound. All pruned models remove 25% of experts ( 32 → 24 per layer). 5Table 1: WikiText-2 PPL vs. GSM8K accuracy across pruning configurations at r = 0 .25 . PPL and task accuracy are uncorrelated in over-dispersed models: random pruning achieves the lowest PPL (40.95) but near-worst task accuracy, while MESA improves GSM8K above the unpruned baseline despite moderate PPL. 
+
+Method WikiText-2 PPL ( ↓) GSM8K (%) ( ↑)Baseline (unpruned) 126.02 88.86 MESA (ours) 107.14 92.87 REAP 145.04 89.31 RM-U NIFORM 83.29 83.24 Random 40.95 78.54 50 75 100 125 150         
+
+> WikiText-2 PPL
+> 77.5 80.0 82.5 85.0 87.5 90.0 92.5
+> GSM8K Accuracy (%)
+> =0.70
+> p=0.160
+> Baseline (unpruned) MESA (ours) REAP RM-Uniform Random
+> 50 75 100 125 150
+> WikiText-2 PPL
+> 74 76 78 80 82 84
+> MMLU Accuracy (%)
+> =0.30
+> p=0.828
+> 50 75 100 125 150
+> WikiText-2 PPL
+> 50 55 60 65
+> GPQA-Diamond Accuracy (%)
+> =-0.10
+> p=0.981
+
+Figure 2: PPL vs task accuracy across three benchmarks at r = 0 .25 . Each point is one pruning method. The expected negative correlation (lower PPL = better accuracy) does not hold: ρ is positive on GSM8K and MMLU and near zero on GPQA, confirming PPL is uninformative or misleading for method comparison in over-dispersed models. 
+
+4.2 PPL–Accuracy Disconnect 
+
+Table 1 illustrates the PPL–accuracy disconnect. Among the methods evaluated on both PPL and task accuracy, REAP achieves the highest PPL (145.04, worse than the unpruned baseline of 126.02) yet strong GSM8K accuracy (89.31%). MESA achieves moderate PPL (107.14) and the best GSM8K among pruned methods (92.87%), exceeding the unpruned baseline (88.86%). Conversely, random pruning achieves the lowest PPL ( ∼40), yet degrades task performance severely (AIME’25 33.33%, GSM8K 78.54%). This pattern is consistent with the over-dispersion hypothesis: pruning concentrates routing mass onto fewer experts, which can decrease PPL (a token-level metric) while disrupting the model’s ability to perform multi-step reasoning. We therefore report only task accuracy for method comparison throughout. Figure 2 visualizes this disconnect across three representative benchmarks. A detailed explanation of why PPL can decrease under over-dispersed pruning (the top-k-then-softmax mechanism) is provided in Appendix A. 
+
+4.3 Main Results 
+
+Table 2 presents the main results at r = 0 .25 . MESA achieves the most balanced profile across all benchmarks, with no single-task collapse. On math reasoning, MESA achieves 92.87% on GSM8K (+4 .01 % above the off-the-shelf baseline; Table 1), consistent with the dispersion hypothesis: pruning concentrates routing onto fewer, more capable experts, improving math accuracy. However, the key finding is the trade-off between methods: REAP preserves AIME25 ( 73 .33 ± 9.7% vs. baseline 76.67%) but has 17.76% gap on GPQA relative to MESA ( 47 .72 ± 5.6% vs. 65 .48 ± 4.2%), losing graduate-level science for math reasoning preservation. RM-U NIFORM exhibits the reverse: it retains knowledge tasks (MMLU 80.31%, ARC-C 94.36%) but suffers large reasoning drops (AIME25 
+
+46 .67 ±8.5%, −30 .00 %). No single method dominates across all capabilities, a trade-off that emerges under over-dispersed routing. Across the 11-benchmark evaluation, MESA’s minimax objective minimizes the worst-affected domain’s degradation rather than average-case accuracy: relative to REAP, MESA’s largest advantage 6Table 2: Task accuracy (%) at r = 0 .25 (25% expert pruning, 32 → 24 experts per layer), 5-seed evaluation with 95% CIs. Best pruned result per task in bold . MESA achieves the most balanced profile, with the best or near-best accuracy on the majority of benchmarks and the smallest worst-case degradation.                                                                                
+
+> Math Reasoning Knowledge & Commonsense Multi-domain & Instruction Method AIME’25 GSM8K GPQA ARC-C ARC-E OBQA PIQA MMLU MMLU-Pro WinoGr. IFEval Baseline 76.67 ±3.27 88.86 ±0.38 64.47 ±1.46 95.30 ±0.27 98.32 ±0.15 92.99 ±0.45 83.34 ±0.36 84.01 ±0.10 72.51 ±0.22 76.78 ±1.04 91.67 ±0.67
+> MESA (ours) 63.33 ±6.06 92.87 ±0.45 65.48 ±4.2 92.66 ±0.8 97.60 ±0.3 ∗90.38 ±1.2 80.73 ±1.5 79.51 ±0.6 67.25 ±0.9 69.59 ±2.1 89.92 ±1.1
+> REAP 73.33 ±9.7 89.31 ±1.8 47.72 ±5.6 91.63 ±1.0 95.03 ±0.7 92.18 ±1.0 74.90 ±2.0 77.36 ±0.8 64.27 ±1.2 78.44 ±2.4 90.88 ±0.9
+> RM-U NI .46.67 ±8.5 83.24 ±1.5 56.85 ±5.1 94.36 ±0.6 97.56 ±0.4 92.18 ±0.9 74.85 ±1.8 80.31 ±0.5 66.32 ±0.8 69.27 ±2.3 86.07 ±1.4
+> Random 33.33 ±7.2 78.54 ±2.3 49.75 ±4.8 90.01 ±1.2 96.46 ±0.5 86.97 ±1.5 78.61 ±1.6 74.76 ±0.9 56.06 ±1.3 72.91 ±2.8 89.68 ±1.2
+> EvoESAP †56.67 ±8.0 78.32 ±2.0 44.16 ±4.5 94.96 ±0.6 97.64 ±0.3 ∗89.18 ±1.1 80.40 ±1.5 80.15 ±0.5 66.69 ±0.9 65.88 ±2.5 74.07 ±1.3
+> †
+
+EvoESAP evolutionary allocation [14] applied to router-mass scores; it is a literature baseline (evolutionary allocation), not a component of MESA. ∗ARC-E: MESA (97.60) and EvoESAP (97.64) are statistically indistinguishable (0.04pp apart, within the reported CIs); both are bolded as an effective tie. 
+
+Table 3: Per-benchmark accuracy change (∆, percentage points) relative to the unpruned baseline, gpt-oss-20B at r=0 .25 , single-seed evaluation across all 11 benchmarks. Best (least-negative or most-positive) ∆ per row in bold ; ties bolded. 
+
+## Benchmark MESA (ours) REAP EvoESAP RM-Uniform Random AIME’25 −13 .34 −3.34 −20 .00 −30 .00 −43 .34 
+
+## GSM8K +4 .01 +0 .45 −10 .54 −5.62 −10 .32 
+
+## ARC-C −2.64 −3.67 −0.34 −0.94 −5.29 
+
+## ARC-E −0.72 −3.29 −0.68 −0.76 −1.86 
+
+## GPQA Diamond +1 .01 −16 .75 −20 .31 −7.62 −14 .72 
+
+## OpenBookQA −2.61 −0.81 −3.81 −0.81 −6.02 
+
+## MMLU −4.50 −6.65 −3.86 −3.70 −9.25 
+
+## MMLU-Pro −5.26 −8.24 −5.82 −6.19 −16 .45 
+
+## IFEval −1.75 −0.79 −17 .60 −5.60 −1.99 
+
+## PIQA −2.61 −8.44 −2.94 −8.49 −4.73 
+
+## WinoGrande −7.19 +1 .66 −10 .90 −7.51 −3.87 
+
+is on GPQA ( +17.8%, the domain REAP degrades most), while REAP’s largest advantage is on AIME25 ( +10.0%, the domain MESA degrades most). On a per-benchmark basis, this corresponds to MESA outperforming REAP on 7 tasks (GPQA +17.8%, PIQA +5.8%, GSM8K +3.6%, MMLU-Pro 
+
++3.0%, ARC-E +2.6%, MMLU +2.2%, ARC-C +1.0%) while REAP leads on 4 (AIME25 +10.0%, WinoGrande +8.9%, OBQA +1.8%, IFEval +1.0%). The GPQA gap is statistically significant (z = 3 .57 , p < 0.001 on 198 questions). 
+
+4.4 Deployment Footprint 
+
+Because expert weights dominate an MoE’s parameter count, removing a quarter of the experts at 
+
+r = 0 .25 (32 → 24 per layer) reduces the served model’s parameter count, and hence its resident memory footprint, by approximately the same fraction. This is the practical motivation for expert pruning: the entire expert population must be resident even though each token activates only top-k of them, so total parameter count rather than per-token compute sets the memory and GPU budget. We note explicitly what pruning at this ratio does not buy. Removing experts from the pool leaves top-k unchanged, so each token still routes through k expert FFNs and per-request decode latency is essentially unaffected; on gpt-oss-20b the MXFP4 expert weights are small enough ( ∼1.6 MB per expert per GPU) that they are not the binding constraint on single-request throughput. Reducing per-token compute requires changing k or the expert internals, which is orthogonal to the allocation question studied here. We therefore frame MESA’s contribution as domain-fair accuracy retention at a reduced memory footprint, and make no per-request speedup claim. 7Table 4: Cross-architecture validation on Mixtral-8x7B-Instruct ( λaux ≈ 0.001 , r = 0 .25 , 8 → 6
+
+experts). Unlike gpt-oss, Mixtral shows PPL increases with pruning (standard behavior). REAP achieves the best PPL (6.00), while MESA, designed for over-dispersed routing, produces the worst (16.43). 
+
+Method WikiText-2 PPL Baseline (8E) 4.78 REAP (6E) 6.00 
+
+Random (6E) 8.31 RM-U NIFORM (6E) 14.35 MESA (6E) 16.43 
+
+Table 5: Cross-architecture task accuracy (%) on Mixtral-8x7B-Instruct at r = 0 .25 (8 → 6 experts), 5-seed means ± std. Best pruned result per task in bold . REAP retains 98% of baseline average accuracy while MESA retains 63%.                                                  
+
+> Method ARC-C ARC-E GPQA GSM8K MMLU IFEval PIQA Baseline 85.29 ±0.24 94.51 ±0.15 31.07 ±1.21 31.42 ±1.25 68.54 ±0.16 66.58 ±1.34 85.60 ±0.34
+> REAP 82.19 ±0.30 92.29 ±0.15 28.93 ±2.61 35.00 ±0.97 64.29 ±0.19 65.23 ±0.73 83.58 ±0.26
+> EvoESAP 73.63 ±0.32 86.14 ±0.30 31.68 ±1.59 40.56 ±0.66 56.65 ±0.27 65.62 ±0.23 77.21 ±0.38
+> Random 70.13 ±0.50 80.61 ±0.29 19.70 ±1.36 20.71 ±0.84 52.56 ±0.11 57.98 ±1.25 74.95 ±0.46
+> MESA 51.97 ±1.20 67.15 ±1.13 22.34 ±5.74 3.49 ±0.48 38.49 ±0.34 49.44 ±1.51 58.42 ±0.71
+> RM-U NIFORM 49.77 ±1.05 60.23 ±0.60 37.66 ±0.22 2.96 ±0.38 24.60 ±2.36 45.95 ±1.68 57.04 ±1.14
+
+4.5 Cross-Architecture Validation 
+
+To test whether MESA’s benefit is specific to over-dispersed models, we evaluate on two contrasting architectures: Mixtral-8x7B-Instruct [10] (8 experts, top-2 routing, λaux ≈ 0.001 ), which has standard (non-dispersed) routing, and OLMoE-1B-7B-0924 (16 layers, 64 experts, top-8), an independently trained, fully-open base model that is itself over-dispersed ( ¯H = 0 .925 ). The regime, not the architecture, predicts whether MESA helps: it does not help on Mixtral, and it does on OLMoE (Section 4.6). On Mixtral, PPL behaves normally : pruning increases perplexity (baseline 4.78 → REAP 6.00, Random 8.31, RM-Uniform 14.35, MESA 16.43; Table 4), the standard expected behavior. This differs from gpt-oss, where pruning decreases PPL (baseline 126.02 → Random 40.95). MESA also causes the largest PPL degradation on Mixtral ( +244% ) despite being competitive on gpt-oss, while REAP achieves the best PPL (6.00, +26% from baseline). Under standard routing, experts are specialized: MESA’s minimax objective interprets this spe-cialization as unfair utilization and prunes critical domain experts. REAP’s activation-weighted score remains informative across both regimes, making it regime-agnostic. EvoESAP shows that evolutionary search can find beneficial pruning configurations even under standard routing (GSM8K exceeds baseline by +9.14%), suggesting that non-uniform allocation adapts to the routing structure regardless of regime. Table 5 supports the regime-specificity hypothesis with task accuracy data. On Mixtral, REAP retains 98% of baseline average accuracy and EvoESAP retains 93%, improving GSM8K above baseline ( +9 .14 %). MESA, the method that preserves GPQA on over-dispersed gpt-oss, retains 63%, indicating that domain-fair scoring addresses a failure specific to over-dispersed routing. 
+
+4.6 Generality to a Third Over-Dispersed Family: OLMoE-1B-7B 
+
+The over-dispersed regime characterized above is not unique to gpt-oss or to instruction-tuned models. We test a third, independently-trained MoE family: OLMoE-1B-7B-0924 , a fully-open base (not instruction-tuned) model from a different lab with 16 layers, 64 experts, and top-8 routing. Its native per-token routing entropy is ¯H = 0 .925 · log 2 E, placing it firmly in the over-dispersed regime by our practical diagnostic ( ¯H > 0.85 , a soft guideline rather than a sharp threshold; Section 3.1). This point extends the generality claim across both base and instruction-tuned training and across a third architecture. 8Table 6: Generality to a third, independently-trained over-dispersed MoE family: OLMoE-1B-7B-0924 (a fully-open base model; 16 layers, 64 experts, top-8; native routing entropy ¯H =0.925 · log 2 E). Loglikelihood/cloze accuracy (%) at r = 0 .25 (25% expert pruning, 64 → 48 
+
+experts per layer), single seed. Best pruned result per task in bold . On these six commonsense tasks (cloze/acc norm), MESA calibrated in the matching prefill regime leads every pruned method and beats REAP on all six, retaining 92.8% of unpruned commonsense accuracy.                                              
+
+> Task (cloze acc norm) Unpruned MESA (prefill) MESA (gen) REAP (gen) RM (gen) OpenBookQA 45.2 39.8 35.8 38.4 35.8 PIQA 80.6 77.6 74.2 71.9 72.2 WinoGrande 72.0 67.7 59.0 67.6 59.0 ARC-Challenge 55.2 50.0 44.0 40.6 45.8 ARC-Easy 82.3 77.4 72.2 64.0 73.2 HellaSwag 76.0 69.2 58.5 64.9 57.7
+> Commonsense avg 68.6 63.6 57.3 57.9 57.3 % of unpruned 100% 92.8% 83.5% 84.4% 83.5%
+> The gen-route baselines are calibrated under decode-time routing, while MESA (prefill) is calibrated under a single forward pass; a fully prefill-vs-prefill comparison across all methods, together with multi-seed replication, is left to future work.
+
+Table 7: OLMoE-1B-7B prefill-MESA ratio sweep (single seed): commonsense accuracy degrades gracefully with no cliff. Eval-matched (prefill) calibration buys ∼one extra ratio step of headroom: prefill MESA at r = 0 .375 (57.2) matches every gen-route method at r = 0 .25 (57 .3–57 .9; Table 6).                                        
+
+> Task Unpruned MESA r=0 .25 MESA r=0 .375 MESA r=0 .50
+> OpenBookQA 45.2 39.8 35.6 31.2 PIQA 80.6 77.6 72.4 68.1 WinoGrande 72.0 67.7 58.6 53.8 ARC-Challenge 55.2 50.0 43.5 34.5 ARC-Easy 82.3 77.4 73.4 53.7 HellaSwag 76.0 69.2 59.6 46.2
+> Commonsense avg 68.6 63.6 57.2 47.9
+> % of unpruned 100% 92.8% 83.4% 69.9%
+
+Capture-regime ↔ eval-regime matching. OLMoE surfaced a mechanism the other models did not, because they were scored generatively while OLMoE, a base model, is scored with loglikeli-hood/cloze multiple choice (a single teacher-forced forward pass with no generation). When we calibrated routing with the decode-time (gen-route) harvest that wins on gpt-oss-20b ( +8 .5pp) and Mixtral ( +13 pp), MESA and RM-U NIFORM produced nearly identical pruned sets. Under decode the four calibration domains routed almost identically (per-domain routing-mass correlation 0.57 –0.86 ), so the minimax objective had no per-domain signal to grip and degenerated toward router mass. Calibrating in the same regime the benchmark scores in ( prefill : one forward pass over the calibration text, no generation) restored per-domain structure: cross-domain routing-mass correlation collapsed to ≈ 0 (math–knowledge −0.068 , science–knowledge 0.004 , instruction–knowledge −0.066 ), and the overlap between MESA’s and RM-U NIFORM ’s pruned sets fell to Jaccard 0.705 , the lowest we observe, versus ≈ 1.0 under decode (Jaccard of MESA vs. REAP was 0.252 ). We report this as a correlational/observational pattern rather than a causal claim: when routing is calibrated in the regime the benchmark scores in, minimax-fair recovers per-domain grip and the pruned set protects the experts the eval actually exercises. 
+
+Headline. Under eval-matched (prefill) calibration, MESA is the best pruned method on all six commonsense tasks and beats REAP on every one of them (Table 6): commonsense average 63 .6
+
+vs. 57 –58 for every gen-route method (a ∼6pp gap), retaining 92.8% of unpruned commonsense accuracy at r = 0 .25 . The gain is consistent with, not a contradiction of, the over-dispersed-regime prediction that domain-aware scoring protects whichever domains a global metric would wash out. Degradation is graceful across ratios ( 92 .8% → 83 .4% → 69 .9% at r = 0 .25 /0.375 /0.50 ; Table 7), and eval-matched calibration buys roughly one extra ratio step of headroom: prefill MESA at 
+
+r = 0 .375 (57 .2) matches every gen-route method at r = 0 .25 (57 .3–57 .9). 9Table 8: Task accuracy (%) on Gemma-4-26B-A4B-it at r = 0 .25 (128 routed experts, top-8; 
+
+128 → 96 experts per layer), temperature 0.6, single measurement per cell. Best pruned result per task in bold . MESA matches or exceeds both REAP and RM-U NIFORM on every one of the 11 benchmarks, with the largest gap on GPQA-Diamond, the hardest task in the suite ( +14 .3pp over REAP, +21 .2pp over RM-U NIFORM ).                                                               
+
+> Math Reasoning Knowledge & Commonsense Multi-domain & Instruction Method AIME’25 GSM8K GPQA ARC-C ARC-E OBQA PIQA MMLU MMLU-Pro WinoGr. IFEval Unpruned 75.56 96.41 71.21 96.62 98.78 94.47 90.82 86.58 82.05 80.27 89.81 MESA (ours) 72.22 96.21 67.85 95.53 98.30 92.13 88.03 83.73 79.40 77.56 88.98
+> REAP 35.56 95.60 53.54 95.82 98.22 90.67 86.85 78.94 67.90 76.95 88.70 RM-U NI .50.00 95.12 46.63 91.52 96.55 88.13 81.27 78.26 69.56 73.24 86.67
+> ARC-Challenge is a nominal exception (REAP 95 .82 vs. MESA 95 .53 , a 0.29 pp gap within single-measurement noise); MESA is tied-or-better on all other tasks. Single measurement per cell, temperature 0.6; see Appendix Table 13 for an independent temperature-0
+> (deterministic, 3-seed) replication of the worst-domain result on a 5-task subset.
+
+Compute. The full OLMoE pipeline is static L × E score matrices plus one prefill forward pass per calibration prompt and the apply step, with zero eval-time forward passes for scoring, matching the compute profile of Algorithm 1 on the other models. 
+
+Limitations. All OLMoE results are single measurements; the r = 0 .25 leads are large ( > 5pp) relative to typical seed-to-seed variance on these benchmarks, but multi-seed replication is left to future work. The reported REAP/RM/gen-route-MESA baselines are calibrated under decode-time routing while the headline MESA result is calibrated under prefill; a fully prefill-vs-prefill comparison across all methods (REAP’s plan is domain-independent so it is unaffected; the unpruned row is regime-independent) would strengthen the comparison further. 
+
+4.7 Generality to a Third Architecture: Gemma-4-26B-A4B-it 
+
+We extend the generality evidence to Gemma-4-26B-A4B-it , a third distinct architecture (128 routed experts, top-8 routing) at r = 0 .25 , evaluated under two protocols: temperature 0.6 (main text) and temperature 0, deterministic decoding, as an appendix replication. (We additionally test scale and pruning-ratio severity within the gpt-oss family itself at r = 0 .5 on gpt-oss-120B; see Appendix I.) 
+
+Gemma-4-26B-A4B-it: the flagship cross-architecture result. Table 8 reports all 11 benchmarks across MESA, REAP, RM-U NIFORM , and the unpruned model. MESA matches or exceeds both baselines on 10 of the 11 benchmarks (the sole exception, ARC-Challenge, is a 0.29 pp gap to REAP within single-measurement noise), with the widest margins on AIME’25 ( 36 .7pp over REAP) and GPQA-Diamond, the hardest task in the suite, where MESA leads REAP by 14 .3pp ( 67 .85 vs. 53 .54 )and RM-U NIFORM by 21 .2pp ( 67 .85 vs. 46 .63 ). This is the cleanest cross-architecture evidence for worst-domain protection reported in this paper: on an architecture with a different expert count, routing width, and training lineage than either gpt-oss model, the minimax objective still identifies and protects the domain that would otherwise degrade most. 
+
+Replication and mechanism check. Appendix Table 13 replicates the Gemma-4 worst-domain re-sult under deterministic (temperature-0), 3-seed decoding, with non-overlapping confidence intervals on GPQA-Diamond ( 65 .66 ± 1.82 MESA vs. 55 .56 ± 1.95 REAP), confirming the temperature-0.6
+
+finding is not an artifact of sampling temperature. A domain-aware REAP control – REAP given the same per-domain conditioning as MESA – reaches GPQA-Diamond only 58 .4, well short of MESA’s 
+
+65 .66 –67 .85 , indicating that MESA’s gain comes from the minimax worst-case objective itself rather than merely from conditioning the importance score by domain. 
+
+Regime status. Gemma-4-26B-A4B-it is not over-dispersed by our diagnostic (native per-token routing entropy ¯H ≈ 0.69 ); we present it solely as evidence that MESA’s worst-domain protection generalizes to an architecturally distinct, concentrated-routing model, not as an additional over-dispersed-regime data point. Appendix I presents a complementary, same-family scale/ratio generality check (gpt-oss-120B at r = 0 .5). 10 Table 9: Reasoning/Knowledge degradation at r = 0 .25 (single-seed results). ∆R: mean accuracy change on AIME’25 and GSM8K; ∆K: mean change on ARC-C and ARC-E. Each method occupies a distinct position on the capability trade-off; MESA achieves the most balanced trade-off with a net reasoning improvement on GSM8K offsetting its AIME’25 drop.                           
+
+> Method ∆R(%) ∆K(%) Character MESA (ours) −4.67 −1.68 Balanced REAP −1.45 −3.48 Reasoning-preserving EvoESAP †−15 .27 −0.51 Knowledge-preserving RM-U NIFORM −17 .81 −0.85 Knowledge-preserving Random −26 .83 −3.58 Severe collapse 0510 15 20 25 30 Reasoning (% lost)
+> 1
+> 012345Knowledge (% lost)
+> MESA REAP RM-Uniform EvoESAP Random
+> Better
+
+Figure 3: Capability trade-off: reasoning vs knowledge preservation at r = 0 .25 . Each method occupies a distinct position; MESA is closest to the origin (balanced), while REAP favors reasoning preservation. 
+
+## 5 Analysis 
+
+5.1 Capability Trade-off 
+
+The task-dependent scoring effect observed above, where REAP excels at generation tasks but loses accuracy on knowledge-intensive MC tasks while RM-Uniform shows the reverse, decomposes along two axes. PCA on the accuracy matrix identifies two principal components: PC1 loads on reasoning/generative tasks (GSM8K, AIME’25), while PC2 loads on knowledge/pattern-matching tasks (MMLU, ARC). Method rankings invert across these clusters (permutation test p = 0 .0004 ; see Appendix B), indicating a structured capability trade-off. Table 9 shows a clear asymmetry. RM-Uniform and Random severely degrade reasoning ( ∆R <
+
+−17 % on AIME’25 + GSM8K), while REAP preserves reasoning ( ∆R = −1.45 %) at the cost of knowledge tasks ( ∆K = −3.48 %). MESA achieves modest reasoning degradation ( −4.67 %, dominated by the AIME’25 drop; GSM8K actually improves +4 .01 % above baseline) while keeping knowledge degradation small ( −1.68 %), exhibiting the most balanced profile. No single method dominates: the choice depends on which capabilities matter for the deployment. MESA occupies the balanced position nearest the origin on both axes (Figure 3), appropriate when neither reasoning nor knowledge can be sacrificed disproportionately. A qualitative example of knowledge degradation (REAP losing a specific physics concept on GPQA while retaining the general technique) is provided in Appendix G. 11 Table 10: Qualitative compute characterization of expert-scoring and allocation for MESA (ours) vs. REAP and Router-Mass (RM). MESA’s allocation step (Algorithm 1) operates entirely on a small, pre-computed L × E router-mass matrix (e.g., 24 × 32 for gpt-oss-20B) rather than requiring additional model forward passes, making it structurally cheaper than activation-based scoring methods such as REAP. No wall-clock timings are claimed here; see §5.2 for the verified ∼49 × calibration-sample-count reduction relative to REAP.                             
+
+> Method Scoring compute Allocation compute Extra fwd. passes be-yond harvest MESA (ours) Static per-domain L×
+> Erouter-mass matrix, al-ready produced by the calibration harvest CPU-only iterative min-imax reweighting over the L×Ematrix ( ∼15– 20 steps) 0REAP [12] Per-expert activation-norm scoring requires adedicated forward pass over its calibration set (24,576 samples at 16,384 tokens) Global budget alloca-tion over per-expert activation-norm scores Full calibration-set forward pass (activation-norm scoring) RM Router-mass matrix only, identical byproduct of the same harvest MESA consumes Uniform per-layer threshold on aggregate router mass 0
+
+5.2 Calibration Efficiency 
+
+MESA converges at s=1000 samples, l=8192 tokens (97.9% prune map agreement with the reference configuration). Even at s=20 samples per domain, MESA achieves 96.4% agreement, making it practical with minimal calibration data. Sequence length dominates sample count as the primary driver of stability (+15.0% from doubling sequence length vs. +5.8% from 10 × more samples). Compared to REAP’s calibration requirement (24,576 samples at 16,384 tokens, 402 .7M tokens [12]), MESA’s 1000 samples at 8192 tokens across 6 domains ( 49 .2M tokens) is approximately 8× less calibration compute. Full ablation details are in Appendix D. 
+
+## 6 Conclusion 
+
+Over-dispersed MoE routing, induced by aggressive load-balancing ( λaux = 0 .9), constitutes a qualitatively distinct pruning regime: perplexity becomes unreliable as a quality signal, and a capability trade-off emerges in which no single scoring metric dominates across tasks. Cross-architecture experiments confirm this is regime-specific: under standard routing (Mixtral, λaux ≈
+
+0.001 ), all methods degrade proportionally and no domain imbalance emerges. MESA validates the practical relevance of this characterization by minimizing the worst-affected domain’s degradation rather than average-case accuracy, which on a per-benchmark basis corresponds to outperforming REAP on 7 of 11 benchmarks at r=0 .25 , though it does not survive aggressive pruning ( r=0 .50 ), where REAP’s activation-aware signal remains robust. 
+
+Limitations. Our evaluation covers two architectures (gpt-oss-20b and Mixtral-8x7B-Instruct); generalization to other over-dispersed models remains to be verified. Algorithm 1 is a greedy heuristic without formal convergence guarantees, though empirical ablations show stable convergence within 15 iterations. We evaluate at a single pruning ratio ( r = 0 .25 ) in the main results; behavior at more aggressive ratios requires further study. Future work should explore adaptive methods that detect the routing regime automatically and select scoring accordingly. 
+
+## References   
+
+> [1] Yonatan Bisk, Rowan Zellers, Ronan Le Bras, Jianfeng Gao, and Yejin Choi. Piqa: Reasoning about physical commonsense in natural language, 2019. URL https://arxiv.org/abs/1911.11641 .[2] I-Chun Chen, Hsu-Shen Liu, Wei-Fang Sun, Chen-Hao Chao, Yen-Chang Hsu, and Chun-Yi Lee. Retraining-free merging of sparse moe via hierarchical clustering, 2025. URL https://arxiv.org/
+
+12 abs/2410.08589 .[3] Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. Think you have solved question answering? try arc, the ai2 reasoning challenge, 2018. URL 
+
+https://arxiv.org/abs/1803.05457 .[4] Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. Training verifiers to solve math word problems, 2021. URL https://arxiv.org/abs/2110.14168 .[5] Hexuan Deng, Wenxiang Jiao, Xuebo Liu, Jing Li, Min Zhang, and Zhaopeng Tu. Drpruning: Efficient large language model pruning through distributionally robust optimization, 2025. URL https://arxiv. org/abs/2411.14055 .[6] William Fedus, Barret Zoph, and Noam Shazeer. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity, 2022. URL https://arxiv.org/abs/2101.03961 .[7] Shwai He, Daize Dong, Liang Ding, and Ang Li. Towards efficient mixture of experts: A holistic study of compression techniques, 2025. URL https://arxiv.org/abs/2406.02500 .[8] Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. Measuring massive multitask language understanding, 2021. URL https://arxiv.org/ abs/2009.03300 .[9] Weizhong Huang, Yuxin Zhang, Xiawu Zheng, Fei Chao, Rongrong Ji, and Liujuan Cao. Discovering important experts for mixture-of-experts models pruning through a theoretical perspective. In The Thirty-ninth Annual Conference on Neural Information Processing Systems , 2026. URL https://openreview. net/forum?id=7kQjbCQwtT .[10] Albert Q. Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch, Blanche Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Emma Bou Hanna, Florian Bressand, Gianna Lengyel, Guillaume Bour, Guillaume Lample, L´ elio Renard Lavaud, Lucile Saulnier, Marie-Anne Lachaux, Pierre Stock, Sandeep Subramanian, Sophia Yang, Szymon Antoniak, Teven Le Scao, Th´ eophile Gervet, Thibaut Lavril, Thomas Wang, Timoth´ ee Lacroix, and William El Sayed. Mixtral of experts, 2024. URL 
+
+https://arxiv.org/abs/2401.04088 .[11] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with pagedattention, 2023. URL https://arxiv.org/abs/2309.06180 .[12] Mike Lasby, Ivan Lazarevich, Nish Sinnadurai, Sean Lie, Yani Ioannou, and Vithursan Thangarasa. Reap the experts: Why pruning prevails for one-shot moe compression, 2026. URL https://arxiv.org/ abs/2510.13999 .[13] Pingzhi Li, Zhenyu Zhang, Prateek Yadav, Yi-Lin Sung, Yu Cheng, Mohit Bansal, and Tianlong Chen. Merge, then compress: Demystify efficient smoe with hints from its routing policy, 2024. URL https: //arxiv.org/abs/2310.01334 .[14] Zongfang Liu, Shengkun Tang, Boyang Sun, Zhiqiang Shen, and Xin Yuan. Evoesap: Non-uniform expert pruning for sparse moe, 2026. URL https://arxiv.org/abs/2603.06003 .[15] Xudong Lu, Qi Liu, Yuhui Xu, Aojun Zhou, Siyuan Huang, Bo Zhang, Junchi Yan, and Hongsheng Li. Not all experts are equal: Efficient expert pruning and skipping for mixture-of-experts large language models, 2024. URL https://arxiv.org/abs/2402.14800 .[16] Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal. Can a suit of armor conduct electricity? a new dataset for open book question answering. In Ellen Riloff, David Chiang, Julia Hockenmaier, and Jun’ichi Tsujii, editors, Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing , pages 2381–2391, Brussels, Belgium, October-November 2018. Association for Computational Linguistics. doi: 10.18653/v1/D18-1260. URL https://aclanthology.org/D18-1260/ .[17] Nabil Omi, Siddhartha Sen, and Ali Farhadi. Load balancing mixture of experts with similarity preserving routers, 2025. URL https://arxiv.org/abs/2506.14038 .[18] OpenAI, :, Sandhini Agarwal, Lama Ahmad, Jason Ai, Sam Altman, Andy Applebaum, Edwin Arbus, Rahul K. Arora, Yu Bai, Bowen Baker, Haiming Bao, Boaz Barak, Ally Bennett, Tyler Bertao, Nivedita Brett, Eugene Brevdo, Greg Brockman, Sebastien Bubeck, Che Chang, Kai Chen, Mark Chen, Enoch Cheung, Aidan Clark, Dan Cook, Marat Dukhan, Casey Dvorak, Kevin Fives, Vlad Fomenko, Timur 
+
+13 Garipov, Kristian Georgiev, Mia Glaese, Tarun Gogineni, Adam Goucher, Lukas Gross, Katia Gil Guzman, John Hallman, Jackie Hehir, Johannes Heidecke, Alec Helyar, Haitang Hu, Romain Huet, Jacob Huh, Saachi Jain, Zach Johnson, Chris Koch, Irina Kofman, Dominik Kundel, Jason Kwon, Volodymyr Kyrylov, Elaine Ya Le, Guillaume Leclerc, James Park Lennon, Scott Lessans, Mario Lezcano-Casado, Yuanzhi Li, Zhuohan Li, Ji Lin, Jordan Liss, Lily, Liu, Jiancheng Liu, Kevin Lu, Chris Lu, Zoran Martinovic, Lindsay McCallum, Josh McGrath, Scott McKinney, Aidan McLaughlin, Song Mei, Steve Mostovoy, Tong Mu, Gideon Myles, Alexander Neitz, Alex Nichol, Jakub Pachocki, Alex Paino, Dana Palmie, Ashley Pantuliano, Giambattista Parascandolo, Jongsoo Park, Leher Pathak, Carolina Paz, Ludovic Peran, Dmitry Pimenov, Michelle Pokrass, Elizabeth Proehl, Huida Qiu, Gaby Raila, Filippo Raso, Hongyu Ren, Kimmy Richardson, David Robinson, Bob Rotsted, Hadi Salman, Suvansh Sanjeev, Max Schwarzer, D. Sculley, Harshit Sikchi, Kendal Simon, Karan Singhal, Yang Song, Dane Stuckey, Zhiqing Sun, Philippe Tillet, Sam Toizer, Foivos Tsimpourlas, Nikhil Vyas, Eric Wallace, Xin Wang, Miles Wang, Olivia Watkins, Kevin Weil, Amy Wendling, Kevin Whinnery, Cedric Whitney, Hannah Wong, Lin Yang, Yu Yang, Michihiro Yasunaga, Kristen Ying, Wojciech Zaremba, Wenting Zhan, Cyril Zhang, Brian Zhang, Eddie Zhang, and Shengjia Zhao. gpt-oss-120b & gpt-oss-20b model card, 2025. URL https://arxiv.org/abs/2508.10925 .[19] David Rein, Betty Li Hou, Asa Cooper Stickland, Jackson Petty, Richard Yuanzhe Pang, Julien Dirani, Julian Michael, and Samuel R. Bowman. GPQA: A graduate-level google-proof q&a benchmark, 2023. URL https://arxiv.org/abs/2311.12022 .[20] Shiori Sagawa, Pang Wei Koh, Tatsunori B. Hashimoto, and Percy Liang. Distributionally robust neural networks for group shifts: On the importance of regularization for worst-case generalization, 2020. URL 
+
+https://arxiv.org/abs/1911.08731 .[21] Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. Winogrande: An adversarial winograd schema challenge at scale, 2019. URL https://arxiv.org/abs/1907.10641 .[22] Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer, 2017. URL 
+
+https://arxiv.org/abs/1701.06538 .[23] Yubo Wang, Xueguang Ma, Ge Zhang, Yuansheng Ni, Abhranil Chandra, Shiguang Guo, Weiming Ren, Aaran Arulraj, Xuan He, Ziyan Jiang, Tianle Li, Max Ku, Kai Wang, Alex Zhuang, Rongqi Fan, Xiang Yue, and Wenhu Chen. MMLU-Pro: A more robust and challenging multi-task language understanding benchmark, 2024. URL https://arxiv.org/abs/2406.01574 .[24] Jeffrey Zhou, Tianjian Lu, Swaroop Mishra, Siddhartha Brahma, Sujoy Basu, Yi Luan, Denny Zhou, and Le Hou. Instruction-following evaluation for large language models, 2023. URL https://arxiv.org/ abs/2311.07911 .[25] Barret Zoph, Irwan Bello, Sameer Kumar, Nan Du, Yanping Huang, Jeff Dean, Noam Shazeer, and William Fedus. St-moe: Designing stable and transferable sparse expert models, 2022. URL https: //arxiv.org/abs/2202.08906 .
+
+## A PPL Confound: Top-k-Then-Softmax Mechanism 
+
+gpt-oss uses topk-then-softmax routing: the router selects the top-k=4 experts by raw logit, then applies softmax over only those k values. With λaux =0 .9, all 32 expert logits are nearly equal, making top-4 selection semi-random. After removing 8 experts ( 32 → 24 at r=0 .25 ), the smaller selection pool biases top-4 toward the truly strongest experts, improving per-token predictions. However, this PPL improvement comes at the cost of task-specific capabilities that PPL does not measure. Inter-method PPL comparisons (all at 24 experts) remain valid; we therefore focus on task accuracy for baseline comparisons throughout. 
+
+## B Permutation Test Details 
+
+The permutation test in Section 5.1 evaluates whether the negative correlation between reasoning and knowledge task rankings is statistically valid or could arise by chance from arbitrary task groupings. 
+
+Procedure. Let T = {t1, . . . , t 12 } denote our 12 benchmark tasks, and let am,t denote the accuracy of method m on task t. For each possible partition of T into two equal-sized groups (GA, G B ) with 
+
+|GA| = |GB | = 6 , we compute the mean accuracy per method in each group: ¯am,A = 16
+
+P 
+
+> t∈GA
+
+am,t 
+
+and similarly for ¯am,B . We then compute the Spearman rank correlation ρ(GA, G B ) between 14 {¯am,A }m and {¯am,B }m across methods, and average over all  12 6
+
+ = 924 partitions to obtain the null distribution. 
+
+Results (pruned methods only, n = 5 ). The observed task clusters {GSM8K, AIME25 } vs. 
+
+{MMLU, ARC-Challenge, ARC-Easy } yield strongly negative average ρ. Of all 924 possible 3-vs-3 groupings from within these 6 core tasks (or equivalently, 6-vs-6 from the full 12 tasks), only 0.04% produce correlations this negative, giving p = 0 .0004 .
+
+Results (including baseline, n = 6 ). When the unpruned baseline is included as a sixth “method,” the average cross-group ρ rises because the baseline dominates both cluster means, compressing the anti-correlation. The p-value remains significant, confirming that the ranking inversion among pruned methods is not masked by the baseline’s overall superiority. 
+
+Interpretation. The permutation test shows that the specific task clusters identified by PCA and 
+
+k-means produce opposing method rankings; this is not a result of the small number of methods (n = 5 ) or post-hoc task selection. The reasoning tasks (GSM8K, AIME25) and knowledge tasks (MMLU, ARC) shows fundamentally different expert importance profiles in over-dispersed models, validating the two-axis capability trade-off described in the main text. 
+
+## C Extended Capability Frontier Analysis 
+
+Task clustering. k-means ( k = 2 ) on the task loading vectors produces a clean separation: Cluster A 
+
+(knowledge/pattern-matching) contains MMLU, MMLU-Pro, ARC-Challenge, ARC-Easy, and PIQA; 
+
+Cluster B (reasoning/generative) contains GSM8K (both), AIME25, GPQA, IFEval, WinoGrande, and OpenBookQA. These clusters are not imposed a priori but emerge from the per-method accuracy patterns. 
+
+Method rankings invert across clusters. Among pruned methods, the ranking on Cluster B reasoning tasks is REAP > MESA > EvoESAP > RM-U NIFORM , while on Cluster A knowledge tasks it partially reverses: EvoESAP > RM-U NIFORM > MESA > REAP. The Pearson correlation between the two cluster means across the pruned methods is strongly negative, indicating a near-perfect tradeoff. We caution that n is small; the anti-correlation weakens when the baseline is included, because the unpruned model dominates both axes. 
+
+GPQA-Diamond analysis. GPQA-Diamond requires both graduate-level factual knowledge and 
+
+multi-step reasoning, placing it at the intersection of the two axes. It exhibits the second-largest accuracy range across pruning methods (21%, after AIME25’s 30%): MESA achieves 65.48% (+1 .0% over baseline), while REAP collapses to 47.72% ( −16 .8%). 
+
+Mechanistic account. REAP scores experts by πi(x) · ∥ Ei(x)∥2. In over-dispersed models where 
+
+πi ≈ 1/E , REAP scores are dominated by activation magnitude, selecting “computation-heavy” experts that contribute large output norms. These experts are disproportionately important for iterative computation (math reasoning) but not for distributional knowledge (factual recall). Conversely, router mass selects “highway” experts that handle high token volume. The key enabler of this divergence is the over-dispersed routing itself: because λaux = 0 .9 decorrelates activation norms from routing frequencies, different scoring signals select different expert subsets. MESA achieves balance by optimizing worst-case routing perturbation across domains, avoiding the extreme of either axis. 
+
+## D MESA Hyperparameter Ablations 
+
+This section provides full ablation details for the calibration and hyperparameter results summarized in Section 5.2. 
+
+D.1 Calibration Data Requirements 
+
+Table 11 shows MESA’s sensitivity to calibration volume. We measure prune map agreement (Jaccard similarity) at r=0 .25 , where 192 binary expert decisions are made ( 24 layers × 8 experts pruned per layer). The key finding is that sequence length dominates sample count : ℓ≥1024 tokens is necessary for stable routing statistics regardless of sample count, while s≥20 samples suffices when sequence length is adequate. This aligns with the intuition that over-dispersed routing patterns require sufficient context to manifest stable domain-expert affinities. 15 Table 11: Calibration sensitivity of MESA expert selection. Jaccard similarity measures agreement with the reference configuration ( s=20 , ℓ=2048 ) on which experts to prune ( 24 × 8 = 192 binary decisions at r=0 .25 ). Different calibration budgets explore different regions of the capability Pareto frontier: lower calibration favors knowledge preservation while higher calibration emphasizes domain fairness.                                                  
+
+> (a) Samples per domain (fixed ℓ= 2048 )Samples/domain Jaccard J∆experts Character 50.655 40 Knowledge-biased 10 0.829 18 Moderate 20 1.000 0✓Reference 50 0.979 2✓Near-reference 100 0.901 10 Domain-fair-biased 200 0.901 10 Domain-fair-biased
+> (b) Sequence length (fixed s= 20 )Seq. length Jaccard J∆experts Character 128 0.548 56 High variance 256 0.627 44 High variance 512 0.627 44 High variance 1024 1.000 0✓Converged 2048 1.000 0✓Reference
+
+When measured against a high-quality reference ( s=2000 , l=8192 ), the convergence dynamics are: • s=20 , l=2048 : 64.1% agreement (42 experts differ) • s=200 , l=2048 : 69.9% agreement (34 experts differ) • s=1000 , l=4096 : 82.9% agreement (18 experts differ) • s=1000 , l=8192 : 97.9% agreement (only 2 experts differ) • s=2000 , l=4096 : 81.1% agreement (20 experts differ) The jump from l=4096 to l=8192 at s=1000 (+15.0%) far exceeds the gain from s=20 to s=200 at 
+
+l=2048 (+5.8%), confirming that calibration compute should be invested in longer sequences rather than more samples. Different calibration budgets produce divergent prune maps that explore different regions of the capability Pareto frontier rather than representing “wrong” selections. Higher calibration ( s=2000 ,
+
+l=8192 ) shifts the trade-off toward domain balance (commonsense gains, PIQA +2%) at the cost of knowledge-intensive tasks (MMLU-Pro −4%). Lower calibration acts as implicit regularization, pre-venting over-optimization of the minimax objective and preserving broader knowledge. Practitioners should select calibration based on downstream priority: low calibration for knowledge preservation, high calibration for domain fairness. 
+
+D.2 Iterations and Boost Rate Convergence dynamics. Figure 4 shows the worst-domain fractional loss (best-so-far) as a function of iteration t for multiple pruning ratios. At r=0 .125 and r=0 .25 , convergence is rapid (within 6–12 steps). At r=0 .375 , convergence takes slightly longer (20 steps) but achieves a stable minimum. Higher pruning ratios produce higher loss plateaus, reflecting the fundamental difficulty of domain-fair pruning at aggressive ratios. 
+
+Boost rate robustness. Table 12(b) demonstrates broad robustness: any η0 ∈ [0 .05 , 0.60] achieves the same worst-domain loss (0.0491) at r=0 .25 , with Jaccard agreement ≥95.9% against the default. Oscillation amplitude increases with η0 (from 0.0003 to 0.0041) but the best-snapshot mechanism ensures this does not degrade the final solution. We recommend η0 = 0 .15 as a safe default. 
+
+Decay schedules. Linear, cosine, and constant decay all achieve identical final losses (within numerical precision), converging in 8–17 steps. The default linear schedule ( ηt = η0 · (1 − 0.5 ·
+
+t/ (T − 1)) ) decays to 50% of the initial rate, providing coarse-to-fine adjustment. 16 Table 12: MESA hyperparameter sensitivity at r=0 .25 . (a) Increasing iterations T monotonically improves worst-domain loss and selection agreement (Jaccard vs. T =80 reference). Convergence is effectively reached by T =15 . (b) The boost rate η0 controls convergence speed vs. stability; values in [0 .05 , 0.25] achieve near-identical solutions with low oscillation.                                                                            
+
+> (a) Iterations T(fixed η0=0 .15 )
+> TWorst-domain loss Jaccard vs. T=80 Best step 10.0524 76.1% 030.0509 81.1% 250.0503 86.4% 410 0.0492 92.0% 815 0.0491 95.9% 13 20 0.0491 95.9% 13 30 0.0491 97.9% 21 40 0.0491 97.9% 21 80 0.0491 100.0% 53
+> (b) Boost rate η0(fixed T=20 )
+> η0Worst-domain loss Jaccard vs. default Oscillation 0.01 0.0502 79.4% 0.0004 0.03 0.0494 90.1% 0.0005 0.05 0.0491 95.9% 0.0003 0.08 0.0491 95.9% 0.0003 0.10 0.0491 97.9% 0.0005 0.15 0.0491 97.9% 0.0008 0.20 0.0491 97.9% 0.0008 0.25 0.0491 97.9% 0.0012 0.30 0.0491 95.9% 0.0011 0.40 0.0491 95.9% 0.0020 0.60 0.0491 95.9% 0.0041
+
+## E Routing Structure Visualization 
+
+E.1 Per-Domain Routing Mass 
+
+The heatmaps in Figure 5 illustrate why global importance metrics fail in the over-dispersed regime. In a normally-routed model like Mixtral, equivalent heatmaps would show sharp contrast (clear hot-spots at ∼0.2–0.4 routing mass with most cells near zero). Here, the entire grid appears near-uniform, with domain-specific variation compressed into a 0.01 dynamic range. A global importance score averages across domains and layers, cancels out these weak signals entirely. MESA’s per-domain measurement preserves them. 
+
+E.2 Cross-Domain Expert Overlap 
+
+Figure 6 quantifies the challenge for domain-fair pruning. When the top-8 experts for any two domains overlap by ∼45% , pruning an expert that appears important for one domain affects another. This high baseline overlap explains why naive per-domain scoring (keeping each domain’s top experts separately) is insufficient: it would produce nearly identical selections for all domains. MESA’s iterative minimax approach navigates this overlap by identifying the marginal experts whose removal disproportionately harms one domain relative to others, precisely those in the 0.41–0.47 overlap zone where domains partially diverge. 
+
+E.3 Per-Task Degradation Patterns 
+
+Figure 7 shows per-task accuracy changes from baseline for all methods at r = 0 .25 . The structured degradation pattern confirms that the capability trade-off is task-specific rather than uniform across benchmarks. 17 0 10 20 30 40 50 5 · 10 −2
+
+0.10.15 0.20.25 
+
+Iteration t   
+
+> Worst-domain fractional loss (best so far)
+> r= 0 .125
+> r= 0 .25
+> r= 0 .375
+
+Figure 4: MESA convergence for different pruning ratios r. The algorithm converges within 6–20 iterations for r ≤ 0.375 . Higher ratios produce higher loss plateaus but similar convergence dynamics, suggesting the difficulty is in the objective landscape, not the optimizer. 
+
+## F Regime Transition: Importance Signal Degradation 
+
+We simulate routing matrices at varying entropy levels to characterize the transition between standard and over-dispersed regimes. Figure 8 shows how global importance signal quality degrades as routing entropy increases. 
+
+## G Qualitative Analysis: Knowledge Degradation Under Pruning 
+
+Aggregate accuracy (e.g., REAP at 47.72% on GPQA) masks the nature of individual failures. Figure 9 shows a graduate-level electrostatics problem where the baseline and REAP-pruned model both set up the method of images correctly, but REAP fails to apply a specific physical subtlety (the factor of 1/2 for induced-charge energy), selecting the wrong formula. 
+
+## H Gemma-4 Temperature-0 Replication 
+
+The Gemma-4-26B-A4B-it flagship result reported in the main text (Table 8) uses temperature 
+
+0.6, matching the decoding protocol used for every other result in this paper (which preserves chain-of-thought). To confirm that the worst-domain protection result is not an artifact of sampling temperature, Table 13 below reports an independent replication of the same r=0 .25 head-to-head under temperature 0 (deterministic decoding), with 3-seed mean ± std, on the subset of tasks for which temperature-0 replication data is available. We disclose both temperatures rather than reporting only the more favorable one. 
+
+## I gpt-oss-120B at r = 0 .5: Scale and Aggressive-Ratio Generality 
+
+As a complementary generality check within the same over-dispersed family, we scale from gpt-oss-20B to gpt-oss-120B (roughly 5× larger, same λaux = 0 .9 routing regime) and test a much more aggressive pruning ratio, r = 0 .5. Table 14 reports the same 11-benchmark comparison across MESA, REAP, RM-U NIFORM , and the unpruned model. RM-U NIFORM collapses entirely (all-task 0.00 ), a genuine failure of that method at this scale and ratio, not a missing measurement. Between MESA and REAP the result is mixed: MESA wins the worst domain (GPQA-Diamond, 
+
+58 .46 vs. 51 .85 ) along with AIME, IFEval, MMLU, OpenBookQA, and PIQA, while REAP wins on GSM8K, ARC-Challenge, ARC-Easy, MMLU-Pro, and WinoGrande. We present this plainly as an aggressive-pruning stress test rather than a sweep: MESA’s worst-domain protection holds even 18 0 8 16 24 
+
+> Expert ID
+> 04812 16 20
+> Layer
+
+Math    
+
+> 0816 24
+> Expert ID
+> 04812 16 20
+
+Code    
+
+> 0816 24
+> Expert ID
+> 04812 16 20
+
+Science    
+
+> 0816 24
+> Expert ID
+> 04812 16 20
+> Layer
+
+News    
+
+> 0816 24
+> Expert ID
+> 04812 16 20
+
+Instruction    
+
+> 0816 24
+> Expert ID
+> 04812 16 20
+
+General 
+
+> 0.028 0.030 0.032 0.034 0.036 0.038
+> Routing mass (normalized)
+
+Figure 5: Per-domain routing mass across all 24 layers and 32 experts in gpt-oss-20b. Each cell shows the fraction of routing probability mass that domain d assigns to expert e at layer l. The narrow colorbar range (0.028–0.038 vs. the uniform expectation of 1/32 ≈ 0.031 ) confirms over-dispersion: no single expert dominates for any domain. However, subtle per-domain structure is visible; certain experts receive slightly elevated mass for specific domains (e.g., experts 8–12 in layers 16–20 for Code). These weak but consistent signals are exactly what MESA’s domain-conditional scoring exploits: individually negligible, they become collectively meaningful when the minimax objective accumulates evidence across all calibration tokens. at r = 0 .5, though it does not dominate every benchmark at this ratio. This is consistent with the minimax reframing used throughout the paper. We make no claim of average-case superiority here, only that the worst-case guarantee the method targets continues to hold under substantially heavier pruning and at larger scale. 19 Code General Instruction Math News Science Code General Instruction Math News Science 0.0 0.2 0.4 0.6 0.8 1.0 
+
+> Mean Jaccard overlap
+
+Figure 6: Jaccard overlap between domains’ top-8 most-routed experts per layer, averaged across all 24 layers. High off-diagonal values (0.41–0.47) confirm that domains share nearly half their preferred experts due to over-dispersed routing. The slight asymmetries (e.g., Math–Science 0.47 vs. Code–Instruction 0.41) reflect residual domain structure that domain-fair scoring can exploit. GSM8K AIME 2025 GPQA Diamond IFEval MMLU MMLU Pro ARC-C ARC-E OBQA PIQA Wino-grande                                                    
+
+> MESA MESA-Disrupt REAP RM-Uniform Random
+> +4.0 -13.3 +1.0 -1.9 -4.5 -5.3 -2.6 -0.7 -2.6 -2.6 -7.2
+> +0.2 -6.7 +1.0 -4.8 -5.6 -5.6 -2.8 -1.3 -5.4 -5.2 -8.7
+> +0.5 -3.3 -16.8 -1.0 -6.7 -8.2 -3.7 -3.3 -0.8 -8.4 +1.7
+> -5.6 -30.0 -7.6 -5.8 -3.7 -6.2 -0.9 -0.8 -0.8 -8.5 -7.5 -10.3 -43.3 -14.7 -2.2 -9.2 -16.5 -5.3 -1.9 -6.0 -4.7 -3.9
+> Reasoning Knowledge & Other
+
+40 
+
+20 
+
+020 40 from baseline (pp) 
+
+Figure 7: Per-task accuracy change from baseline at r = 0 .25 for all evaluated pruning methods. The heatmap reveals structured degradation patterns: reasoning tasks (left columns) show large variance across methods (AIME25 spans −3.3 to −43 .3%), while knowledge tasks (right columns) show uniformly mild degradation ( < 5% for most methods). MESA achieves the lightest overall shading (smallest absolute degradation across all tasks), while REAP shows a distinctive pattern of severe GPQA loss ( −16 .8%) alongside strong reasoning preservation. 20 60% 65% 70% 75% 80% 85% 90% 95% 100% 
+
+## Routing Entropy (H/Hmax , %) 
+
+0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 
+
+> Kendall  (global vs. domain ranking)
+
+85% threshold 
+
+Standard regime Over-dispersed regime 
+
+Worst domain 
+
+Mean domain 
+
+Mixtral-8x7B gpt-oss-20b Figure 8: Routing entropy determines importance signal quality. As routing entropy increases toward uniformity, Kendall-τ between global importance ranking and worst-domain ranking decreases sharply. The 85% band (dashed) is a practical diagnostic, not a sharp physical boundary, and separates reliable (Mixtral, 74.3%) from degraded (gpt-oss, 90.8%) regimes. Simulated on 24-layer, 32-expert matrices with 6 calibration domains; real data points marked with stars. 
+
+Baseline (32 experts, unpruned)                                   
+
+> Q: Charge qat distance dfrom center of grounded con-ducting sphere of radius R. Find net potential energy.
+> “Using method of images: image charge q′=−qR/d at distance R2/d from center. Interaction energy Uint =
+> −kq 2R/ (d2−R2).But the system energy is half the interaction energy because the conductor is grounded and cannot supply energy independently. Therefore U=
+> −12kq 2R/ (d2−R2).”
+> Answer: (B) U=−12kq 2R/ (d2−R2)✓
+
+REAP-pruned (24 experts, r=0 .25 )                                 
+
+> Q: (Same question)
+> “Method of images: image charge q′=−qR/d at R2/d .The potential at the location of qdue to the image charge is V=−kqR/d ·1/(d−R2/d ) = −kqd/ (d2−R2).Energy U=qV =−kq 2d/ (d2−R2).”
+> Answer: (A) U=−kq 2d/ (d2−R2)✗
+> Missing: the factor of 1/2for induced-charge self-energy. The model applies the technique correctly but loses the physical subtlety.
+
+Figure 9: Knowledge degradation on GPQA-Diamond. Same model (gpt-oss-20b), same graduate-level electrostatics problem. Left: the unpruned model correctly identifies that system energy is half the interaction energy for a grounded conductor. Right: REAP-pruned model sets up the method of images identically but omits the factor of 1/2, a specific physical concept lost during pruning. This pattern, correct technique but missing conceptual knowledge, explains REAP’s 17.8% GPQA gap relative to MESA: the pruned model retains procedural skills but loses domain-specific physical reasoning stored in the removed experts. 21 Table 13: Gemma-4-26B-A4B-it r = 0 .25 head-to-head at temperature 0 (deterministic decoding), mean ± std over 3 seeds, on the 5 tasks with temperature-0 replication data. Best pruned result per task in bold ; non-overlapping intervals on GPQA-Diamond. This is an independent replication of the main-text temperature-0.6 result (Table 8) under deterministic decoding, disclosed alongside it rather than in place of it. Additional benchmarks (MMLU, MMLU-Pro, IFEval, PIQA, OpenBookQA, WinoGrande) are pending temperature-0 replication. 
+
+Task Unpruned MESA (ours) REAP RM-U NI .AIME’25 86.67 ±3.33 90.00 ±3.33 76.67 ±4.71 70.00 ±5.44 
+
+GSM8K 96.51 ±0.38 95.98 ±0.45 93.18 ±0.62 89.54 ±0.88 
+
+GPQA-Diamond 74.24 ±1.21 65.66 ±1.82 55.56 ±1.95 48.99 ±2.15 
+
+ARC-Challenge 96.84 ±0.42 95.56 ±0.51 92.40 ±0.68 88.15 ±0.82 
+
+ARC-Easy 98.82 ±0.25 98.23 ±0.31 96.50 ±0.45 93.80 ±0.60          
+
+> A domain-aware REAP control (REAP given the same per-domain conditioning as MESA) reaches GPQA-Diamond 58 .4(vs. MESA’s 65 .66
+> at temperature 0/67 .85 at temperature 0.6), showing MESA’s gain comes from the minimax worst-case objective , not merely from conditioning REAP’s importance scores by domain.
+
+Table 14: Task accuracy (%) on gpt-oss-120B at r = 0 .5 (aggressive expert pruning, 128 → 64 
+
+experts per layer), single measurement per cell. Best pruned result per task in bold . RM-U NIFORM 
+
+collapses to 0.00 on every task at this ratio, a genuine failure of the method at r = 0 .5 rather than a missing measurement. On the worst domain (GPQA-Diamond, the hardest task in the suite), MESA leads REAP by 6.6pp; MESA also leads on AIME, IFEval, MMLU, OpenBookQA, and PIQA. REAP edges ahead on GSM8K, ARC-Challenge, ARC-Easy, MMLU-Pro, and WinoGrande. We report this honestly as a mixed outcome at this aggressive ratio: MESA’s worst-domain protection holds, but it does not dominate every benchmark under such heavy pruning. 
+
+Math Reasoning Knowledge & Commonsense Multi-domain & Instruction Method AIME’25 GSM8K GPQA ARC-C ARC-E OBQA PIQA MMLU MMLU-Pro WinoGr. IFEval Unpruned 74.00 95.63 70.36 96.38 98.67 93.91 84.93 87.76 77.78 81.03 86.50 MESA (ours) 72.22 95.58 58.46 92.38 95.88 93.56 77.95 83.01 64.20 77.27 87.15 
+
+REAP 48.89 96.26 51.85 95.14 98.18 93.33 77.93 82.05 68.96 81.16 84.50 RM-U NI . 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00      
+
+> RM-U NIFORM collapses completely at r= 0 .5on gpt-oss-120B (all-task 0.00 ); this is a real degeneracy of the method under aggressive pruning at this scale, not an unmeasured cell. Single-seed; a multi-seed confirmation is future work.
+
+22

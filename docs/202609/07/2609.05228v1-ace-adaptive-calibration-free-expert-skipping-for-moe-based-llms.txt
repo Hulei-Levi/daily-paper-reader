@@ -1,0 +1,1917 @@
+Title: ACE: Adaptive Calibration-Free Expert Skipping for MoE-based LLMs
+
+URL Source: https://arxiv.org/pdf/2609.05228v1
+
+Published Time: Mon, 07 Sep 2026 01:06:46 GMT
+
+Number of Pages: 18
+
+Markdown Content:
+# ACE: Adaptive Calibration-Free Expert Skipping for MoE-based LLMs 
+
+Zukang Xu ∗, Zhixiong Zhao ∗, Xing Hu, Jiangyong Yu, Houji Wen, Jun Li, Zhe Jiang, Dawei Yang †
+
+dawei.yang@houmo.ai 
+
+Abstract 
+
+Mixture-of-Experts (MoE) architectures provide an efficient paradigm for scaling large language models (LLMs), yet fixed top-k routing executes the same number of expert slots for every token and can retain substantial redundant computation. Exist-ing expert-skipping methods often rely on router confidence, calibration data, or additional training,and therefore cannot reliably estimate the actual contribution of routed experts. To this end, we propose ACE, a training-free, calibration-free, and checkpoint-preserving framework for token-adaptive expert skipping in MoE-based LLMs. ACE contains two com-plementary components: 1) Global Spectral Proxy (GSP), which estimates global transformation capacity from the cou-pled gate, up, and down projections together with RMSNorm scaling; and 2) Router-Conditioned Refinement (RCR),which constructs expert-specific direction prototypes from centered router weights and evaluates expert responses along routing-preferred directions. During inference, ACE combines both estimates with runtime router gates and skips an expert slot only when both views identify it as low-contribution, while always retaining the top-1 expert. All expert statistics are computed offline, leaving only table lookups and lightweight scalar operations online. Extensive experiments across three MoE-based LLMs and eight benchmarks demonstrate that ACE consistently outperforms existing static and dynamic baselines, with increasingly pronounced advantages under ag-gressive expert skipping. For instance, at a 50% skipping ratio on Qwen3.6-35B-A3B, ACE reduces WikiText-2 perplexity by 7.96% and improves average downstream accuracy by 4.15 percentage points over the strongest competing method. Opti-mized expert dispatch further yields up to 2.25 × prefill and 1.41 × decoding speedups in our measurements. The code is available at https://github.com/xzktx003/moe-prune. 
+
+1 Introduction 
+
+Mixture-of-Experts (MoE) has become a key approach for scaling large language models (LLMs) (Shazeer et al. 2017). Unlike dense Transformers that execute the full feed-forward network at every layer, MoE models replace each FFN sub-layer with multiple experts and route each token to only a small subset, thereby expanding model capacity while controlling per-token computation. Recent models further demonstrate this advantage: Qwen3.6-35B-A3B (Qwen Team 
+
+> ∗
+
+These authors contributed equally. 
+
+> †
+
+Corresponding author. 𝟏𝟎 𝟐𝟎 
+
+Expert skipping Ratio (%)    
+
+> 𝟑𝟎 𝟒𝟎 𝟓𝟎 𝟔𝟎 𝟕𝟎 𝟖𝟎
+> Avg. Accuracy (%)
+> 𝟑𝟎 𝟒𝟎 𝟓𝟎 𝟔𝟎
+> NAEE DiEP MoDES Ours AIMER SERE BF16 (0% skipping) Aggressive skipping regime
+
+Figure 1: Accuracy–efficiency trade-off on Qwen3-30B-A3B-Instruct-2507 under different expert skipping ratios. ACE consistently outperforms all baselines across the full range. 2026) activates only about 3B of its 35B parameters, while DeepSeek-V4-Pro and DeepSeek-V4-Flash (DeepSeek-AI et al. 2026) adopt total-to-active parameter configurations of 1.6T/49B and 284B/13B, respectively. However, sparse activation does not make MoE inference inherently efficient. Most MoE-based LLMs still use fixed top-k routing, ac-tivating the same number of expert slots for every token despite substantial variation in their contributions. As a result, low-contribution experts may still be fully executed, causing redundant computation and notable inference overhead, espe-cially in resource-constrained or memory-bandwidth-limited deployments. To further improve MoE inference efficiency, existing stud-ies mainly reduce expert redundancy through offline expert compression or online dynamic activation control. Offline pruning and merging methods (Liu et al. 2026b; Bai et al. 2025) modify the expert pool before deployment based on ex-pert usage, activation responses, gradient/Fisher information, or search-based criteria, thereby reducing model size and resident memory. However, such static compression shares the same expert structure across all inputs and cannot adapt to token-specific demands for routed expert slots. Even after the expert pool is compressed, the remaining MoE layers typ-arXiv:2609.05228v1 [cs.AI] 4 Sep 2026 ically retain fixed top-k routing and execute a preset number of experts, leaving dynamic redundancy within the routed set unaddressed. Dynamic expert skipping is more closely aligned with our goal, as it adaptively reduces executed ex-pert slots during inference. Some methods modify or retrain the router (Huang et al. 2024), or introduce additional deci-sion modules to learn token-wise expert budgets (Zhao et al. 2025), while post-training approaches determine skipping thresholds from router-score imbalance, calibration-based layer sensitivity, or activation statistics (Huang et al. 2026). Although these methods avoid permanently removing ex-perts, their decisions still rely largely on router confidence or calibration-dependent signals. The former reflects relative routing preference rather than the effective transformation contribution of an executed expert, whereas the latter requires additional calibration-time forward passes and may be sensi-tive to calibration size, domain distribution, and task shift. As shown in Figure 1, existing methods remain stable under mild skipping but degrade rapidly as the skipping ratio increases, whereas ACE maintains a superior accuracy–efficiency trade-off in the aggressive 40%–60% regime. This suggests that the key challenge of high-ratio skipping is not merely to reduce expert executions, but to reliably estimate the relative con-tributions of routed expert slots for token-adaptive skipping without calibration data or checkpoint modification. To understand the key challenges of calibration-free expert-slot skipping, we examine the problem from three perspectives: routing preference, expert structure, and input directionality. First, router gates only reflect the relative assignment prefer-ence among the top-k candidate experts, rather than the actual contribution of each routed expert slot to the MoE output. Experts with similar gate values may produce substantially different responses due to variations in their FFN structures, RMSNorm scaling, and output mappings; conversely, an ex-pert with a smaller gate may still contribute non-negligibly through stronger transformation capacity. Therefore, skipping experts solely based on router scores may incorrectly equate routing preference with expert contribution. Second, esti-mating expert transformation capacity directly from model parameters, without calibration activations or additional train-ing, is non-trivial. The output of a SwiGLU expert arises from the nonlinear interaction among its gate, up, and down projec-tions, which cannot be adequately characterized by a single matrix norm, usage frequency, or global routing statistic. Finally, expert contribution is inherently direction-dependent. An expert with weak global responses may still exhibit strong behavior within the local input region favored by the router. A reliable data-free contribution estimator should therefore capture both the global structural capacity of each expert and the directional specialization encoded by the router. Motivated by these observations, we propose ACE (Adaptive Calibration-Free Expert Skipping), a training-free, calibration-free, and checkpoint-preserving framework for dynamic expert skipping in MoE-based LLMs. ACE retains the pretrained router and its original top-k candidate set, while estimating the relative contribution of each routed expert slot by combining token-specific routing preference with expert-specific transformation capacity. Specifically, the Global Spectral Proxy (GSP) extracts a direction-agnostic structural response from the gate, up, and down projections of each SwiGLU expert together with the preceding RMSNorm scaling, thereby characterizing its global transformation capac-ity. Router-Conditioned Refinement (RCR) further constructs an expert-specific direction prototype from the centered router weights and measures the expert response along its preferred routing direction, compensating for directional specialization overlooked by the global proxy. During inference, ACE com-bines the router gates with the precomputed GSP and RCR amplification tables, and progressively skips low-contribution slots under dual-view contribution constraints and a router-mass safeguard, while always preserving the top-1 expert. Since all expert-level statistics are derived offline from model weights and router geometry, ACE requires no real samples, activation caching, or threshold profiling, and introduces only table lookups and lightweight top-k scalar operations at runtime. Our key contributions can be summarized as follows: 
+
+• We identify key challenges in calibration-free expert-slot skipping: mismatch between routing preference and expert contribution, structural coupling within SwiGLU experts, and direction-dependent specialization of responses. 
+
+• We propose ACE , a training-free and checkpoint-preserving framework that combines calibration-free GSP and RCR contribution estimates for safeguarded token-adaptive skipping. 
+
+• Extensive experiments across MoE-based LLMs and tasks show that ACE consistently outperforms static and dy-namic baselines, especially under aggressive skipping. 
+
+2 Related Work 
+
+Static Expert Compression in MoE-based LLMs. Static expert compression reduces model size and resident memory by pruning, merging, or restructuring experts before deploy-ment. Existing methods identify redundant experts using rout-ing frequency, task statistics, or structural importance. The expert-pruning branch of NAEE (Lu et al. 2024) selects fixed subsets for task-agnostic and task-specific compression, EAC-MoE (Chen et al. 2025) removes rarely selected experts based on selection frequency, and AIMER (Liu et al. 2026b) devel-ops a calibration-free criterion for task-agnostic pruning. More fine-grained methods include MoE-Pruner (Xie et al. 2024), which combines router information with input activations for one-shot intra-expert pruning, and REAP (Lasby et al. 2026), which jointly considers router gates and expert activation norms. DiEP (Bai et al. 2025) learns non-uniform layer-wise sparsity through differentiable optimization, COMPEL (Yoon and Choi 2026) integrates Fisher-based importance, layer-wise outlier distributions, and weight compensation, while STUN (Lee et al. 2025) applies structured expert pruning followed by unstructured compression within retained experts. Despite reducing parameter and memory costs, these meth-ods determine a fixed structure before inference and apply it uniformly to all inputs. The remaining MoE layers generally retain fixed top-k routing and cannot adaptively eliminate low-contribution expert slots for individual tokens. 
+
+Dynamic Expert Skipping in MoE-based LLMs. Dy-namic expert skipping reduces expert activations according Original Top-k MoE Routng   
+
+> Token 𝑥௧
+> Router (Linear + Softmax)
+> ⋯𝑻𝒐𝒑𝒌
+
+⋯𝑒ଵ 𝑒ଶ 𝑒ଷ 𝑒ே ×××
+
++  
+
+> Top-k expert slots
+> {𝑒௜, 𝑔௜} ௜ୀଵ ௞
+> Input x
+> 𝑊 ௚௔௧௘ 𝑊 ௨௣
+> SiLU
+
+⨀ Element-wise Multiply 
+
+> 𝑊ௗ௢௪௡
+
++
+
+Global Spectral Proxy (GSP) Frozen SwiGLU Expert weights    
+
+> 𝑊ௗ௢௪௡ 𝑊 ௨௣ 𝑊 ௚௔௧௘ Γ௟
+> (RMSNorm)
+> Up-conditioned path
+> 𝑎 ௟,௘ ௨𝒂 𝒍,𝒆 𝒖𝒑 =𝜞𝒍𝑾 𝒍,𝒆 𝒖𝒑
+> Gate-conditioned path
+> 𝑎 ௟,௘ ௚𝒂 𝒍,𝒆 𝒈𝒂𝒕𝒆 =𝜞𝒍𝑾 𝒍,𝒆 𝒈𝒂𝒕𝒆
+> Symmetric
+> Geometric coupling
+> 𝑎 ෤௟,௘ீ ௌ௉ =𝒂 𝒍,𝒆 𝒖𝒑 𝒂 𝒍,𝒆 𝒈𝒂𝒕𝒆
+> Normalize (per layer)
+> Offline GSP table
+> 𝐴௟ீ ௌ௉ (𝑒) 𝑊௟ ௥
+> Original Router Weights
+
+Router-Conditioned Refinement (RCR) Centered Roter Weights     
+
+> 𝑤௟,௝ 𝑤௟,௝ 𝑤 ഥ௟ 𝑤௟,௝ 𝑤 ෥௟,௘ 𝑤 ෥௟,௘ = 𝑤௟,௘ − 1𝑁௟ ෍ 𝑤௟,௝ ே೗ ௝ୀଵ
+> Direction Prototype
+> Fixed-RMS shell
+> 𝑅𝑀𝑆 𝑞 = 𝜌௟ (1 𝑖𝑛 𝐴𝐶𝐸) 𝑞௟,௘ 𝑤 ෥௟,௘ 𝑞௟,௘||𝑤 ෥௟,௘ 𝑞௟,௘ = 𝑅𝑀𝑆𝑁𝑜𝑟𝑚(𝑤 ෥௟,௘) ȉ 𝜌௟ 𝑊 ௨௣
+> Frozen Expert 𝒆 𝑊 ௚௔௧௘
+> SiLU ⨀𝑊ௗ௢௪௡ 𝑞௟,௘
+
++     
+
+> 𝑦௟,௘ ோ஼ோ = 𝑓 ௟,௘ 𝑞௟,௘ 𝑓 ௟,௘
+> Conditional Response
+> 𝑞௟,௘ ଶ𝑓 ௟,௘ (𝑞௟,௘) ଶ
+> Gain
+> 𝑎 ෤௟,௘ ோ஼ோ 𝑎 ෤௟,௘ ோ஼ோ =௙೗,೐(௤೗,೐) మ௤೗,೐ మାఢ
+> Offline RSR table
+> 𝐴௟ ோ஼ோ (𝑒)
+> Normalize (per layer)
+
+Online Adaptive Inference              
+
+> Token 𝑥௧
+> Routed top-k slots
+> {(𝑒௜, 𝑔௟,௧,௜)} ௜ୀଵ ௞
+> GSP branch
+> Lookup 𝐴௟ீ ௌ௉ (𝑒௜) 𝑠 ௟,௧,௜ீ ௌ௉ = 𝑔௟,௧,௜𝐴௟ீ ௌ௉ 𝑒௜ 𝑝 ௟,௧,௜ீ ௌ௉ = 𝑛𝑜𝑟𝑚(𝑠ீ ௌ௉ )
+> RCR branch
+> Lookup 𝐴௟ ோ஼ோ (𝑒௜) 𝑠 ௟,௧,௜ ோ஼ோ = 𝑔௟,௧,௜𝐴௟ ோ஼ோ 𝑒௜ 𝑝 ௟,௧,௜ ோ஼ோ = 𝑛𝑜𝑟𝑚(𝑠 ோ஼ோ )
+> ACE Joint Skipping Decision
+> 𝑐 ௟,௧,௜ ஺஼ா = max( 𝑝 ௟,௧,௜ீ ௌ௉ , 𝑝 ௟,௧,௜ ோ஼ோ )
+> 𝑠𝑘𝑖𝑝 𝑖𝑓 𝑐 ௟,௧,௜ ஺஼ா <𝜏(𝑞) 𝑒ଵ 𝑒ଶ 𝑒ଷ 𝑒ே
+
+⋯  
+
+> Always Keep Router Top-1 expert
+> Aggregate surviving experts
+> ෍𝑔 ෤௟,௧,௠𝑓 ௟,௘ ೘(𝑥௧) ௠∈ௌ
+> Renormalize surviving gates
+
+Figure 2: Overview of ACE. Global Spectral Proxy (GSP) estimates each expert’s transformation capacity from frozen SwiGLU weights, while Router-Conditioned Refinement (RCR) evaluates responses along router-induced directions. During inference, ACE combines offline scores with token-wise router gates to skip low-contribution expert slots and aggregate surviving experts. to token-, layer-, or batch-specific states. Some methods re-place fixed top-k routing with variable-cardinality policies. Top-P Routing (Huang et al. 2024) determines activated expert counts from cumulative routing probabilities, Ada-K Routing (Zhao et al. 2025) learns a lightweight allocator through reinforcement learning, and DynMoE (Guo et al. 2025) combines Top-Any gating with adaptive training to vary expert counts across tokens. For pretrained MoE-based LLMs, NAEE (Lu et al. 2024) skips secondary experts using relative router scores and calibration-derived layer thresholds. Alloc-MoE (Liu et al. 2026a) distributes a global activation budget through layer sensitivity profiling and dynamic pro-gramming, followed by routing-score-based token allocation, while MoDES (Huang et al. 2026) combines globally mod-ulated local gating with modality-specific threshold search for training-free skipping in multimodal MoE models. Batch-level methods include SERE (Wu et al. 2026), which re-routes tokens from secondary to similar primary experts, and XShare (Vankov et al. 2026), which selects shared expert sub-sets from batch routing demands. Despite their effectiveness, these methods generally require routing-policy training, addi-tional modules, calibration or sensitivity profiling, router-only importance signals, or specific batch-serving assumptions. 
+
+3 Method 
+
+Overview. To address the three challenges of calibration-free expert skipping identified in Sec. 1, we propose ACE, a parameter-driven framework for token-adaptive expert skip-ping in MoE-based LLMs (Fig. 2). First, Global Spectral Proxy (GSP) models the multiplicatively coupled gate, up, and down projections of each SwiGLU expert to estimate its transformation capacity without calibration data (Sec. 3.1). Second, Router-Conditioned Refinement (RCR) constructs expert-specific directional prototypes from centered router weights and evaluates experts along their routing-preferred directions, compensating for directional specialization missed by GSP (Sec. 3.2). Finally, ACE combines runtime router gates with offline GSP and RCR scores, skipping an expert slot only when both views identify it as low-contribution. Detailed pseudocode is provided in Appendix Sec. A.1. 
+
+3.1 Global Spectral Proxy (GSP) 
+
+In standard MoE inference, router gates typically serve as the primary indicator of expert importance, determining a fixed top-k activation pattern. However, a gate reflects only the relative routing preference of the current token among candidate experts, rather than the intrinsic nonlinear transfor-mation capacity of the expert networks. Thus, high routing affinity does not necessarily imply a large contribution to the MoE output. Gate-only skipping may therefore conflate routing preference with marginal contribution, while over-looking differences in the parameter structures and response capacities of individual experts. To mitigate this measurement bias, ACE introduces a static transformation-capacity proxy derived exclusively from intrinsic expert parameters. Without modifying the original top-k candidate set selected by the pretrained router, this proxy enables fine-grained, adaptive expert skipping. Specifically, for the l-th MoE layer and the 
+
+t-th token, let {ei}ki=1 denote the original top-k experts se-lected by the pretrained router, with gate values {gl,t,i }ki=1 .Within this candidate set, we define the unnormalized GSP contribution score of the i-th routed expert slot as 
+
+sGSP 
+
+l,t,i = gl,t,i · AGSP 
+
+l (ei), (1) where gl,t,i represents the token-dependent routing prefer-ence for expert ei, while AGSP 
+
+l (ei) is a static amplification proxy derived solely from intrinsic model parameters. The latter characterizes the expert’s transformation capacity for a normalized hidden representation. By combining dynamic routing preference with static transformation capacity, GSP distinguishes whether an expert is strongly preferred by the router from whether it is structurally capable of producing a strong response. Consequently, an expert slot receives a high GSP contribution score only when it exhibits both strong rout-ing compatibility and high intrinsic transformation capacity. To construct AGSP  
+
+> l
+
+(e) without calibration data, we analyze the parameterized input–output transformation of a SwiGLU expert. Since the RMSNorm preceding each MoE module maintains hidden states at a relatively stable scale, the expert input can be written as x = ¯ xΓl, where ¯x denotes the RMS-normalized input direction and Γl is the diagonal matrix formed by the learned RMSNorm scaling vector at layer l.Consider a SwiGLU expert with gate, up, and down projection weights W gate  
+
+> l,e
+
+, W up  
+
+> l,e
+
+, and W down  
+
+> l,e
+
+, respectively. Ignoring bias terms, its forward transformation is 
+
+fl,e (x) = 
+
+
+
+SiLU 
+
+
+
+¯xΓlW gate 
+
+> l,e
+
+
+
+⊙ ¯xΓlW up 
+
+> l,e
+
+
+
+W down  
+
+> l,e
+
+. (2) Since | SiLU( z)| ≤ | z| for any scalar z, the expert output admits the upper bound is 
+
+∥fl,e (x)∥2 ≤ ∥ ¯x∥22 ΓlW gate  
+
+> l,e 2
+
+ΓlW up  
+
+> l,e 2
+
+W down   
+
+> l,e 2
+
+.
+
+(3) This bound shows that the response capacity of an expert is jointly determined by the gate branch, up branch, and down projection through multiplicative coupling. Hence, the norm of any individual projection matrix is insufficient to characterize the transformation capacity of a SwiGLU expert. The complete derivation is provided in Appendix Sec. A.2. Motivated by this multiplicative structure, GSP constructs a branch-symmetric matrix-norm surrogate requiring neither input activations nor calibration samples. Specifically, we estimate each expert’s global response capacity through two complementary factorization paths: 
+
+aup  
+
+> l,e
+
+= ΓlW up  
+
+> l,e F
+
+· ΓlW gate  
+
+> l,e
+
+W down  
+
+> l,e F
+
+, (4) 
+
+agate  
+
+> l,e
+
+= ΓlW gate  
+
+> l,e F
+
+· ΓlW up  
+
+> l,e
+
+W down  
+
+> l,e F
+
+. (5) Here, aup  
+
+> l,e
+
+combines the response scale of the up branch with the gate-to-down transmission path, while agate  
+
+> l,e
+
+symmetri-cally combines the gate-branch scale with the up-to-down path. Together, these quantities provide complementary fac-torizations of the multiplicative SwiGLU transformation, preserving structural information from both input branches and the shared output projection. We aggregate them using the geometric mean: 
+
+eaGSP  
+
+> l,e
+
+=
+
+q
+
+aup 
+
+> l,e
+
+agate  
+
+> l,e
+
+. (6) The geometric mean aligns naturally with SwiGLU’s mul-tiplicative structure and is more sensitive to imbalanced responses between the two complementary paths. Compared with additive aggregation, it limits the dominance of an ex-ceptionally large single-path norm, assigning higher scores to experts with consistently strong responses along both paths. Since parameter scales, hidden dimensions, and RMSNorm scaling factors can vary substantially across MoE layers, raw surrogate values are not directly comparable. We therefore normalize eaGSP  
+
+> l,e
+
+by the layer-wise mean: 
+
+AGSP  
+
+> l
+
+(e) = eaGSP 
+
+> l,e
+> 1
+> Nl
+
+PNl 
+
+> j=1
+
+eaGSP  
+
+> l,j
+
++ ϵ , (7) where Nl is the number of experts in the l-th MoE layer and 
+
+ϵ ensures numerical stability. The normalized score AGSP  
+
+> l
+
+(e)
+
+measures the global structural response of expert e relative to the layer average: AGSP  
+
+> l
+
+(e) > 1 indicates above-average static amplification capacity, whereas AGSP  
+
+> l
+
+(e) < 1 indicates a relatively weak global response. During online inference, GSP requires neither additional expert forward passes nor activation-statistics collection. For each expert slot selected by the pretrained router, ACE re-trieves the corresponding static amplification score AGSP  
+
+> l
+
+(ei),precomputed once before deployment, and combines it with the current gate value. The resulting scores are normalized within the original top-k candidate set to obtain the relative GSP contribution distribution: 
+
+pGSP  
+
+> l,t,i
+
+= sGSP 
+
+> l,t,i
+
+Pkj=1 sGSP  
+
+> l,t,j
+
++ ϵ . (8) Here, pGSP  
+
+> l,t,i
+
+measures the relative contribution of the i-th expert slot under the joint effect of token-dependent routing preference and global structural response capacity. Given a global threshold τ (q) for target skipping rate q, a slot satisfying pGSP  
+
+> l,t,i
+
+< τ (q) is identified as a low-contribution candidate from the GSP perspective. Because all static scores are computed before deployment, online GSP requires only expert-indexed table lookup, scalar multiplication, and nor-malization over the original top-k candidates. It therefore adds no high-dimensional expert computation and provides ACE with a calibration-free, parameter-intrinsic, and deployment-friendly baseline for global expert contribution estimation. 
+
+3.2 Router-Conditioned Refinement (RCR) 
+
+Although GSP provides a calibration-free baseline for estimat-ing global expert contributions, it is inherently unconditional :it evaluates an expert’s overall response to generic normalized input directions based on its parameter structure, without distinguishing the input subspaces that the expert receives. In practice, however, an MoE router often exhibits pronounced directional selectivity, assigning different experts to distinct regions of the hidden-state space. Consequently, an expert with a weak global structural response may not be uniformly weak across all directions; it may still produce a strong re-sponse along directions favored by the router. Relying solely on GSP may therefore underestimate experts with pronounced 
+
+directional specialization . To address this limitation, we intro-duce Router-Conditioned Refinement (RCR), which exploits directional preferences encoded by the pretrained router to restrict expert evaluation from the generic input space to the corresponding router-conditioned subspace, thereby provid-ing a local directional correction to the global GSP estimate. To extract expert-specific routing directions without ac-cessing real activations, RCR directly leverages the parameter structure of the pretrained router. Consider the routing logit assigned to expert e at layer l: zl,e (x) = x⊤wl,e + bl,e , where 
+
+wl,e denotes the router weight vector associated with expert 
+
+e. Since softmax routing depends only on relative differ-ences among expert logits, the router weights are invariant to a shared translation: adding the same vector to all expert weight vectors leaves the resulting routing probabilities un-changed. We therefore center the router weights within each layer to obtain a direction representation with explicit relative discriminative meaning: 
+
+ewl,e = wl,e − 1
+
+NlNlX
+
+> j=1
+
+wl,j . (9) The centered vector ewl,e characterizes the routing-discriminative direction of expert e relative to other experts in the same layer, while remaining invariant to any shared translation of the router weights (proof is provided in Ap-pendix Sec. A.2). To interpret this centered direction from a conditional-distribution perspective, we adopt a Gaussian ap-proximation to the centered hidden states. Let μxl = Ex∼pl [x]
+
+and assume x − μxl ∼ N (0 , Σl), where pl(x) denotes the input distribution at layer l and Σl is its covariance matrix. We then define an exponentially tilted distribution induced by the centered router direction: 
+
+pl,e (x) = exp 
+
+ew⊤
+
+> l,e
+
+x
+
+
+
+pl(x)
+
+Ex∼pl
+
+h
+
+exp 
+
+ew⊤
+
+> l,e
+
+x
+
+i . (10) Under the Gaussian approximation, the conditional mean shift is Ex∼pl,e [x] − Ex∼pl [x] = Σ l ewl,e . When Σl ≈ σ2 
+
+> l
+
+I,the mean-shift direction is approximately aligned with ewl,e .Therefore, the centered router weight can be interpreted as a data-free approximation to the expert-conditioned input direc-tion (complete derivation is provided in Appendix Sec. A.2). Based on the above analysis, RCR uses the centered router weight to approximate the expert-conditioned input direction and constructs an expert-specific direction prototype through RMS normalization: 
+
+ql,e = ewl,e 
+
+RMS( ewl,e ) + ϵ · ρl, (11) where, for w ∈ Rd, RMS( w) = 
+
+q 1
+
+> d
+
+Pdj=1 w2 
+
+> j
+
+, d denotes the hidden-state dimension, and ρl is a prior on the input scale of layer l. To preserve the fully calibration-free property of ACE, we set ρl = 1 throughout. RMS normalization removes variations in the overall magnitudes of router weight vectors across experts, allowing ql,e to primarily retain their relative routing directions rather than redundantly encode routing confidence, which is already captured by the runtime gate 
+
+gl,t,i . Since inputs following RMSNorm exhibit a relatively stable root-mean-square scale, ql,e serves as a data-free di-rectional prototype whose scale is compatible with actual expert inputs. Before deployment, RCR feeds ql,e into its cor-responding expert and performs a complete SwiGLU forward pass to measure the response along its routing-preferred di-rection. Specifically, the raw router-conditioned amplification of expert e is defined as 
+
+eaRCR  
+
+> l,e
+
+= ∥fl,e (ql,e )∥2
+
+∥ql,e ∥2 + ϵ . (12) The numerator measures the output magnitude produced along the router-conditioned direction, while the denominator normalizes the prototype input scale. This ratio therefore characterizes the expert’s directional amplification capacity and improves comparability across experts. Similar to GSP, raw router-conditioned responses may vary across MoE layers due to differences in parameter magnitudes and nonlinear response ranges. We therefore normalize the prototype amplification within each layer: 
+
+ARCR  
+
+> l
+
+(e) = eaRCR 
+
+> l,e
+> 1
+> Nl
+
+PNl 
+
+> j=1
+
+eaRCR  
+
+> l,j
+
++ ϵ . (13) The normalized score ARCR  
+
+> l
+
+(e) measures the router-conditioned response strength of expert e relative to the average expert in the same layer. A value greater than one in-dicates an above-average response along its routing-preferred direction, even if its global structural response measured by GSP is weak. During online inference, RCR introduces no prototype evaluation or expert forward computation. ACE only retrieves the precomputed score ARCR  
+
+> l
+
+(ei) for each routed expert slot and combines it with the current gate: 
+
+sRCR  
+
+> l,t,i
+
+= gl,t,i ARCR  
+
+> l
+
+(ei). (14) The resulting scores are normalized within the top-k candidate set to obtain the router-conditioned contribution distribution: 
+
+pRCR  
+
+> l,t,i
+
+= sRCR 
+
+> l,t,i
+
+Pkj=1 sRCR  
+
+> l,t,j
+
++ ϵ . (15) Here, pRCR  
+
+> l,t,i
+
+measures the relative contribution of the i-th expert slot by considering token-dependent routing preference and the expert response along its router-conditioned direction. GSP and RCR assess each expert slot from two complemen-tary perspectives: GSP captures the expert’s global transforma-tion capacity encoded by its parameter structure, whereas RCR measures its localized response along the routing-preferred direction. To combine these estimates without additional fu-sion hyperparameters, ACE adopts a conservative maximum criterion and defines the final contribution score as 
+
+cACE  
+
+> l,t,i
+
+= max  pGSP  
+
+> l,t,i
+
+, p RCR 
+
+> l,t,i
+
+ . (16) Under this criterion, a routed expert slot is considered skip-pable only when both GSP and RCR assign it low contribution. Given the global threshold τ (q) associated with target skip-ping rate q, slot i is skipped only if cACE  
+
+> l,t,i
+
+< τ (q). This conservative aggregation prevents an expert from being re-moved when it is considered important from either the global structural or router-conditioned directional perspective. Equiv-alently, let the low-contribution candidate sets identified by GSP and RCR be 
+
+SGSP  
+
+> l,t
+
+= i pGSP  
+
+> l,t,i
+
+< τ (q) , (17) 
+
+SRCR  
+
+> l,t
+
+= i pRCR  
+
+> l,t,i
+
+< τ (q) . (18) According to Eq. (16), the final skipping set is 
+
+SACE 
+
+l,t = SGSP 
+
+l,t ∩ S RCR 
+
+l,t . (19) Thus, an expert slot is skipped only if both perspectives iden-tify it as low-contribution. This intersection rule provides a conservative safeguard against incorrectly skipping direction-specialized experts whose global response may be weak but whose router-conditioned response remains strong (analysis of its conservativeness and resulting output perturbation is provided in Appendix Sec. A.2). To preserve the routing structure of the pretrained model, ACE always retains the top-1 expert with the highest original router gate and option-ally enforces a minimum number of active experts per token. After the skipping decision, the gate values of the remaining experts are renormalized before final MoE output aggregation. Through this complementary global–local verification, ACE reduces the risk of excessively skipping direction-specialized experts while enabling fine-grained, token-adaptive expert sparsification. It thereby preserves both global structural stability and router-conditioned directional fidelity without modifying the pretrained router or expert parameters. 
+
+4 Experiments 
+
+We evaluate ACE along three dimensions: quality preservation at matched expert-skipping budgets, the contribution of its two parameter-derived views, and realized inference efficiency. The main text presents one complete 10–60% budget table per model, component ablations, threshold-construction cost, and complete latency measurements. Appendix B contains all task-level results and threshold construction details. 
+
+4.1 Experimental Setup 
+
+Models and benchmarks. We study Qwen3-30B-A3B-Instruct-2507, Qwen3.6-35B-A3B, and Gemma-4-26B-A4B-it (Yang et al. 2025; Qwen Team 2026; Google DeepMind 2026). We evaluate WikiText-2 PPL at sequence length 2048 (Merity et al. 2017) and 7 downstream tasks: ARC-Challenge (ARC-C), ARC-Easy (ARC-E), PIQA, MATH-500, GPQA-Diamond, HumanEval, and LiveCodeBench (Clark et al. 2018; Bisk et al. 2020; Hendrycks et al. 2021; Rein et al. 2023; Chen et al. 2021; Jain et al. 2024). We report un-weighted mean of seven task accuracies. We omit Gemma-4 Table 1: Complete 10–60% budget comparison on Qwen3-30B-A3B-Instruct-2507. W2 denotes WikiText-2 PPL and Acc. denotes average downstream accuracy. BF16 is excluded from ranking; bold marks the best skipping result per metric and budget. Method 10% 20% 30% 40% 50% 60% W2 ↓ Acc. ↑ W2 ↓ Acc. ↑ W2 ↓ Acc. ↑ W2 ↓ Acc. ↑ W2 ↓ Acc. ↑ W2 ↓ Acc. ↑                                                                                                                                                            
+
+> BF16 7.52 80.67 7.52 80.67 7.52 80.67 7.52 80.67 7.52 80.67 7.52 80.67 Score 7.70 79.69 8.09 77.85 8.65 77.97 9.63 75.39 12.03 66.69 18.76 37.64 NAEE 7.70 80.39 8.07 79.34 8.68 77.77 9.82 72.93 12.48 64.40 19.56 43.44 MoDES 7.57 79.79 7.84 78.80 8.33 77.99 9.28 76.03 12.25 56.61 17.80 39.15 DiEP 10.09 76.58 16.00 64.36 28.42 47.05 65.87 27.44 136.92 3.96 459.88 3.62 AIMER 7.55 80.08 7.65 79.94 7.82 79.36 8.24 77.17 8.86 73.40 10.89 60.88 Top-P7.54 79.95 7.66 79.54 7.82 79.27 8.19 77.73 8.85 74.17 10.87 61.91 SERE 8.77 75.59 11.00 66.65 14.27 62.55 20.81 58.05 46.36 38.62 178.96 9.82 XShare 8.10 76.24 9.14 63.27 10.82 32.96 13.67 22.48 19.63 10.98 39.22 6.15 ExpertSparsity 7.68 79.54 8.02 79.45 8.49 78.63 9.31 76.76 10.98 73.67 13.39 62.28 GSP 7.56 80.14 7.67 79.94 7.87 79.59 8.22 77.86 8.99 74.10 10.99 62.53 RCR 7.59 80.13 7.83 78.85 8.31 77.81 9.19 75.36 11.62 67.01 17.95 39.60 ACE 7.55 80.39 7.66 80.25 7.86 79.77 8.19 78.21 8.85 74.30 10.86 63.35
+
+PPL because unusually high perplexity for the original model is poorly aligned with its downstream capability; consequently, downstream task accuracy provides a more informative mea-sure of pruning-induced quality changes for this model. 
+
+Evaluation protocol. All methods use BF16 and the same Hugging Face and EvalScope 1.4.1 evaluation pipeline. All downstream evaluations are zero-shot, use identical prompts and splits, and apply greedy decoding. Generation is capped at 1,024 tokens for ARC-C, ARC-E, and PIQA and at 2,048 tokens for reasoning and coding tasks. Results are single deterministic runs with seed 42; sub-point differences, espe-cially on GPQA-Diamond, should therefore be interpreted cautiously. The skipping ratio is the fraction of routed top-k
+
+expert slots that are not executed. For every method and bench-mark, a single unlabeled full-model pass collects runtime selection scores and searches for the threshold realizing each operating point in {10 , 20 , 30 , 40 , 50 , 60 }%. Accordingly, the ratios reported in all result tables are measured, realized skip-ping ratios rather than unconstrained target values. The top-1 routed expert is always retained, and threshold search accounts for this safeguard and the minimum-active-expert constraint. ACE’s contribution estimators remain entirely data-free: GSP and RCR are computed only from frozen model parame-ters and require neither training samples nor evaluation inputs. The unlabeled pass is used solely to translate a requested execution budget into the numerical scale of resulting scores; it never defines, trains, or updates either estimator. Moreover, thresholds associated with the same realized budget remain closely clustered across workloads and can therefore be trans-ferred across datasets. Appendix B.1 formalizes the mapping procedure and reports its cross-workload stability. 
+
+Baselines. We compare ACE with router-score skipping (Score), NAEE (Lu et al. 2024), MoDES (Huang et al. 2026), and DiEP (Bai et al. 2025). On Qwen3-30B, where compatible runs are available, we additionally report AIMER (Liu et al. 2026b), Top-P routing (Huang et al. 2024), SERE (Wu et al. 2026), XShare (Vankov et al. 2026), and ExpertSparsity (Lu et al. 2024). All methods preserve pretrained top-k candidate set and are evaluated with the same BF16 implementation, real-ized skipping budgets, prompts, splits, and decoding pipeline. This controlled protocol ensures performance differences pri-marily reflect the quality of expert-selection decisions rather than differences in evaluation conditions. Table 2: Complete 10–60% budget comparison on Qwen3.6-35B-A3B. W2 denotes WikiText-2 PPL and Acc. denotes average downstream accuracy. BF16 is excluded from ranking; bold marks the best skipping result per metric and budget. Method 10% 20% 30% 40% 50% 60% W2 ↓ Acc. ↑ W2 ↓ Acc. ↑ W2 ↓ Acc. ↑ W2 ↓ Acc. ↑ W2 ↓ Acc. ↑ W2 ↓ Acc. ↑                                                                                                
+
+> BF16 7.01 81.17 7.01 81.17 7.01 81.17 7.01 81.17 7.01 81.17 7.01 81.17 Score 7.38 81.66 7.79 80.51 8.36 78.41 9.21 74.61 10.58 67.45 13.38 54.66 NAEE 7.37 81.27 7.80 80.99 8.40 79.01 9.30 74.84 10.89 67.50 14.17 53.42 MoDES 7.38 80.86 7.41 80.59 7.72 78.19 8.10 75.74 9.42 71.42 10.87 69.04 DiEP 8.83 79.18 12.09 76.91 17.62 72.73 28.45 66.16 45.43 56.42 85.12 32.27 GSP 7.18 81.12 7.38 80.50 7.66 79.46 8.08 78.25 8.87 75.01 10.48 70.54 RCR 7.31 80.97 7.65 81.05 8.17 78.36 8.95 75.35 10.39 66.42 13.48 45.38 ACE 7.16 81.41 7.34 81.46 7.57 79.89 7.88 78.79 8.67 75.57 9.98 70.70
+
+4.2 Main Results 
+
+Tables 1–3 report the complete 10–60% curves for all three models. Under mild skipping, several methods remain close to the unpruned model because only the least influential routed slots are removed. For example, Score attains the highest average accuracy on Qwen3.6 at 10%, while ACE re-mains competitive. This result indicates that router confidence can be sufficient in the low-sparsity regime and that ACE’s structural estimates become most useful when increasingly consequential expert decisions must be made. As the skipping ratio increases, the difference between router-only or single-view criteria and ACE becomes sub-stantially larger. ACE achieves the best average accuracy on Qwen3-30B (tied with NAEE at 10%) and from 20% onward on Qwen3.6, where it also obtains the lowest PPL throughout. At 50%, ACE improves Qwen3.6 from MoDES’s 9.42/71.42 to 8.67/75.57 (PPL/Acc.). At 60%, it leads the strongest external baseline by 1.07 and 1.66 accuracy points on Qwen3-30B and Qwen3.6, respectively. These widening margins support the central motivation of ACE: high-ratio skipping requires more than relative router preference because structurally weak and directionally specialized experts cannot be reliably distinguished by gate values alone. Table 3: Gemma-4 average accuracy across 10–60% skipping.               
+
+> Method Acc. ↑(%) 10% 20% 30% 40% 50% 60% BF16 81.63 81.63 81.63 81.63 81.63 81.63 Score 80.59 80.14 78.19 76.10 71.14 64.05 NAEE 80.67 80.73 77.97 73.84 68.28 57.36 MoDES 80.82 80.63 78.42 77.84 38.74 26.86 DiEP 79.61 78.66 75.90 72.14 30.83 18.13 GSP 81.14 81.16 79.71 78.65 75.73 69.65 RCR 80.74 79.84 78.00 77.49 68.96 60.03 ACE 81.59 81.28 80.15 79.51 77.11 72.11
+
+Table 3 reports average downstream accuracy; BF16 is excluded from ranking and bold marks the best skipping result. ACE leads at every bud-get. Its advantage over GSP grows from 0.44 points at 30% to 1.38 points at 50% and 2.46 points at 60%. Com-peting criteria degrade sharply beyond 40%, whereas the conserva-tive maximum rule pre-serves experts that re-main important under either structural or router-conditioned evi-dence. 
+
+The results also reveal that language-modeling perplexity and downstream accuracy are complementary rather than interchangeable. A method with competitive WikiText-2 PPL does not necessarily preserve reasoning and coding accuracy, particularly at aggressive budgets. ACE is consistently strong on both measures, suggesting that its conservative maximum fusion avoids removing experts that appear unimportant un-der only one contribution view. Complete task-level results supporting these trends are provided in Appendix B.2. 
+
+4.3 Ablation Study 
+
+Table 4: Component ablation. BF16: PPL 7.52 and Avg. 80.67; Drop is the Avg. decrease. 
+
+Skip Method PPL ↓ Avg. ↑ Drop 10% GSP 7.56 80.14 0.53 
+
+RCR 7.59 80.13 0.54 
+
+ACE 7.55 80.39 0.28 
+
+30% GSP 7.87 79.59 1.08 
+
+RCR 8.31 77.81 2.86 
+
+ACE 7.86 79.77 0.90 
+
+50% GSP 8.99 74.10 6.57 
+
+RCR 11.62 67.01 13 .66 
+
+ACE 8.85 74.30 6.37 
+
+Table 4 isolates the two of-fline estimators. GSP pro-vides the stronger individual signal, whereas RCR alone degrades more rapidly be-cause a single router-derived prototype cannot represent the complete conditional in-put distribution. Their com-plementary value emerges in ACE: at 50% skipping, the combined rule reduces PPL from 8.99 to 8.85 and improves average accuracy from 74.10 to 74.30 over GSP. 
+
+Table 5: Fusion-strategy ablation on Qwen3-30B-A3B. Max is the ACE rule.                  
+
+> Fusion 30% 50% PPL ↓Avg. ↑PPL ↓Avg. ↑
+> Min 8.21 77.20 9.20 73.12 Mean 7.95 78.45 8.97 74.01 Max (ACE) 7.86 79.77 8.85 74.30
+
+Table 5 shows that Max per-forms best. It implements a conservative intersection: a slot is skipped only when both views consider it dis-pensable. Min is overly ag-gressive, while averaging can suppress a strong sig-nal from one view. Max pre-serves complementary evi-dence without an additional fusion hyperparameter. 
+
+4.4 Efficiency Analysis 
+
+Table 6: Threshold selection on Qwen3-30B at 10% skipping.        
+
+> Procedure Time (min) Slowdown Quantile mapping 1.8 1.0×
+> Binary search 16.5 9.2×
+> MoDES frontier search 18.9 10 .5×
+
+ACE precomputes GSP and RCR once; online inference uses only expert-indexed lookups and top-k scalar op-erations. Table 6 shows that one quantile pass constructs a threshold in 1.8 minutes, versus 16.5 minutes for bi-nary search and 18.9 minutes for MoDES frontier search. This 9.2–10.5 × reduction concerns deployment preparation rather than token-level inference. 
+
+Table 7: Latency at 60% skipping.                         
+
+> Length Batch TTFT (ms) TPOT (ms/tok) BF16 ACE BF16 ACE 256 1 144.7 84.1 34.9 26.7
+> 512 1 183.7 102.3 57.2 44.9
+> 1024 1 270.9 120.3 85.1 63.0
+> 1024 2 290.5 156.7 95.3 67.8
+> 1024 4 344.9 182.6 127.3 91.1
+
+On an NVIDIA A100, ACE provides 1.72–2.25 ×
+
+TTFT and 1.31–1.41 ×
+
+TPOT speedups. At length 1,024 and batch size 1, TTFT falls from 270.9 to 120.3 ms and TPOT from 85.1 to 63.0 ms/token. Matched-budget methods share the same dispatch path; lightweight scoring keeps their latency within 1%. Thus, ACE improves quality at the same executed-expert cost. 
+
+5 Conclusion 
+
+We introduced ACE, a training-free and checkpoint-preserving method for token-adaptive expert skipping in MoE language models. GSP captures global SwiGLU trans-formation capacity, while RCR measures router-conditioned directional response; their conservative fusion skips a slot only when both views find it low-contribution. Across three MoE models, ACE is particularly effective at aggressive bud-gets. At 50% skipping, it achieves the best average accuracy on all three models, reduces Qwen3.6 WikiText-2 perplexity by 7.96% versus the strongest competitor, and accelerates prefill and decoding. Current results use workload-matched threshold mapping and single deterministic runs; future work should examine threshold transfer, repeated-run uncertainty, and distributed expert dispatch. References 
+
+Bai, S.; Li, H.; Zhang, J.; Hong, Z.; and Guo, S. 2025. DiEP: Adaptive Mixture-of-Experts Compression through Differ-entiable Expert Pruning. Advances in neural information processing systems , 38: 56090–56115. Bisk, Y.; Zellers, R.; Le Bras, R.; Gao, J.; and Choi, Y. 2020. PIQA: Reasoning about Physical Commonsense in Natural Language. In Proceedings of the AAAI Conference on Artificial Intelligence .Chen, M.; Tworek, J.; Jun, H.; Yuan, Q.; Pinto, H. P. d. O.; Kaplan, J.; Edwards, H.; Burda, Y.; Joseph, N.; Brockman, G.; et al. 2021. Evaluating Large Language Models Trained on Code. arXiv preprint arXiv:2107.03374 .Chen, Y.; Shao, Y.; Wang, P.; and Cheng, J. 2025. EAC-MoE: Expert-selection aware compressor for mixture-of-experts large language models. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , 12942–12963. Clark, P.; Cowhey, I.; Etzioni, O.; Khot, T.; Sabharwal, A.; Schoenick, C.; and Tafjord, O. 2018. Think You Have Solved Question Answering? Try ARC, the AI2 Reasoning Challenge. 
+
+arXiv preprint arXiv:1803.05457 .DeepSeek-AI; Xu, A.; Lin, B.; Xue, B.; Wang, B.; Xu, B.; Wu, B.; Zhang, B.; Lin, C.; Dong, C.; Ling, C.; et al. 2026. DeepSeek-V4: Towards Highly Efficient Million-Token Con-text Intelligence. arXiv preprint arXiv:2606.19348 .Google DeepMind. 2026. Gemma-4-26B-A4B-it Model Card. Hugging Face model card. Guo, Y.; Cheng, Z.; Tang, X.; Tu, Z.; and Lin, T. 2025. Dynamic mixture of experts: An auto-tuning approach for efficient transformer models. In The Thirteenth International Conference on Learning Representations .Hendrycks, D.; Burns, C.; Kadavath, S.; Arora, A.; Basart, S.; Tang, E.; Song, D.; and Steinhardt, J. 2021. Measuring Mathematical Problem Solving with the MATH Dataset. In 
+
+Advances in Neural Information Processing Systems .Huang, Q.; An, Z.; Zhuang, N.; Tao, M.; Zhang, C.; Jin, Y.; Xu, K.; Chen, L.; Huang, S.; and Feng, Y. 2024. Harder task needs more experts: Dynamic routing in MoE models. In 
+
+Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) ,12883–12895. Huang, Y.; Wang, Z.; Yuan, Z.; Ding, Y.; Gong, R.; Guo, J.; Liu, X.; and Zhang, J. 2026. Modes: Accelerating mixture-of-experts multimodal large language models via dynamic expert skipping. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition , 30205–30215. Jain, N.; Han, K.; Gu, A.; Li, W.-D.; Yan, F.; Zhang, T.; Wang, S.; Solar-Lezama, A.; Sen, K.; and Stoica, I. 2024. LiveCodeBench: Holistic and Contamination-Free Evalua-tion of Large Language Models for Code. arXiv preprint arXiv:2403.07974 .Lasby, M.; Lazarevich, I.; Sinnadurai, N.; Lie, S.; Ioannou, Y.; and Thangarasa, V. 2026. Reap the experts: Why prun-ing prevails for one-shot moe compression. arXiv preprint arXiv:2510.13999 .Lee, J.; Hwang, S.-w.; Qiao, A.; Campos, D. F.; Yao, Z.; and He, Y. 2025. Stun: Structured-then-unstructured pruning for scalable moe pruning. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , 13660–13676. Liu, B.; Tian, K.; Wang, W.; Zhang, Z.; Qiao, L.; and Li, D. 2026a. Alloc-MoE: Budget-Aware Expert Activation Allocation for Efficient Mixture-of-Experts Inference. In 
+
+Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) ,9653–9667. Liu, Z.; Chen, G.; Tang, S.; Shen, Y.; Wang, H.; and Yuan, X. 2026b. AIMER: Calibration-Free Task-Agnostic MoE Expert Pruning. arXiv preprint arXiv:2603.18492 .Lu, X.; Liu, Q.; Xu, Y.; Zhou, A.; Huang, S.; Zhang, B.; Yan, J.; and Li, H. 2024. Not all experts are equal: Efficient expert pruning and skipping for mixture-of-experts large language models. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , 6159–6172. Merity, S.; Xiong, C.; Bradbury, J.; and Socher, R. 2017. Pointer Sentinel Mixture Models. In International Conference on Learning Representations .Qwen Team. 2026. Qwen3.6-35B-A3B Model Card. Hugging Face model card. Rein, D.; Hou, B. L.; Stickland, A. C.; Petty, J.; Pang, R. Y.; Dirani, J.; Michael, J.; and Bowman, S. R. 2023. GPQA: A Graduate-Level Google-Proof Q&A Benchmark. arXiv preprint arXiv:2311.12022 .Shazeer, N.; Mirhoseini, A.; Maziarz, K.; Davis, A.; Le, Q. V.; Hinton, G. E.; and Dean, J. 2017. Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer. 
+
+International Conference on Learning Representations .Vankov, D.; Ivkin, N.; Ulrich, K.; Song, X.; Khetan, A.; and Karypis, G. 2026. XShare: Collaborative in-Batch Expert Sharing for Faster MoE Inference. arXiv preprint arXiv:2602.07265 .Wu, J.; Cheng, J.; Lv, F.; Dan, O.; and Yuan, L. 2026. SERE: Similarity-based Expert Re-routing for Efficient Batch De-coding in MoE Models. arXiv preprint arXiv:2602.07616 .Xie, Y.; Zhang, Z.; Zhou, D.; Xie, C.; Song, Z.; Liu, X.; Wang, Y.; Lin, X.; and Xu, A. 2024. Moe-pruner: Pruning mixture-of-experts large language model using the hints from its router. arXiv preprint arXiv:2410.12013 .Yang, A.; Li, A.; Yang, B.; Zhang, B.; Hui, B.; Zheng, B.; Yu, B.; Gao, C.; Huang, C.; Lv, C.; et al. 2025. Qwen3 Technical Report. arXiv preprint arXiv:2505.09388 .Yoon, S.; and Choi, Y. S. 2026. COMPEL: Compensated Mixture-of-Experts Pruning with Expert-Layer distribution. In Findings of the Association for Computational Linguistics: ACL 2026 , 30408–30423. Zhao, Z.; Guo, L.; Cheng, J.; Gao, X.; Huang, H.; and Liu, J. 2025. Ada-K Routing: Boosting the Efficiency of MoE-based LLMs. In International Conference on Learning Representations , volume 2025, 89619–89635. Appendix Overview 
+
+•
+
+A Appendix 
+
+A.1 Detailed Algorithms of ACE 
+
+This subsection presents the complete algorithmic workflow of ACE. We provide four pseudocode blocks correspond-ing to the overall framework, Global Spectral Proxy (GSP), Router-Conditioned Refinement (RCR), and online conserva-tive expert skipping. All expert-level statistics used by GSP and RCR are computed once before deployment. During inference, ACE only performs expert-indexed table lookup and lightweight scalar operations before selectively executing the retained experts. 
+
+Overall Workflow of ACE Pipeline description. ACE consists of an offline parameter-analysis stage and an online token-adaptive skipping stage. Given a pretrained MoE-based LLM, the offline stage first applies GSP to estimate the global transformation capacity of each expert from its frozen SwiGLU parameters. RCR then constructs expert-specific direction prototypes from the centered router weights and evaluates the corresponding experts along their routing-preferred directions. The resulting GSP and RCR amplification scores are stored as two expert-indexed lookup tables. During inference, ACE combines these offline scores with runtime router gates and skips an expert slot only when both perspectives identify it as low-contribution. The overall workflow is summarized in Algorithm 1. 
+
+Global Spectral Proxy Global structural response estimation. GSP estimates each expert’s intrinsic transformation capacity directly from its frozen parameters. For the l-th MoE layer, let Γl de-note the diagonal matrix formed by the learned RMSNorm scaling vector. For each expert e, GSP constructs two branch-symmetric surrogates that jointly preserve the gate, up, and down projections. Their geometric mean provides the raw global amplification score, which is subsequently normalized by the average score of all experts in the same layer. 
+
+Offline computation. The entire procedure requires neither calibration samples nor input activations. Once the normalized scores AGSP  
+
+> l
+
+(e) have been computed for all experts, they are stored as a static lookup table and reused for every token during inference. The complete procedure is given in Algorithm 2. 
+
+Router-Conditioned Refinement Router-conditioned direction construction. RCR refines the unconditional GSP estimate by measuring each expert along the direction preferred by the pretrained router. For the l-th layer, the router weight associated with expert e
+
+is centered by subtracting the mean router weight over all experts. This removes the shared translation component and preserves the relative routing-discriminative direction. RCR then applies RMS normalization to obtain the expert-specific direction prototype ql,e .
+
+Algorithm 1: ACE: Overall Calibration-Free Expert Skipping Framework 
+
+Input: Pretrained MoE-based LLM M ; target skipping control q; threshold mapping τ (·);minimum number of active experts mmin ;numerical constant ϵ
+
+Output: GSP table AGSP ; RCR table ARCR ; ACE inference procedure cM
+
+// Offline parameter analysis  
+
+> 1
+
+AGSP ← GSP( M, ϵ ); 
+
+> 2
+
+ARCR ← RCR( M, ϵ ); 
+
+> 3
+
+Store AGSP and ARCR as expert-indexed lookup tables; 
+
+// Online token-adaptive inference  
+
+> 4
+
+τq ← τ (q); 
+
+> 5
+
+for each input sequence do  
+
+> 6
+
+for each token t do  
+
+> 7
+
+for each MoE layer l do  
+
+> 8
+
+Obtain the original top-k routed experts and gates {(ei, g l,t,i )}ki=1 ; 
+
+> 9
+
+Il,t , {bgl,t,i }i∈I l,t ←
+
+ACESkip  l, t, {(ei, g l,t,i )}ki=1 , AGSP , ARCR , τ q , m min , ϵ  
+
+> 10
+
+Evaluate only the experts indexed by Il,t ; 
+
+> 11
+
+Aggregate their outputs using 
+
+{bgl,t,i }i∈I l,t ; 
+
+> 12
+
+Construct the resulting inference procedure as cM ;
+
+Directional response evaluation. Each prototype is passed once through its corresponding frozen SwiGLU expert before deployment. The ratio between the expert output norm and prototype input norm defines the raw router-conditioned amplification. As in GSP, the raw responses are normalized within each layer and stored as an expert-indexed lookup table. This offline computation is summarized in Algorithm 3. 
+
+Calibration-free prototype scale. ACE sets ρl = 1 for every MoE layer. This preserves the fully calibration-free setting and prevents the prototype magnitude from encoding unavailable activation statistics. Because each prototype is RMS-normalized, it retains the relative router direction while maintaining a stable input scale. 
+
+Online Conservative Expert Skipping Dual-view contribution estimation. During inference, ACE retains the original top-k candidate set selected by the pretrained router. For each routed expert slot, it combines the current router gate with the offline GSP and RCR amplifi-cation scores. The two resulting score sets are independently normalized within the top-k candidate set, producing pGSP 
+
+> l,t,i
+
+and pRCR  
+
+> l,t,i
+
+.
+
+Conservative skipping rule. ACE defines the final contri-bution score as the maximum of the two normalized proba-bilities. Consequently, an expert slot is selected for skipping Algorithm 2: GSP: Global Spectral Proxy 
+
+Input: Pretrained MoE-based LLM M with L MoE layers; numerical constant ϵ
+
+Output: Global amplification table 
+
+AGSP = {AGSP  
+
+> l
+
+(e)} 
+
+> 1
+
+Initialize AGSP ← ∅; 
+
+> 2
+
+for each MoE layer l = 1 , . . . , L do  
+
+> 3
+
+Extract the RMSNorm scaling vector γl; 
+
+> 4
+
+Γl ← Diag( γl); 
+
+> 5
+
+Let Nl denote the number of experts in layer l; 
+
+> 6
+
+for each expert e = 1 , . . . , N l do  
+
+> 7
+
+Extract W gate  
+
+> l,e
+
+, W up  
+
+> l,e
+
+, and W down  
+
+> l,e
+
+; 
+
+> 8
+
+Gl,e ← ΓlW gate  
+
+> l,e
+
+; 
+
+> 9
+
+Ul,e ← ΓlW up  
+
+> l,e
+
+; 
+
+> 10
+
+aup  
+
+> l,e
+
+← ∥ Ul,e ∥F · Gl,e W down  
+
+> l,e F
+
+; 
+
+> 11
+
+agate  
+
+> l,e
+
+← ∥ Gl,e ∥F · Ul,e W down  
+
+> l,e F
+
+; 
+
+> 12
+
+eaGSP  
+
+> l,e
+
+←
+
+q
+
+aup 
+
+> l,e
+
+agate  
+
+> l,e
+
+; 
+
+> 13
+
+μGSP  
+
+> l
+
+← 1
+
+> Nl
+
+PNl 
+
+> j=1
+
+eaGSP  
+
+> l,j
+
+; 
+
+> 14
+
+for each expert e = 1 , . . . , N l do  
+
+> 15
+
+AGSP  
+
+> l
+
+(e) ← eaGSP   
+
+> l,e
+> μGSP
+> l+ϵ
+
+; 
+
+> 16
+
+Add AGSP  
+
+> l
+
+(e) to AGSP ; 
+
+> 17
+
+return AGSP 
+
+only when both views assign it a contribution below τq . The original top-1 expert is always retained. If the threshold rule would leave fewer than mmin experts active, ACE restores the skipped candidates with the largest contribution scores until the minimum active-expert constraint is satisfied. Finally, the gates of the retained experts are renormalized before expert execution and output aggregation. Algorithm 4 details this online procedure. 
+
+Sparsified MoE output. Let Il,t denote the final active expert-slot set returned by Algorithm 4. The sparsified MoE output is computed as 
+
+yACE  
+
+> l,t
+
+= X
+
+> i∈I l,t
+
+bgl,t,i fl,e i (xl,t ). (20) Because the skipping decision is completed before expert exe-cution, only experts in Il,t require high-dimensional SwiGLU computation. The additional online operations introduced by ACE consist only of expert-indexed table lookup, scalar multiplication, normalization over the original top-k candi-dates, and small-set comparisons. ACE therefore preserves the pretrained router and expert parameters while introduc-ing negligible control overhead relative to expert forward computation. 
+
+A.2 Detailed Proofs 
+
+This subsection provides the theoretical results supporting the design of ACE. We first derive the output-response upper 
+
+Algorithm 3: RCR: Router-Conditioned Refinement 
+
+Input: Pretrained MoE-based LLM M with L MoE layers; numerical constant ϵ
+
+Output: Router-conditioned amplification table 
+
+ARCR = {ARCR  
+
+> l
+
+(e)} 
+
+> 1
+
+Initialize ARCR ← ∅; 
+
+> 2
+
+for each MoE layer l = 1 , . . . , L do  
+
+> 3
+
+Let Nl denote the number of experts in layer l; 
+
+> 4
+
+Let d denote the router input dimension;  
+
+> 5
+
+Extract router weight vectors {wl,e }Nl
+
+> e=1
+
+; 
+
+> 6
+
+wl ← 1
+
+> Nl
+
+PNl 
+
+> j=1
+
+wl,j ; 
+
+> 7
+
+Set the calibration-free prototype scale ρl ← 1; 
+
+> 8
+
+for each expert e = 1 , . . . , N l do  
+
+> 9
+
+ewl,e ← wl,e − wl; 
+
+> 10
+
+rl,e ←
+
+q 1
+
+> d
+
+Pdu=1 ( ewl,e,u )2; 
+
+> 11
+
+ql,e ← ρl ewl,e  
+
+> rl,e +ϵ
+
+; 
+
+> 12
+
+yproto  
+
+> l,e
+
+← fl,e (ql,e ); 
+
+> 13
+
+eaRCR  
+
+> l,e
+
+← ∥yproto  
+
+> l,e
+
+∥2 
+
+> ∥ql,e ∥2+ϵ
+
+; 
+
+> 14
+
+μRCR  
+
+> l
+
+← 1
+
+> Nl
+
+PNl 
+
+> j=1
+
+eaRCR  
+
+> l,j
+
+; 
+
+> 15
+
+for each expert e = 1 , . . . , N l do  
+
+> 16
+
+ARCR  
+
+> l
+
+(e) ← eaRCR   
+
+> l,e
+> μRCR
+> l+ϵ
+
+; 
+
+> 17
+
+Add ARCR  
+
+> l
+
+(e) to ARCR ; 
+
+> 18
+
+return ARCR 
+
+bound of a SwiGLU expert, which motivates the multiplica-tively coupled construction of Global Spectral Proxy (GSP). We then prove the shared-translation invariance of router weights and derive the conditional mean shift induced by exponential tilting under a Gaussian approximation, provid-ing the theoretical basis for Router-Conditioned Refinement (RCR). Finally, we establish the conservativeness of the dual-view skipping criterion and analyze the output perturbation introduced by expert skipping and gate renormalization. 
+
+Output-Response Bound of a SwiGLU Expert We de-rive the output-response bound used to motivate the branch-symmetric construction of GSP. Consider the e-th SwiGLU expert in the l-th MoE layer. After the preceding RMSNorm, its input is represented as x = ¯ xΓl, where ¯x is the RMS-normalized hidden direction and Γl is the diagonal matrix formed by the learned RMSNorm scaling vector. Ignoring bias terms, the expert output is 
+
+fl,e (x) = 
+
+
+
+SiLU 
+
+
+
+¯xΓlW gate 
+
+> l,e
+
+
+
+⊙ ¯xΓlW up 
+
+> l,e
+
+
+
+W down  
+
+> l,e
+
+. (21) For compactness, define 
+
+u = ¯ xΓlW gate  
+
+> l,e
+
+,v = ¯ xΓlW up  
+
+> l,e
+
+. (22) For any scalar z, the SiLU activation satisfies Algorithm 4: ACE: Online Conservative Expert Skip-ping 
+
+Input: Layer index l; token index t; routed experts and gates {(ei, g l,t,i )}ki=1 ; lookup tables AGSP 
+
+and ARCR ; threshold τq ; minimum number of active experts mmin ; numerical constant ϵ
+
+Output: Active expert-slot set Il,t ; renormalized gates {bgl,t,i }i∈I l,t  
+
+> 1
+
+for each routed expert slot i = 1 , . . . , k do  
+
+> 2
+
+sGSP  
+
+> l,t,i
+
+← gl,t,i AGSP  
+
+> l
+
+(ei); 
+
+> 3
+
+sRCR  
+
+> l,t,i
+
+← gl,t,i ARCR  
+
+> l
+
+(ei); 
+
+> 4
+
+ZGSP  
+
+> l,t
+
+← Pkj=1 sGSP  
+
+> l,t,j
+
++ ϵ; 
+
+> 5
+
+ZRCR  
+
+> l,t
+
+← Pkj=1 sRCR  
+
+> l,t,j
+
++ ϵ; 
+
+> 6
+
+for each routed expert slot i = 1 , . . . , k do  
+
+> 7
+
+pGSP  
+
+> l,t,i
+
+← sGSP 
+
+> l,t,i
+> ZGSP
+> l,t
+
+; 
+
+> 8
+
+pRCR  
+
+> l,t,i
+
+← sRCR 
+
+> l,t,i
+> ZRCR
+> l,t
+
+; 
+
+> 9
+
+cACE  
+
+> l,t,i
+
+← max 
+
+
+
+pGSP  
+
+> l,t,i
+
+, p RCR 
+
+> l,t,i
+
+
+
+; 
+
+> 10
+
+SGSP  
+
+> l,t
+
+←
+
+n
+
+i pGSP  
+
+> l,t,i
+
+< τ q
+
+o
+
+; 
+
+> 11
+
+SRCR  
+
+> l,t
+
+←
+
+n
+
+i pRCR  
+
+> l,t,i
+
+< τ q
+
+o
+
+; 
+
+> 12
+
+SACE  
+
+> l,t
+
+← S GSP  
+
+> l,t
+
+∩ S RCR  
+
+> l,t
+
+; 
+
+> 13
+
+itop1 ← arg max i∈{ 1,...,k } gl,t,i ; 
+
+> 14
+
+SACE  
+
+> l,t
+
+← S ACE  
+
+> l,t
+
+\ { itop1 }; 
+
+> 15
+
+Il,t ← { 1, . . . , k } \ S ACE  
+
+> l,t
+
+; 
+
+> 16
+
+if |I l,t | < m min then  
+
+> 17
+
+Sort the indices in SACE  
+
+> l,t
+
+by cACE  
+
+> l,t,i
+
+in descending order;  
+
+> 18
+
+Restore the first mmin − |I l,t | indices to Il,t ; 
+
+> 19
+
+Zgate  
+
+> l,t
+
+← P 
+
+> j∈I l,t
+
+gl,t,j + ϵ; 
+
+> 20
+
+for each retained expert slot i ∈ I l,t do  
+
+> 21
+
+bgl,t,i ← gl,t,i 
+
+> Zgate
+> l,t
+
+; 
+
+> 22
+
+return Il,t , {bgl,t,i }i∈I l,t 
+
+|SiLU( z)| = |zσ (z)| ≤ | z|, (23) because the sigmoid function satisfies 0 < σ (z) < 1.Applying this inequality element-wise gives 
+
+∥SiLU( u)∥2 ≤ ∥ u∥2. (24) For any two vectors a, b ∈ Rm, their Hadamard product satisfies 
+
+∥a ⊙ b∥22 =
+
+> m
+
+X
+
+> j=1
+
+a2 
+
+> j
+
+b2
+
+> j
+
+≤
+
+
+
+> m
+
+X
+
+> j=1
+
+a2
+
+> j
+
+
+
+> m
+
+X
+
+> j=1
+
+b2
+
+> j
+
+
+
+= ∥a∥22∥b∥22,
+
+(25) and therefore 
+
+∥a ⊙ b∥2 ≤ ∥ a∥2∥b∥2. (26) Using the submultiplicativity of the spectral norm, Eq. 21 satisfies 
+
+∥fl,e (x)∥2 ≤ ∥ SiLU( u) ⊙ v∥2 W down  
+
+> l,e 2
+
+≤ ∥ SiLU( u)∥2 ∥v∥2 W down  
+
+> l,e 2
+
+≤ ∥ u∥2∥v∥2 W down   
+
+> l,e 2
+
+.
+
+(27) The two branch responses can be further bounded as 
+
+∥u∥2 = ¯xΓlW gate  
+
+> l,e 2
+
+≤ ∥ ¯x∥2 ΓlW gate  
+
+> l,e 2
+
+,
+
+∥v∥2 = ¯xΓlW up  
+
+> l,e 2
+
+≤ ∥ ¯x∥2 ΓlW up  
+
+> l,e 2
+
+.
+
+(28) Substituting Eq. 28 into Eq. 27 yields 
+
+∥fl,e (x)∥2 ≤ ∥ ¯x∥22 ΓlW gate  
+
+> l,e 2
+
+ΓlW up  
+
+> l,e 2
+
+W down   
+
+> l,e 2
+
+.
+
+(29) This result shows that the potential response of a SwiGLU expert depends jointly and multiplicatively on the gate branch, the up branch, and the down projection. Therefore, a proxy based on only one projection matrix cannot fully capture the structural response capacity of the expert. The branch-symmetric construction of GSP preserves all three com-ponents through two complementary factorizations of this multiplicative dependence. 
+
+Shared-Translation Invariance of Router Weights We prove that softmax routing probabilities are invariant to a shared translation of all router weight vectors. This property motivates centering the router weights before constructing expert-specific directional prototypes. For the l-th MoE layer, let the routing logit of expert e be 
+
+zl,e (x) = x⊤wl,e + bl,e . (30) The corresponding softmax routing probability is 
+
+πl,e (x) = exp ( zl,e (x)) 
+
+PNl 
+
+> j=1
+
+exp ( zl,j (x)) . (31) Consider adding a common vector cl to every router weight vector: w′ 
+
+> l,e
+
+= wl,e + cl, e = 1 , . . . , N l. (32) The translated routing logit becomes 
+
+z′
+
+> l,e
+
+(x) = x⊤w′ 
+
+> l,e
+
++ bl,e 
+
+= x⊤wl,e + x⊤cl + bl,e 
+
+= zl,e (x) + x⊤cl.
+
+(33) Because the additive term x⊤cl is identical for all experts, the resulting routing probability is 
+
+π′
+
+> l,e
+
+(x) = exp  zl,e (x) + x⊤cl
+
+PNl 
+
+> j=1
+
+exp ( zl,j (x) + x⊤cl)= exp  x⊤cl
+
+ exp ( zl,e (x)) exp ( x⊤cl) PNl 
+
+> j=1
+
+exp ( zl,j (x)) = πl,e (x).
+
+(34) Therefore, simultaneously translating all router weights by the same vector does not alter the routing probabilities. The same argument also applies to adding a shared scalar to all router biases. We next show that the centered router representation is invariant to this shared translation. Define the layer-wise mean router weight as 
+
+wl = 1
+
+NlNlX
+
+> j=1
+
+wl,j , (35) and the centered weight of expert e as 
+
+ewl,e = wl,e − wl. (36) After the shared translation in Eq. 32, the layer-wise mean becomes 
+
+w′ 
+
+> l
+
+= 1
+
+NlNlX
+
+> j=1
+
+(wl,j + cl)= wl + cl.
+
+(37) The centered translated weight is therefore 
+
+ew′ 
+
+> l,e
+
+= w′ 
+
+> l,e
+
+− w′
+
+> l
+
+= ( wl,e + cl) − (wl + cl)= wl,e − wl
+
+= ewl,e .
+
+(38) Hence, ewl,e removes the non-identifiable shared compo-nent of the router weights and preserves only the direction that discriminates expert e relative to the other experts in the same layer. This makes the centered router weight a more ap-propriate representation of expert-specific routing preference than the uncentered weight. 
+
+Conditional Mean Shift Under Gaussian Exponential Tilting We derive the conditional mean shift induced by the centered router direction under a Gaussian approximation. This result provides the distributional interpretation of ewl,e 
+
+as an expert-conditioned input direction. Let the hidden-state distribution at the l-th MoE layer be approximated by 
+
+x ∼ N (μxl , Σl) . (39) For compactness, let w = ewl,e , μ = μxl , and Σ = Σ l. The Gaussian density can be written as 
+
+pl(x) = 1(2 π)d/ 2|Σ|1/2 exp 
+
+
+
+− 12 (x − μ)⊤Σ−1(x − μ)
+
+
+
+.
+
+(40) The exponentially tilted distribution induced by w is 
+
+pl,e (x) = exp( w⊤x)pl(x)
+
+Ex∼pl [exp( w⊤x)] . (41) The exponent in the unnormalized density is 
+
+− 12 (x − μ)⊤Σ−1(x − μ) + w⊤x. (42) Expanding the quadratic term gives 
+
+− 12 x⊤Σ−1x + x⊤Σ−1μ − 12 μ⊤Σ−1μ + w⊤x
+
+= − 12 x⊤Σ−1x + x⊤Σ−1 (μ + Σ w) − 12 μ⊤Σ−1μ. 
+
+(43) Completing the square with respect to x yields 
+
+− 12 (x − μ)⊤Σ−1(x − μ) + w⊤x
+
+= − 12 (x − μ − Σw)⊤ Σ−1 (x − μ − Σw)+ w⊤μ + 12 w⊤Σw. 
+
+(44) The last two terms do not depend on x and are absorbed into the normalization constant. In particular, the moment-generating function of the Gaussian distribution gives 
+
+Ex∼pl
+
+exp( w⊤x) = exp 
+
+
+
+w⊤μ + 12 w⊤Σw
+
+
+
+. (45) It follows that the tilted distribution is also Gaussian: 
+
+pl,e (x) = N (μ + Σ w, Σ) . (46) Therefore, its conditional mean satisfies 
+
+Ex∼pl,e [x] = μxl + Σ l ewl,e , (47) and the mean shift relative to the original hidden-state distribution is 
+
+Ex∼pl,e [x] − Ex∼pl [x] = Σ l ewl,e . (48) When the hidden-state covariance is approximately isotropic, i.e., Σl ≈ σ2 
+
+> l
+
+I, this result becomes 
+
+Ex∼pl,e [x] − Ex∼pl [x] ≈ σ2 
+
+> l
+
+ewl,e . (49) Thus, the conditional mean-shift direction is approximately aligned with the centered router weight. RCR consequently uses the RMS-normalized version of ewl,e as a data-free approximation to the characteristic input direction associated with expert e.
+
+Conservativeness and Output Perturbation of Dual-View Skipping We prove that the maximum-based ACE criterion is equivalent to intersecting the low-contribution candidate sets identified by GSP and RCR. We further derive an output-perturbation bound for the resulting expert skipping and gate renormalization. 
+
+Equivalence to candidate-set intersection. For a routed expert slot i, ACE defines 
+
+cACE  
+
+> l,t,i
+
+= max  pGSP  
+
+> l,t,i
+
+, p RCR 
+
+> l,t,i
+
+ . (50) Given a threshold τq = τ (q), the expert slot is initially considered skippable if 
+
+cACE  
+
+> l,t,i
+
+< τ q . (51) For any scalars a, b, and τ , the following equivalence holds: 
+
+max( a, b ) < τ ⇐⇒ a < τ and b < τ. (52) Applying Eq. 52 gives 
+
+cACE  
+
+> l,t,i
+
+< τ q ⇐⇒ pGSP  
+
+> l,t,i
+
+< τ q
+
+and pRCR  
+
+> l,t,i
+
+< τ q . (53) Define the two low-contribution candidate sets as 
+
+SGSP  
+
+> l,t
+
+= i pGSP  
+
+> l,t,i
+
+< τ q ,
+
+SRCR  
+
+> l,t
+
+= i pRCR  
+
+> l,t,i
+
+< τ q . (54) Equation 53 directly implies 
+
+SACE  
+
+> l,t
+
+= SGSP  
+
+> l,t
+
+∩ S RCR  
+
+> l,t
+
+. (55) Consequently, 
+
+SACE  
+
+> l,t
+
+⊆ S GSP  
+
+> l,t
+
+, SACE  
+
+> l,t
+
+⊆ S RCR  
+
+> l,t
+
+. (56) The subsequent top-1 and minimum-active-expert safe-guards can only remove indices from the initial ACE skipping set. Hence, if bSACE  
+
+> l,t
+
+denotes the actual skipping set after these safeguards, then 
+
+bSACE  
+
+> l,t
+
+⊆ S ACE  
+
+> l,t
+
+⊆ S GSP  
+
+> l,t
+
+∩ S RCR  
+
+> l,t
+
+. (57) This proves that ACE is conservative relative to either individual view: an expert regarded as important by GSP or RCR cannot be skipped by the dual-view criterion. 
+
+Skipped router-mass comparison. Assume that the origi-nal top-k gates are nonnegative and normalized such that 
+
+> k
+
+X
+
+> i=1
+
+gl,t,i = 1 . (58) For any skipping set S, define its skipped router mass as 
+
+α(S) = X
+
+> i∈S
+
+gl,t,i . (59) Since the gates are nonnegative and the ACE skipping set is a subset of either single-view set, 
+
+α
+
+ bSACE 
+
+> l,t
+
+
+
+≤ α  SACE 
+
+> l,t
+
+
+
+≤ min α  SGSP 
+
+> l,t
+
+ , α  SRCR 
+
+> l,t
+
+ .
+
+(60) Thus, under the same threshold, the dual-view rule removes no more router probability mass than either individual-view rule. 
+
+Output perturbation after gate renormalization. For readability, omit the layer and token indices and let S and I
+
+denote the skipped and retained expert-slot sets, respectively. Define 
+
+α = X
+
+> i∈S
+
+gi, 1 − α = X
+
+> i∈I
+
+gi. (61) The original MoE output is 
+
+y = X
+
+> i∈I
+
+gifi(x) + X
+
+> i∈S
+
+gifi(x). (62) After skipping and renormalization, the retained gate is 
+
+bgi = gi/(1 − α), and the ACE output becomes 
+
+by = X
+
+> i∈I
+
+gi
+
+1 − α fi(x). (63) For 0 < α < 1, define the gate-weighted mean responses of the retained and skipped experts as 
+
+μI = 11 − α
+
+X
+
+> i∈I
+
+gifi(x),μS = 1
+
+α
+
+X
+
+> i∈S
+
+gifi(x).
+
+(64) The original and sparsified outputs can then be written as 
+
+y = (1 − α)μI + αμ S , by = μI . (65) Their difference is therefore 
+
+y − by = α (μS − μI ) . (66) Taking the Euclidean norm gives 
+
+∥y − by∥2 = α ∥μS − μI ∥2 . (67) This identity shows that the output perturbation is jointly determined by the skipped router mass α and the discrepancy between the average responses of the skipped and retained experts. Suppose that the expert outputs satisfy 
+
+∥fi(x)∥2 ≤ Fmax for all i ∈ { 1, . . . , k }. (68) Because μI and μS are convex combinations of expert outputs, 
+
+∥μI ∥2 ≤ Fmax , ∥μS ∥2 ≤ Fmax . (69) Applying the triangle inequality to Eq. 67 yields 
+
+∥y − by∥2 ≤ 2αF max . (70) For the degenerate case α = 0 , no expert is skipped and the perturbation is exactly zero. The top-1 retention rule guarantees that α < 1, so the gate-renormalized output remains well-defined. Combining Eq. 60 with Eq. 70 shows that the worst-case perturbation bound of ACE is no larger than that induced by either single-view candidate set under the same threshold: 
+
+∥y − byACE ∥2 ≤ 2Fmax α
+
+ bSACE 
+
+> l,t
+
+
+
+≤ 2Fmax min α  SGSP 
+
+> l,t
+
+ , α  SRCR 
+
+> l,t
+
+ .
+
+(71) Therefore, the dual-view intersection, top-1 retention, and minimum-active-expert constraint jointly provide a conser-vative safeguard against excessive output perturbation, while still allowing token-adaptive expert sparsification. 
+
+B Additional Experimental Details 
+
+B.1 Budget-to-Threshold Mapping 
+
+ACE derives both expert-importance estimators exclusively from frozen model parameters. Neither GSP nor RCR uses calibration samples, evaluation inputs, labels, losses, or pa-rameter updates. Deploying a requested execution budget nevertheless requires expressing that budget in the numerical scale of the data-free scores. We perform this separate budget-control step with one unlabeled score-collection pass. Let 
+
+Nall be the number of routed expert slots observed in the pass and Ncand the number remaining after excluding the slots protected by the top-1 and minimum-keep constraints. For a requested global skipping ratio q, the number of skipped slots is 
+
+mq = clip(round( qN all ), 0, N cand ) . (72) If the sorted candidate scores are c(1) ≤ · · · ≤ c(Ncand ),we place τq between c(mq ) and c(mq +1) whenever the two values differ. Tied boundary values are handled by choosing the adjacent representable threshold whose realized count is closest to mq . One collected score distribution therefore yields the complete threshold table for all budgets. This procedure is deliberately separated from expert scoring and does not alter the GSP or RCR lookup tables. Its only role is budget control. After accounting for safeguarded slots and boundary ties, we report the measured fraction of skipped routed slots; hence, the 10–60% operating points in the paper are realized rather than merely requested ratios. Table 8 reports the ACE thresholds obtained independently from every evaluation workload. For a fixed model and real-ized skipping ratio, the thresholds remain tightly clustered across datasets despite their different domains and output for-mats. This consistency shows that the score scale is primarily determined by the pretrained model and the requested execu-tion budget rather than by a specific benchmark. Consequently, a threshold obtained from one unlabeled workload can be reused on another without recomputing GSP or RCR, support-ing cross-dataset deployment of the data-free contribution estimators. 
+
+B.2 Complete Task-Level Results 
+
+Tables 9–26 report every task-level result underlying the budget curves in the main paper. Task metrics and Avg. are accuracies (%); PPL is evaluated on WikiText-2. Within each model and skipping budget, BF16 is an unpruned reference and is excluded from ranking. Boldface marks the best result among all pruning methods for each metric, with ties retained. Tables are ordered by model and then by target expert-skipping ratio from 10% to 60%. Table 8: Cross-workload stability of ACE thresholds. Each cell reports the threshold independently obtained from the corresponding unlabeled evaluation workload at the specified realized skipping ratio. 
+
+Model Workload 10% 20% 30% 40% 50% 60% Qwen3-30B-A3B WikiText-2 0.066076 0.078141 0.088436 0.098972 0.110965 0.125460 ARC-C 0.058638 0.071791 0.082505 0.093486 0.105523 0.121092 ARC-E 0.058372 0.071509 0.082139 0.093135 0.105159 0.120699 PIQA 0.059348 0.073267 0.084159 0.095478 0.106510 0.121876 MATH-500 0.064817 0.077139 0.087528 0.097363 0.108013 0.120972 GPQA-Diamond 0.062387 0.074762 0.085411 0.095339 0.106186 0.120229 HumanEval 0.059915 0.073406 0.084152 0.094608 0.105755 0.119866 LiveCodeBench 0.063674 0.076165 0.086691 0.096949 0.107934 0.121980 Qwen3.6-35B-A3B WikiText-2 0.068089 0.080015 0.089632 0.098947 0.109093 0.121344 ARC-C 0.058495 0.070524 0.080678 0.091051 0.102505 0.116258 ARC-E 0.058061 0.070070 0.080227 0.090632 0.102167 0.116018 PIQA 0.058142 0.071141 0.081325 0.091348 0.102849 0.116473 MATH-500 0.060603 0.073996 0.084784 0.095119 0.105744 0.117395 GPQA-Diamond 0.066227 0.078559 0.088131 0.097670 0.107836 0.119644 HumanEval 0.060916 0.075139 0.086014 0.096280 0.106390 0.117196 LiveCodeBench 0.062504 0.076356 0.086684 0.096633 0.106850 0.118335 Gemma-4-26B-A4B-it WikiText-2 0.051152 0.068149 0.081192 0.093195 0.105726 0.120364 AIME 2025 0.054991 0.070915 0.083559 0.095452 0.108153 0.122674 ARC-C 0.052549 0.069626 0.082656 0.094467 0.107235 0.121681 ARC-E 0.051525 0.068566 0.081766 0.093692 0.106557 0.121260 PIQA 0.054232 0.071812 0.084943 0.096504 0.108424 0.122556 MATH-500 0.056684 0.073440 0.085783 0.097104 0.109174 0.122829 GPQA-Diamond 0.055609 0.072302 0.084753 0.096559 0.108750 0.122434 HumanEval 0.057597 0.073689 0.085818 0.097168 0.109297 0.122688 LiveCodeBench 0.056699 0.073054 0.085367 0.096766 0.108862 0.122271 
+
+Table 9: Qwen3-30B-A3B-Instruct-2507 at 10% expert skip-ping. 
+
+Method PPL ↓ ARC-C ARC-E GPQA HumanEval LiveCodeBench MATH-500 PIQA Avg. BF16 7.52 93.17 94.23 56.57 93.90 55.26 80.00 91.57 80.67 Score 7.70 93.00 94.36 53.03 93.29 52.17 80.00 91.95 79.69 NAEE 7.70 93.33 94.27 57.57 92.94 53.37 80.00 91.22 80.39 
+
+MoDES 7.57 93.10 94.29 55.78 94.10 50.23 79.80 91.20 79.79 DiEP 10.09 90.78 93.98 48.48 86.59 48.72 78.60 88.90 76.58 AIMER 7.55 93.09 94.32 55.97 94.10 53.11 78.60 91.35 80.08 Top-P 7.54 93.23 94.23 55.05 94.11 53.18 79.00 90.86 79.95 SERE 8.77 91.55 93.77 52.22 78.48 50.86 75.40 86.83 75.59 XShare 8.10 91.72 91.11 53.31 82.01 50.40 75.80 89.33 76.24 ExpertSparsity 7.68 92.83 94.32 55.01 92.48 52.37 78.40 91.40 79.54 GSP 7.56 93.19 94.31 55.77 94.33 53.27 78.80 91.29 80.14 RCR 7.59 93.17 94.23 55.05 93.90 53.18 79.60 91.78 80.13 ACE 7.55 93.26 94.40 56.06 94.51 53.27 79.80 91.40 80.39 
+
+Table 10: Qwen3-30B-A3B-Instruct-2507 at 20% expert skipping. 
+
+Method PPL ↓ ARC-C ARC-E GPQA HumanEval LiveCodeBench MATH-500 PIQA Avg. BF16 7.52 93.17 94.23 56.57 93.90 55.26 80.00 91.57 80.67 Score 8.09 93.00 94.23 48.99 91.46 48.18 78.20 90.86 77.85 NAEE 8.07 92.83 94.36 52.02 92.34 52.89 80.00 90.96 79.34 MoDES 7.84 93.19 94.23 54.11 91.48 50.10 78.40 90.10 78.80 DiEP 16.00 87.29 91.41 19.19 60.98 47.39 59.80 84.44 64.36 AIMER 7.65 93.09 94.23 57.10 91.46 54.17 78.80 90.70 79.94 Top-P 7.66 93.13 94.23 56.42 91.64 52.76 78.20 90.42 79.54 SERE 11.00 89.25 92.47 25.83 68.31 47.33 60.80 82.59 66.65 XShare 9.14 73.98 80.12 40.77 70.36 38.67 58.80 80.17 63.27 ExpertSparsity 8.02 93.00 94.28 56.28 90.66 52.39 78.60 90.91 79.45 GSP 7.67 92.77 94.23 56.90 91.76 54.29 78.40 91.21 79.94 RCR 7.83 92.41 94.23 54.04 91.46 50.17 79.40 90.26 78.85 ACE 7.66 93.09 94.23 58.08 92.26 54.50 78.60 91.02 80.25 
+
+Table 11: Qwen3-30B-A3B-Instruct-2507 at 30% expert skipping. 
+
+Method PPL ↓ ARC-C ARC-E GPQA HumanEval LiveCodeBench MATH-500 PIQA Avg. BF16 7.52 93.17 94.23 56.57 93.90 55.26 80.00 91.57 80.67 Score 8.65 92.58 94.28 50.51 92.68 48.01 78.20 89.55 77.97 NAEE 8.68 91.89 94.11 50.00 91.29 47.20 79.00 90.91 77.77 MoDES 8.33 91.19 94.89 51.98 93.01 49.88 75.40 89.60 77.99 DiEP 28.42 78.41 86.78 4.55 47.56 37.86 3.80 70.40 47.05 AIMER 7.82 92.66 94.23 56.09 93.14 51.77 79.00 88.66 79.36 Top-P 7.82 92.43 93.40 54.39 93.11 52.48 79.00 90.10 79.27 SERE 14.27 83.87 91.33 26.44 62.09 40.78 56.20 77.15 62.55 XShare 10.82 26.62 36.83 33.28 60.82 30.78 20.20 22.21 32.96 ExpertSparsity 8.49 92.49 91.71 54.29 92.86 52.77 77.40 88.90 78.63 GSP 7.87 92.01 94.22 56.42 93.39 53.20 78.60 89.28 79.59 RCR 8.31 91.64 94.19 52.02 92.07 49.67 75.40 89.66 77.81 ACE 7.86 92.66 94.36 56.56 93.29 52.66 79.40 89.45 79.77 
+
+Table 12: Qwen3-30B-A3B-Instruct-2507 at 40% expert skipping. 
+
+Method PPL ↓ ARC-C ARC-E GPQA HumanEval LiveCodeBench MATH-500 PIQA Avg. BF16 7.52 93.17 94.23 56.57 93.90 55.26 80.00 91.57 80.67 Score 9.63 89.27 93.64 49.49 83.93 46.92 76.60 87.87 75.39 NAEE 9.82 89.51 93.35 38.89 83.15 37.82 79.00 88.82 72.93 MoDES 9.28 89.17 93.30 48.99 85.95 49.91 76.40 88.48 76.03 DiEP 65.87 54.52 61.11 5.56 0.00 22.17 3.80 44.89 27.44 AIMER 8.24 91.66 93.56 52.17 87.47 48.98 78.20 88.12 77.17 Top-P 8.19 91.47 93.01 52.67 88.49 50.49 78.40 89.61 77.73 SERE 20.81 75.26 84.86 20.17 57.49 38.91 56.40 73.23 58.05 XShare 13.67 20.22 24.41 30.30 58.83 4.81 5.80 13.02 22.48 ExpertSparsity 9.31 91.47 93.52 52.00 86.29 50.10 76.40 87.54 76.76 GSP 8.22 91.88 94.11 53.10 88.93 50.29 78.60 88.14 77.86 RCR 9.19 90.70 93.98 41.92 86.59 49.10 76.80 88.41 75.36 ACE 8.19 92.15 94.07 52.02 90.85 51.37 78.60 88.41 78.21 Table 13: Qwen3-30B-A3B-Instruct-2507 at 50% expert skipping. 
+
+Method PPL ↓ ARC-C ARC-E GPQA HumanEval LiveCodeBench MATH-500 PIQA Avg. BF16 7.52 93.17 94.23 56.57 93.90 55.26 80.00 91.57 80.67 Score 12.03 88.48 91.92 30.30 70.18 37.02 65.00 83.90 66.69 NAEE 12.48 86.43 92.05 26.77 67.68 23.89 73.20 80.75 64.40 MoDES 12.25 86.19 90.47 27.19 60.98 25.79 26.40 79.28 56.61 DiEP 136.92 5.03 5.39 3.54 0.00 5.02 1.80 6.96 3.96 AIMER 8.86 88.99 88.89 52.18 85.23 44.89 74.20 79.43 73.40 Top-P 8.85 90.06 90.56 52.38 85.49 45.74 73.40 81.56 74.17 SERE 46.36 45.39 59.47 20.16 40.81 17.88 32.20 54.41 38.62 XShare 19.63 16.64 20.73 24.88 0.00 0.00 4.20 10.44 10.98 ExpertSparsity 10.98 85.32 91.71 52.18 86.28 44.28 72.20 83.73 73.67 GSP 8.99 89.79 90.92 52.49 87.23 45.89 73.20 79.16 74.10 RCR 11.62 86.26 91.96 18.69 77.44 44.81 65.60 84.33 67.01 ACE 8.85 90.78 89.15 53.54 86.59 46.26 74.60 79.16 74.30 
+
+Table 14: Qwen3-30B-A3B-Instruct-2507 at 60% expert skipping. 
+
+Method PPL ↓ ARC-C ARC-E GPQA HumanEval LiveCodeBench MATH-500 PIQA Avg. BF16 7.52 93.17 94.23 56.57 93.90 55.26 80.00 91.57 80.67 Score 18.76 75.34 81.86 10.10 10.50 5.95 13.20 66.54 37.64 NAEE 19.56 56.25 56.25 17.68 27.44 5.88 60.40 80.21 43.44 MoDES 17.80 68.81 79.96 10.39 10.29 13.82 19.80 70.98 39.15 DiEP 459.88 4.44 6.40 4.04 0.00 0.00 2.60 7.89 3.62 AIMER 10.89 79.82 82.87 25.29 70.29 31.17 57.10 79.64 60.88 Top-P 10.87 79.97 83.21 25.56 74.11 31.27 58.70 80.53 61.91 SERE 178.96 10.48 19.76 4.86 0.00 0.00 3.80 29.83 9.82 XShare 39.22 4.86 10.84 16.32 0.00 0.00 2.20 8.81 6.15 ExpertSparsity 13.39 80.42 83.22 25.18 74.80 32.92 59.40 80.02 62.28 GSP 10.99 79.61 83.98 25.93 74.59 33.59 59.40 80.58 62.53 RCR 17.95 66.81 80.56 1.52 17.68 18.80 23.00 68.82 39.60 ACE 10.86 80.97 85.61 26.77 75.00 32.61 60.20 82.32 63.35 
+
+Table 15: Qwen3.6-35B-A3B at 10% expert skipping. 
+
+Method PPL ↓ ARC-C ARC-E GPQA HumanEval LiveCodeBench MATH-500 PIQA Avg. BF16 7.01 95.14 94.82 47.47 95.12 57.35 84.60 93.69 81.17 Score 7.38 95.31 94.78 45.45 97.56 59.72 84.80 94.02 81.66 
+
+NAEE 7.37 94.97 94.87 45.45 96.95 58.39 84.00 94.23 81.27 MoDES 7.38 95.22 94.39 47.89 95.31 56.21 83.20 93.80 80.86 DiEP 8.83 93.28 94.19 45.48 95.10 52.87 80.20 93.11 79.18 GSP 7.18 95.05 94.82 46.46 96.34 56.30 84.40 94.45 81.12 RCR 7.31 95.31 94.74 48.48 95.12 56.59 82.80 93.74 80.97 ACE 7.16 95.34 94.82 48.48 95.78 56.44 84.60 94.40 81.41 
+
+Table 16: Qwen3.6-35B-A3B at 20% expert skipping. 
+
+Method PPL ↓ ARC-C ARC-E GPQA HumanEval LiveCodeBench MATH-500 PIQA Avg. BF16 7.01 95.14 94.82 47.47 95.12 57.35 84.60 93.69 81.17 Score 7.79 94.71 94.82 46.46 93.90 54.88 85.60 93.20 80.51 NAEE 7.80 94.88 94.99 49.49 96.34 52.89 84.40 93.96 80.99 MoDES 7.41 94.11 94.20 46.66 95.29 56.19 84.60 93.08 80.59 DiEP 12.09 91.22 91.17 42.09 93.67 49.34 79.80 91.11 76.91 GSP 7.38 93.86 94.82 47.98 95.73 51.85 84.80 94.45 80.50 RCR 7.65 94.80 94.78 45.45 95.73 58.39 84.60 93.58 81.05 ACE 7.34 94.88 94.82 47.49 95.73 58.11 84.80 94.40 81.46 
+
+Table 17: Qwen3.6-35B-A3B at 30% expert skipping. 
+
+Method PPL ↓ ARC-C ARC-E GPQA HumanEval LiveCodeBench MATH-500 PIQA Avg. BF16 7.01 95.14 94.82 47.47 95.12 57.35 84.60 93.69 81.17 Score 8.36 95.14 94.78 46.97 89.02 47.20 83.40 92.34 78.41 NAEE 8.40 95.14 94.70 44.44 93.29 47.20 84.40 93.91 79.01 MoDES 7.72 94.77 94.65 44.79 89.80 48.19 84.00 91.11 78.19 DiEP 17.62 88.49 87.48 40.11 89.71 42.88 75.20 85.24 72.73 GSP 7.66 94.97 94.70 46.97 94.51 48.34 83.40 93.31 79.46 RCR 8.17 93.69 94.23 42.42 92.68 51.37 82.00 92.11 78.36 ACE 7.57 94.16 94.70 47.01 94.66 52.00 83.40 93.33 79.89 
+
+Table 18: Qwen3.6-35B-A3B at 40% expert skipping. 
+
+Method PPL ↓ ARC-C ARC-E GPQA HumanEval LiveCodeBench MATH-500 PIQA Avg. BF16 7.01 95.14 94.82 47.47 95.12 57.35 84.60 93.69 81.17 Score 9.21 94.88 94.44 34.34 84.15 39.05 82.00 93.42 74.61 NAEE 9.30 94.62 94.40 38.89 84.15 37.82 81.20 92.82 74.84 MoDES 8.10 94.22 94.12 38.67 89.38 44.28 79.40 90.11 75.74 DiEP 28.45 80.84 82.07 35.75 80.11 32.98 71.20 80.16 66.16 GSP 8.08 95.05 94.61 41.41 95.73 45.21 82.40 93.36 78.25 RCR 8.95 93.94 94.15 37.88 88.41 44.74 78.00 90.32 75.35 ACE 7.88 95.10 94.67 42.56 95.38 47.88 82.60 93.33 78.79 
+
+Table 19: Qwen3.6-35B-A3B at 50% expert skipping. 
+
+Method PPL ↓ ARC-C ARC-E GPQA HumanEval LiveCodeBench MATH-500 PIQA Avg. BF16 7.01 95.14 94.82 47.47 95.12 57.35 84.60 93.69 81.17 Score 10.58 93.77 94.15 30.81 60.98 25.21 75.80 91.46 67.45 NAEE 10.89 94.20 93.98 26.77 67.68 23.89 75.20 90.75 67.50 MoDES 9.42 93.18 92.65 33.01 80.49 34.42 76.00 90.20 71.42 DiEP 45.43 73.87 77.98 20.76 56.91 20.88 68.40 76.11 56.42 GSP 8.87 94.28 94.49 34.34 90.85 39.72 79.60 91.78 75.01 RCR 10.39 91.13 91.88 30.81 71.34 26.16 65.40 88.25 66.42 ACE 8.67 94.49 94.40 35.78 91.22 41.98 79.40 91.69 75.57 
+
+Table 20: Qwen3.6-35B-A3B at 60% expert skipping. 
+
+Method PPL ↓ ARC-C ARC-E GPQA HumanEval LiveCodeBench MATH-500 PIQA Avg. BF16 7.01 95.14 94.82 47.47 95.12 57.35 84.60 93.69 81.17 Score 13.38 89.68 91.04 21.72 29.27 6.26 59.00 85.64 54.66 NAEE 14.17 88.31 91.04 17.68 27.44 5.88 61.40 82.21 53.42 MoDES 10.87 91.87 94.11 28.40 82.29 27.44 70.70 88.45 69.04 DiEP 85.12 70.37 70.11 11.28 0.00 0.00 10.20 63.91 32.27 GSP 10.48 93.86 94.28 30.81 83.54 27.96 73.20 90.15 70.54 RCR 13.48 78.75 84.18 18.18 33.54 4.83 26.80 71.38 45.38 ACE 9.98 93.98 94.30 31.15 84.20 27.23 73.80 90.22 70.70 
+
+Table 21: Gemma-4-26B-A4B-it at 10% expert skipping. 
+
+Method PPL ↓ ARC-C ARC-E GPQA HumanEval LiveCodeBench MATH-500 PIQA Avg. BF16 – 95.82 94.91 51.52 95.73 59.81 86.60 87.05 81.63 Score – 94.11 94.28 52.02 92.68 58.10 85.60 87.32 80.59 NAEE – 94.45 94.40 50.00 93.90 56.21 88.20 87.54 80.67 MoDES – 94.07 93.88 53.29 93.90 57.34 86.20 87.05 80.82 DiEP – 94.10 93.19 50.33 92.45 55.98 84.20 87.05 79.61 GSP – 94.11 93.90 53.48 93.90 57.91 87.40 87.27 81.14 RCR – 94.03 93.98 51.01 94.51 56.55 87.80 87.27 80.74 ACE – 94.87 93.98 53.65 95.12 58.29 88.00 87.21 81.59 
+
+Table 22: Gemma-4-26B-A4B-it at 20% expert skipping. 
+
+Method PPL ↓ ARC-C ARC-E GPQA HumanEval LiveCodeBench MATH-500 PIQA Avg. BF16 – 95.82 94.91 51.52 95.73 59.81 86.60 87.05 81.63 Score – 94.28 94.11 52.02 92.68 55.26 85.60 87.05 80.14 NAEE – 94.45 94.23 54.04 93.90 55.83 85.60 87.05 80.73 MoDES – 93.78 94.02 53.97 93.90 56.27 85.60 86.84 80.63 DiEP – 92.98 92.46 50.98 92.17 53.91 84.00 84.10 78.66 GSP – 94.11 94.15 53.54 95.73 56.94 86.40 87.27 81.16 RCR – 93.26 93.64 52.02 93.90 54.08 85.40 86.56 79.84 ACE – 94.93 94.17 53.35 95.73 57.09 86.80 86.89 81.28 
+
+Table 23: Gemma-4-26B-A4B-it at 30% expert skipping. 
+
+Method PPL ↓ ARC-C ARC-E GPQA HumanEval LiveCodeBench MATH-500 PIQA Avg. BF16 – 95.82 94.91 51.52 95.73 59.81 86.60 87.05 81.63 Score – 94.28 94.15 50.51 90.24 49.19 82.20 86.78 78.19 NAEE – 93.94 93.98 45.96 93.68 50.62 81.40 86.24 77.97 MoDES – 93.77 93.78 48.38 93.44 50.43 83.00 86.17 78.42 DiEP – 90.38 92.06 46.70 90.45 50.38 81.20 80.14 75.90 GSP – 94.54 93.98 52.02 93.34 54.28 82.80 87.00 79.71 RCR – 91.55 93.01 47.98 93.29 52.19 82.20 85.75 78.00 ACE – 94.44 94.11 53.03 93.90 54.77 83.80 87.00 80.15 Table 24: Gemma-4-26B-A4B-it at 40% expert skipping. 
+
+Method PPL ↓ ARC-C ARC-E GPQA HumanEval LiveCodeBench MATH-500 PIQA Avg. BF16 – 95.82 94.91 51.52 95.73 59.81 86.60 87.05 81.63 Score – 92.32 93.73 49.49 87.20 43.13 81.00 85.80 76.10 NAEE – 94.03 93.77 50.51 78.66 42.37 72.40 85.15 73.84 MoDES – 93.45 93.84 49.05 93.05 47.92 81.80 85.78 77.84 DiEP – 88.58 91.39 42.09 88.20 44.84 75.80 74.11 72.14 GSP – 94.45 94.15 51.01 93.90 48.98 81.80 86.29 78.65 RCR – 88.82 91.96 39.90 89.02 48.54 79.60 83.57 77.49 ACE – 94.41 94.44 51.01 95.12 52.80 82.20 86.58 79.51 
+
+Table 25: Gemma-4-26B-A4B-it at 50% expert skipping. 
+
+Method PPL ↓ ARC-C ARC-E GPQA HumanEval LiveCodeBench MATH-500 PIQA Avg. BF16 – 95.82 94.91 51.52 95.73 59.81 86.60 87.05 81.63 Score – 90.78 92.89 39.90 85.98 35.07 70.60 82.75 71.14 NAEE – 92.32 93.60 42.42 76.83 29.95 60.00 82.86 68.28 MoDES – 69.84 59.28 27.89 22.56 0.00 20.80 70.81 38.74 DiEP – 50.76 50.92 20.08 15.98 0.00 10.60 67.47 30.83 GSP – 93.69 94.19 46.97 90.85 41.29 77.40 85.69 75.73 RCR – 84.64 90.07 28.79 82.32 40.11 75.80 80.96 68.96 ACE – 94.11 94.23 50.00 92.07 44.89 78.80 85.69 77.11 
+
+Table 26: Gemma-4-26B-A4B-it at 60% expert skipping. 
+
+Method PPL ↓ ARC-C ARC-E GPQA HumanEval LiveCodeBench MATH-500 PIQA Avg. BF16 – 95.82 94.91 51.52 95.73 59.81 86.60 87.05 81.63 Score – 85.07 90.53 32.83 73.78 26.07 59.40 80.69 64.05 NAEE – 86.18 91.71 34.34 58.54 16.21 36.00 78.56 57.36 MoDES – 50.01 48.18 28.01 6.10 0.00 6.80 48.92 26.86 DiEP – 29.87 38.97 18.92 0.00 0.00 0.00 39.17 18.13 GSP – 90.53 93.35 40.40 87.80 30.98 61.60 82.86 69.65 RCR – 75.68 82.58 28.79 67.07 26.10 65.80 74.21 60.03 ACE – 91.89 93.73 41.38 91.46 33.87 67.60 84.82 72.11
