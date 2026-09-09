@@ -1,0 +1,1052 @@
+Title: ACE: Adapter Consolidation across Experts for Parameter-Efficient Fine-Tuning of MoE LLMs
+
+URL Source: https://arxiv.org/pdf/2609.06072v1
+
+Published Time: Wed, 09 Sep 2026 00:42:28 GMT
+
+Number of Pages: 23
+
+Markdown Content:
+## ACE: Adapter Consolidation across Experts for Parameter-Efficient Fine-Tuning of MoE LLMs 
+
+Ahin Lee, Sehyun Yun, Joonha Park, Taesik Gong 
+
+Ulsan National Institute of Science and Technology (UNIST) Ulsan, Republic of Korea 
+
+{ahin,nawhji,joonhapark,taesik.gong}@unist.ac.kr 
+
+Abstract 
+
+Parameter-efficient fine-tuning (PEFT) of mixture-of-experts (MoE) models commonly attaches a separate low-rank adapter to each expert. This expert-wise design fragments adaptation in three ways: capacity is split across narrow low-rank updates, gradient su-pervision becomes sparse and imbalanced un-der sparse routing, and execution is decom-posed into many small GEMMs. We find that such expert-wise separation is often un-necessary, as subsets of LoRA adapters be-come functionally similar during fine-tuning, revealing redundancy among expert-specific adapters. Based on this redundancy, we pro-pose ACE (Adapter Consolidation across Ex-perts), which groups redundant experts and re-places their expert-specific adapters with group-shared higher-rank LoRA modules under the same PEFT budget. ACE further introduces grouped adapter execution, which consolidates fragmented expert-wise adapter computations into fewer, larger group-level GEMMs. Across evaluations covering 12 datasets and four MoE backbones, ACE achieves the highest observed mean accuracy among the parameter-matched PEFT methods on the three backbones with complete baseline coverage, while providing 
+
+1.31 × to 1.48 × wall-clock training speedup over expert-wise LoRA without increasing peak memory. Our code is available at https: //github.com/UbiquitousAILab/ACE .
+
+1 Introduction 
+
+Mixture-of-Experts (MoE) models scale model ca-pacity by activating only a small subset of experts for each input, allowing them to increase param-eters without a proportional increase in per-token computation (Shazeer et al., 2017; Fedus et al., 2022; Du et al., 2022). This efficiency has made MoE architectures increasingly popular in large language models (Grattafiori et al., 2024; OpenAI et al., 2024; Dai et al., 2024). However, adapt-ing MoE models to downstream tasks remains challenging. Although sparse routing reduces per-token computation, MoE models still contain a very large number of parameters across many ex-perts, making full fine-tuning substantially more expensive and complex than in comparable dense models (Dai et al., 2024; Kim et al., 2021; Am-inabadi et al., 2022). These challenges motivate parameter-efficient fine-tuning (PEFT) methods such as LoRA (Hu et al., 2022). LoRA was originally developed for dense ar-chitectures, where it is commonly applied by at-taching a separate low-rank adapter to each target module. A direct extension to the expert-side mod-ules of MoE models therefore attaches independent adapters to each expert (Hu et al., 2022; Meng et al., 2024). Although natural, this expert-wise design induces fragmentation when combined with sparse routing, along three dimensions: capacity, supervi-sion, and execution. First, under a fixed trainable parameter budget, allocating separate adapters to many experts limits the rank available to each ex-pert. Second, each adapter receives gradients only from tokens routed to its expert, making gradient supervision sparse and imbalanced across experts. Third, adapter execution is decomposed into many small matrix multiplication (GEMM) operations, incurring repeated launch overhead and poor hard-ware utilization. This fragmentation would be unavoidable if each expert required a distinct task-specific adapter. However, we find that expert-specific LoRA adapters are often redundant: within the same MoE layer, they form functionally similar groups during fine-tuning. Based on this observation, we propose ACE (Adapter Consolidation across 
+
+Experts), a PEFT method for MoE models that con-solidates functionally similar expert adapters into group-shared higher-rank LoRA modules. Within each MoE layer, ACE measures adapter similarity on task-relevant inputs, groups similar experts to-gether and replaces each group of expert-specific 1arXiv:2609.06072v1 [cs.LG] 5 Sep 2026 Fragmented Gradient Supervision   
+
+> 𝑊 !𝑊 "
+
+…
+
+ACE (ours)                           
+
+> 𝑊 #𝑊 $3r
+> 𝑊 %
+> ℎ!𝑥 !
+> ℎ!𝑥 !
+> ℎ!𝑥 !ℎ!𝑥 !
+> ℎ!𝑥 !
+> ℎ"𝑥 !ℎ!𝑥 !
+> ℎ!𝑥 !
+> ℎ#𝑥 !ℎ!𝑥 !
+> ℎ!𝑥 !
+> ℎ$𝑥 !
+> …
+> rrrrr
+> ℎ!𝑥 !
+> ℎ!𝑥 !
+> ℎ%𝑥 !Shared-Group Updates
+> 2r
+> 𝑊 !𝑊 "
+
+…
+
+> r
+> MoE Layer
+
+Vanilla LoRA for MoE        
+
+> r
+> 𝑊 $𝑊 %r𝑊 #r
+> Attention & Normalization
+> router
+> ∇!!ℒ0∇!!ℒ∇!!ℒ0
+> Adaptation Capacity (Trainable Parameter Budget)
+> r
+
+…  
+
+> Fragmented Adaptation Capacity
+> Strengthening Adaptation Capacity
+> ∇!!ℒ∇!!ℒ
+> Densifying Update Opportunity Rank Consolidation Execution Fragmentation
+> Grouped Adapter Execution
+> Pooling Fragmented Capacity
+
+Figure 1: Overview of ACE. Left : Standard expert-wise LoRA in MoE uses a separate rank-r adapter for each expert, fragmenting adaptation capacity, yielding sparse updates, and causing many small computations. Right :ACE groups experts with similar adapter-induced representations and replaces their separate adapters with group-shared higher-rank adapters under the same trainable parameter budget. Each shared adapter is updated by all experts in its group and computed once per group, improving capacity, supervision density, and execution efficiency. 
+
+adapters with a shared higher-rank adapter under the same trainable parameter budget. This reallo-cation pools fragmented adaptation capacity and allows each shared adapter to receive gradients whenever any expert in its group is active. For execution, ACE performs grouped adapter execu-tion, which consolidates fragmented expert-wise adapter computations into fewer, larger group-level operations, reducing small-GEMM overhead. Fig-ure 1 provides an overview of ACE and its key components: similarity-based grouping, rank con-solidation, shared updates and grouped adapter ex-ecution. Across evaluations covering 12 datasets and four MoE backbones, ACE consistently improves adap-tation quality and training efficiency under matched parameter budgets. For example, on OLMoE, ACE improves the average accuracy across eight com-monsense benchmarks from 74.11% to 75.61% (+1.50 points) over expert-wise LoRA, while pro-viding 1.31 ×–1.48 × wall-clock training speedups across the evaluated backbones without increasing peak memory. These results indicate that similarity-guided adapter consolidation improves both adap-tation quality and execution efficiency under the same trainable parameter budget. 
+
+2 Related Work 
+
+Parameter-Efficient Fine-Tuning. Parameter-efficient fine-tuning (PEFT) adapts large pretrained models by training only a small set of addi-tional parameters while keeping the backbone frozen (Houlsby et al., 2019; Li and Liang, 2021; Lester et al., 2021; Karimi Mahabadi et al., 2021; Li et al., 2024). Among PEFT methods, low-rank adaptation (LoRA) has become a standard approach because it parameterizes weight updates efficiently without changing the backbone archi-tecture (Hu et al., 2022; Dettmers et al., 2023). Subsequent work improves the use of fixed train-able parameter budgets through rank allocation or alternative low-rank parameterizations (Zhang et al., 2023; Liu et al., 2024; Meng et al., 2024). However, these methods are designed for dense architectures, where each adapted module receives gradients from all inputs. This assumption breaks down in MoE layers, where adapters are distributed across sparsely and unevenly activated experts. Our work addresses this MoE-specific structural mismatch by studying how a fixed LoRA budget should be organized under such routing. 
+
+Fine-Tuning of MoE Models. Mixture-of-Experts (MoE) architectures scale model capacity by activating only a subset of expert networks for each input (Shazeer et al., 2017; Fedus et al., 2022; Du et al., 2022). However, the large number of expert parameters increases the cost of fine-tuning for downstream adaptation. To reduce this cost, prior work has explored selective or routed adap-tation strategies for MoE models, primarily focus-ing on which experts or modules should be tuned. ESFT (Wang et al., 2024) tunes the experts most rel-evant to a target task. PERFT (Liu et al., 2026) pro-poses PERFT-R, which applies MoE-style routing to LoRA adapters for MoE fine-tuning. EPnG (Lee et al., 2026) reallocates LoRA capacity across ex-perts based on routing importance. In contrast, ACE keeps the pretrained experts and router in-tact and addresses expert-wise LoRA fragmenta-tion by consolidating functionally similar adapters into shared group-level modules. 23 Methodology 
+
+3.1 Problem: Fragmentation in MoE LoRA 
+
+We first identify a structural mismatch between expert-wise LoRA and sparse MoE routing. Con-sider an MoE layer with E experts, where the router activates a sparse expert subset R(x) of size 
+
+k ≪ E for an input x. A direct LoRA exten-sion assigns each expert e an independent low-rank update ∆We, yielding an adapted expert weight 
+
+fWe = We + ∆ We, where ∆We = BeAe. Let 
+
+pe(x) denote the router probability assigned to ex-pert e for input x. The resulting layer output is 
+
+y(x) = X
+
+e∈R (x)
+
+pe(x)( Wex + ∆ Wex).
+
+Although simple, this expert-wise design fragments adaptation along three coupled dimensions. 
+
+3.1.1 Capacity Fragmentation 
+
+Under a fixed layer-level adapter budget B, expert-wise LoRA divides parameters across experts. For expert e, a rank-re LoRA adapter contains (din +
+
+dout )re trainable parameters, so the layer-level bud-get is B = PEe=1 (din + dout )re. If this budget is allocated uniformly, each expert receives 
+
+re = B
+
+E(din + dout ) .
+
+Thus, increasing the number of experts linearly re-duces the rank available to each adapter. The bud-get is split into E narrow low-rank updates rather than forming stronger task-specific corrections. 
+
+3.1.2 Gradient Fragmentation 
+
+Sparse routing also fragments gradient supervision. For a training batch X = {xn}Nn=1 , the adapter of expert e receives gradients only from tokens routed to that expert: 
+
+∇∆We L ∝ X
+
+xn∈X 
+
+1[e ∈ R (xn)] pe(xn) ∇y(xn)L x⊤
+
+n .
+
+The indicator 1[e ∈ R (xn)] zeroes out contribu-tions from all non-routed tokens. If routing is bal-anced, each adapter is updated by only a k/E frac-tion of the batch on average. In practice, routing is often imbalanced (Shazeer et al., 2017; Dai et al., 2024), so some adapters receive even fewer up-dates. Expert-wise LoRA therefore splits not only parameters, but also the learning signal, yielding sparse and imbalanced adapter updates. 
+
+3.1.3 Execution Fragmentation 
+
+Finally, expert-wise LoRA fragments execution. Each active adapter requires two small GEMMs, 
+
+he = Aex, ∆Wex = Behe.
+
+Across a batch, these operations are invoked sepa-rately for many active experts and routed token sub-sets. This produces numerous small adapter-side GEMMs rather than fewer large matrix multiplica-tions. Such small GEMMs are inefficient on GPUs because they incur repeated launch overhead and poor utilization (NVIDIA Corporation, 2026). As a result, even a small LoRA budget can introduce non-negligible runtime overhead when replicated across many experts. These three effects arise from a common design choice in expert-wise LoRA, where each expert owns an isolated adapter while each input activates only a small subset of experts. This raises a central question: do expert adapters truly need to remain separate? 
+
+3.2 Motivation: Functional Grouping of Expert LoRA Adapters 
+
+The expert-wise separation described above is often unnecessary in practice. During fine-tuning, LoRA adapters within the same MoE layer frequently form functionally similar groups. Adapters within these groups produce similar adapter-induced rep-resentations on shared task-relevant inputs. We quantify this behavior by computing pairwise sim-ilarity between adapter outputs on a shared probe set; details are given in Section 3.3.                                                                                                                                                   
+
+>       
+>       
+>       
+>                   
+>       
+>       
+>       
+>       
+>       
+>       
+>       
+>       
+>                   
+>       
+>       
+>       
+>             
+>      
+>      
+>      
+>      
+>      
+>      
+>      
+>             
+>             
+>             
+>             
+>                                       
+>             
+>             
+>             
+>             
+>             
+>             
+>             
+>             
+>                                       
+>             
+>             
+>             
+>                          
+>      
+>      
+>      
+>      
+>      
+>      
+>      
+>             
+>             
+>             
+>             
+>                                       
+>             
+>             
+>             
+>             
+>             
+>             
+>             
+>             
+>                                       
+>             
+>             
+>             
+>                          
+>      
+>      
+>      
+>      
+>      
+>      
+>      
+>             
+>             
+>             
+>             
+>                                       
+>             
+>             
+>         
+>          
+>             
+>             
+>             
+>             
+>                                       
+>             
+>             
+>             
+>                          
+>      
+>      
+>      
+>      
+>      
+>      
+>      
+
+Figure 2: Functional similarity among expert LoRA adapters. Each heatmap shows pairwise CKA similarity within one MoE layer, with x- and y-axes denoting expert indices. Values closer to 1 indicate more similar adapter-induced representations. High-similarity blocks reveal groups of experts with similar LoRA corrections. Panels correspond to layers 0, 4, and 14 of the gate projection in OLMoE on HellaSwag. Full details are in Appendix F. 
+
+Figure 2 shows high-similarity blocks, indicat-ing that some adapters learn similar task-specific 3corrections while others remain distinct. This mo-tivates ACE to consolidate functionally similar adapters into shared higher-rank modules instead of preserving many low-rank expert-specific adapters. ACE uses this functional grouping structure to pool fragmented capacity via rank consolidation (Sec-tion 3.3), densify gradient supervision via shared adapter updates (Section 3.4), and reduce small-GEMM fragmentation via grouped adapter execu-tion (Section 3.5). 
+
+3.3 Rank Consolidation 
+
+ACE first identifies functionally similar expert adapters within each MoE layer and consolidates their fragmented ranks under the same trainable pa-rameter budget. After a short warm-up of Tinit 
+
+steps, we collect a probe set of hidden states 
+
+Xprobe = {xn}Nn=1 , where xn ∈ Rdin . The same probe inputs are fed to all expert adapters in the layer, regardless of their original routing decisions, so that similarity reflects adapter behavior rather than routing frequency. For expert e, we form the adapter-induced repre-sentation matrix 
+
+Ze =
+
+
+
+(∆ Wex1)⊤
+
+· · · 
+
+(∆ WexN )⊤
+
+ ∈ RN ×dout .
+
+We mean-center each representation matrix over the probe samples as ¯Ze = HZ e, where H =
+
+IN − 1 
+
+> N
+
+11 ⊤. For experts i and j, we compute their pairwise similarity using linear CKA (Kornblith et al., 2019): 
+
+sij = ∥ ¯Z⊤ 
+
+> i
+
+¯Zj ∥2
+
+> F
+
+∥ ¯Z⊤ 
+
+> i
+
+¯Zi∥F ∥ ¯Z⊤ 
+
+> j
+
+¯Zj ∥F
+
+.
+
+We use CKA because ACE groups adapters by their functional behavior rather than by raw param-eter similarity. CKA is a standard representation-similarity measure (Jiang et al., 2025) and has been used in compression settings to assess represen-tational preservation across model variants (Pons et al., 2024). Its scale invariance is useful for MoE adapters, whose output magnitudes can differ under sparse and imbalanced routing. Using these scores, ACE groups experts with high mutual similarity within each MoE layer. In our experiments, we instantiate this step by con-structing a weighted expert-similarity graph and applying Louvain community detection (Blondel et al., 2008), which avoids manually choosing a fixed similarity threshold and thus reduces sensitiv-ity to layer-wise variation in similarity scale. This yields expert groups {G g}Gg=1 .For each group Gg, ACE replaces the separate expert-specific adapters {∆We}e∈G g with a single group-shared adapter 
+
+∆W share  
+
+> g
+
+= BgAg, rg = X
+
+> e∈G g
+
+re,
+
+where Ag ∈ Rrg ×din and Bg ∈ Rdout ×rg . Each expert e ∈ G g then uses 
+
+fWe = We + ∆ W share  
+
+> g
+
+.
+
+Because experts within the same layer share input and output dimensions, this consolidation preserves the total number of trainable adapter parameters: 
+
+> G
+
+X
+
+> g=1
+
+(dout + din )rg =
+
+> E
+
+X
+
+> e=1
+
+(dout + din )re.
+
+Thus, ACE does not increase the trainable param-eter budget; it reallocates the same fragmented expert-wise ranks into fewer, higher-rank group-level adapters. To reduce discontinuity at the consolidation step, we initialize each shared adapter from a similarity-central anchor within its group and use standard LoRA initialization for the remaining rank dimen-sions; details are provided in Appendix E. 
+
+3.4 Shared Adapter Updates 
+
+Rank consolidation also changes how adapters re-ceive supervision. After consolidation, each routed expert uses the shared adapter of its group. Let g(e)
+
+denote the group assignment of expert e. The MoE output becomes 
+
+y(x) = X
+
+> e∈R (x)
+
+pe(x) Wex + ∆ W share  
+
+> g(e)
+
+x.
+
+Under expert-wise LoRA, the adapter of expert 
+
+e is updated only when e is routed. In ACE, the shared adapter for group g is updated whenever any expert in Gg is routed. This aggregates update op-portunities at the group level, providing denser and more balanced supervision despite sparse routing. 
+
+3.5 Grouped Adapter Execution 
+
+Rank consolidation improves adaptation capac-ity, but its computational benefit depends on how shared adapters are executed. A naïve implemen-tation would share adapter parameters within each 4group while still following the expert-wise LoRA execution pattern, evaluating the same shared adapter separately for each routed expert. ACE avoids this by exploiting a structural prop-erty of MoE layers. For shared-input expert pro-jections, such as gate and up projections, routed experts process the same input activation in parallel. Thus, when multiple routed experts use the same group-shared adapter, the corresponding adapter output can be computed once and reused across those experts. Formally, let R(x) denote the set of experts se-lected by the router for input x, and let A(x) = 
+
+{g(e) | e ∈ R (x)} be the set of active adapter groups. For each active group g ∈ A (x), ACE evaluates 
+
+cg(x) = ∆ W share  
+
+> g
+
+x
+
+once and reuses cg(x) for every routed expert e ∈R(x) satisfying g(e) = g.Since a LoRA update consists of two GEMMs, 
+
+h = Agx and cg(x) = Bgh, this group-level eval-uation replaces repeated expert-wise adapter calls with fewer, larger matrix multiplications. As a result, ACE reduces small-GEMM overhead and adapter-side execution fragmentation. 
+
+4 Experiments 
+
+We evaluate ACE on reasoning and generation tasks using MoE-based language models. Across all experiments, we compare methods under matched trainable parameter budgets and use the same optimization setup and evaluation protocol within each setting. Unless otherwise specified, models are trained with AdamW, weight decay 
+
+0.1. For ACE, we use Tinit = 150 , a probe set of N = 10 ,000 tokens, and Louvain resolu-tion γ = 0 .8. All experiments are conducted on NVIDIA H200 GPUs. Detailed model configura-tions, hyperparameters, and compute infrastructure are provided in Appendix A and Appendix B. 
+
+4.1 Commonsense Reasoning 
+
+We evaluate ACE on eight commonsense reason-ing benchmarks: HellaSwag (HS) (Zellers et al., 2019), WinoGrande (WG) (Sakaguchi et al., 2021), ARC-Challenge (ARC-c) and ARC-Easy (ARC-e) (Clark et al., 2018), BoolQ (Clark et al., 2019), OpenBookQA (OBQA) (Mihaylov et al., 2018), Physical IQA (PIQA) (Bisk et al., 2020), and So-cial IQA (SIQA) (Sap et al., 2019). We report accuracy for all tasks. We conduct experiments on three MoE-based language models: OLMoE-1B-7B (Muennighoff et al., 2025), Qwen1.5-MoE-A2.7B (Qwen, 2024), and Moonlight (Liu et al., 2025). For this setting, models are fine-tuned on Commonsense-170K and evaluated on each bench-mark separately (Hu et al., 2023). We compare ACE with representative PEFT baselines, including LoRA (Hu et al., 2022), AdaLoRA (Zhang et al., 2023), DoRA (Liu et al., 2024), and PiSSA (Meng et al., 2024), as well as two MoE-aware PEFT baselines, PERFT-R (Liu et al., 2026) and EPnG (Lee et al., 2026). For fair comparison, all methods adapt the same expert pro-jections and use comparable trainable parameter budgets within each backbone. Table 1 reports the commonsense reasoning results. Across the evaluated MoE backbones, ACE achieves the best average performance under matched trainable parameter budgets. The gains over dense-Transformer PEFT baselines suggest that methods designed for dense Transformer mod-ules do not fully account for the sparse-routing structure of MoE layers, which can limit how effec-tively their trainable adapter parameters are utilized. These results show that adapter consolidation pro-vides an effective way to use limited adaptation capacity in MoE models. Results on Kimi-Linear-48B-A3B (Team et al., 2025), the largest backbone evaluated, show the same trend; results are in Ap-pendix J. 
+
+4.2 Mathematical Reasoning, Code Generation, and Legal Understanding 
+
+To test whether the gains of ACE extend be-yond commonsense reasoning, we evaluate four domain-specific benchmarks on OLMoE-1B-7B and Qwen1.5-MoE-A2.7B. We fine-tune on Meta-MathQA (Yu et al., 2024) for GSM8K (Cobbe et al., 2021) and MATH (Hendrycks et al., 2021), on CodeFeedback-Filtered-Instruction (Zheng et al., 2024) for HumanEval (Chen et al., 2021), and use CaseHOLD (Zheng et al., 2021) for legal under-standing. Training and evaluation details are in Appendix B.2. Table 3 shows that ACE achieves the best aver-age on both backbones and leads on most individual benchmarks, indicating that adapter consolidation generalizes across specialized domains. 
+
+4.3 Computational and Memory Efficiency 
+
+We evaluate computational efficiency against expert-wise LoRA, the execution pattern directly 5Model Method # Params (%) ↓ HS ↑ WG ↑ ARC-c ↑ ARC-e ↑ BoolQ ↑ OBQA ↑ PIQA ↑ SIQA ↑ Avg. ↑
+
+OLMoE 
+
+(1B/7B) LoRA 0.27 90.82 ±0.23 70.08 ±0.34 69.42 ±1.00 85.61 ±0.09 66.71 ±1.12 74.60 ±0.92 83.10 ±0.22 52.51 ±0.90 74.11 ±0.39 
+
+DoRA 0.33 90.98 ±0.27 70.25 ±0.34 69.46 ±0.31 85.98 ±0.14 66.96 ±0.71 74.93 ±1.21 83.31 ±0.30 52.35 ±0.89 74.28 ±0.23 
+
+AdaLoRA 0.54 → 0.27 90.68 ±0.14 68.14 ±0.25 68.51 ±0.23 84.69 ±0.84 65.52 ±0.39 73.67 ±0.12 83.08 ±0.47 51.31 ±0.61 73.20 ±0.11 
+
+PiSSA 0.27 90.98 ±0.19 70.46 ±0.25 69.96 ±0.44 86.38 ±0.27 68.71 ±0.34 75.27 ±0.50 83.44 ±0.55 52.83 ±0.53 74.75 ±0.16 
+
+PERFT-R 0.27 87.36 ±0.89 71.46 ±2.43 66.38 ±1.13 82.76 ±0.28 64.04 ±4.73 73.87 ±0.23 80.05 ±0.85 51.62 ±0.10 72.19 ±0.49 
+
+EPnG 0.27 90.82 ±0.34 68.95 ±0.55 68.83 ±0.60 85.75 ±0.60 66.96 ±0.52 74.47 ±1.40 83.15 ±0.39 52.27 ±0.21 73.90 ±0.33 
+
+ACE (ours) 0.27 92.24 ±0.03 72.85 ±0.51 70.88 ±0.18 86.21 ±0.34 68.04 ±1.99 77.33 ±1.10 83.93 ±0.14 53.41 ±0.44 75.61 ±0.28 
+
+Qwen 
+
+(3B/14B) LoRA 0.21 93.23 ±0.24 77.66 ±0.21 79.44 ±0.30 90.63 ±0.07 70.84 ±0.39 82.67 ±0.58 86.80 ±0.35 56.72 ±0.30 79.75 ±0.03 
+
+DoRA 0.26 93.25 ±0.25 78.08 ±0.25 79.64 ±0.47 90.71 ±0.12 70.58 ±0.51 82.80 ±1.11 86.73 ±0.20 56.64 ±0.30 79.80 ±0.19 
+
+AdaLoRA 0.42 → 0.21 93.21 ±0.07 74.45 ±0.30 78.89 ±0.13 90.42 ±0.11 69.49 ±1.10 82.07 ±0.50 86.29 ±0.30 55.63 ±0.67 78.81 ±0.22 
+
+PiSSA 0.21 93.28 ±0.18 79.19 ±0.67 78.79 ±0.54 90.69 ±0.44 71.70 ±0.11 83.60 ±0.53 86.58 ±0.22 56.05 ±0.26 79.98 ±0.11 
+
+PERFT-R 0.21 92.02 ±0.32 73.35 ±0.73 78.38 ±0.3 90.95 ±0.19 69.45 ±0.88 80.93 ±0.42 85.95 ±0.36 53.91 ±0.77 78.12 ±0.20 
+
+EPnG 0.21 93.50 ±0.08 76.53 ±0.48 79.78 ±0.39 90.67 ±0.16 69.46 ±1.23 83.40 ±0.20 86.38 ±0.08 56.64 ±0.26 79.54 ±0.09 
+
+ACE (ours) 0.21 93.81 ±0.17 79.19 ±0.56 79.50 ±0.35 90.66 ±0.22 71.49 ±0.47 83.87 ±1.15 86.67 ±0.62 56.99 ±0.55 80.27 ±0.18 
+
+Moonlight 
+
+(3B/16B) LoRA 0.22 92.23 ±0.07 74.59 ±0.72 84.67 ±0.27 94.28 ±0.11 67.17 ±0.94 82.00 ±0.72 86.92 ±0.36 52.47 ±0.92 79.29 ±0.32 
+
+DoRA 0.27 92.15 ±0.14 74.67 ±0.36 84.93 ±0.47 94.35 ±0.18 67.59 ±0.26 82.07 ±0.83 86.98 ±0.55 52.29 ±0.50 79.38 ±0.30 
+
+AdaLoRA 0.43 → 0.22 91.63 ±0.15 72.64 ±0.45 84.96 ±0.10 94.08 ±0.32 67.52 ±0.42 81.16 ±0.32 86.74 ±0.08 51.93 ±0.55 78.83 ±0.18 
+
+PiSSA 0.22 91.38 ±0.12 72.45 ±0.16 84.67 ±0.18 93.93 ±0.15 62.53 ±2.38 80.80 ±0.53 86.83 ±0.17 52.25 ±0.71 78.11 ±0.23 
+
+PERFT-R 0.22 90.9 ±0.13 72.53 ±0.75 84.13 ±0.39 94.05 ±0.13 65.92 ±1.4 81.27 ±0.9 86.71 ±0.39 51.40 ±0.47 78.36 ±0.51 
+
+EPnG 0.22 92.95 ±0.05 77.03 ±0.57 84.78 ±0.44 94.50 ±0.38 67.56 ±0.35 83.53 ±0.64 87.69 ±0.59 52.97 ±0.75 80.13 ±0.24 
+
+ACE (ours) 0.22 93.49 ±0.30 79.95 ±0.34 84.30 ±0.09 94.75 ±0.21 69.31 ±0.82 84.93 ±1.01 87.71 ±0.38 54.93 ±0.26 81.17 ±0.19 
+
+Table 1: Commonsense reasoning results across MoE backbones. Model entries show active/total backbone parameters. The # Params column denotes the percentage of trainable adapter parameters. We report accuracy for each benchmark; the Avg. column reports the mean benchmark accuracy averaged over three runs, with standard deviation across runs. The best result for each model and metric is shown in bold. 
+
+Model Peak Mem. (GB) Train Time (hr) Speed up LoRA ACE LoRA ACE 
+
+OLMoE 98.21 98.18 2.47 1.89 1.31 ×
+
+Qwen 89.90 89.84 6.18 4.19 1.48 ×
+
+Moonlight 48.80 48.80 23.75 16.77 1.42 ×
+
+Kimi 118.22 118.22 87.39 60.41 1.45 ×
+
+Table 2: Training efficiency over three epochs. We compare ACE with expert-wise LoRA under the same batch size and training setup. Speedup is computed as LoRA time divided by ACE time. 
+
+targeted by ACE. All methods are compared un-der the same effective batch size and training setup within each backbone. As shown in Table 2, ACE reduces wall-clock training time across all evalu-ated MoE backbones, with speedups ranging from 1.31 × on OLMoE to 1.48 × on Qwen, 1.42 × on Moonlight, and 1.45 × on Kimi. The improvement comes without additional memory cost: peak mem-ory remains unchanged compared with LoRA. These results indicate that grouped adapter exe-cution effectively reduces the small-GEMM over-head introduced by expert-wise LoRA. Instead of repeatedly evaluating separate adapter compu-tations for each routed expert, ACE evaluates shared adapters at the group level, yielding practi-cal training-time gains while preserving the same trainable parameter budget. Additional runtime and memory results for other PEFT baselines are pro-vided in Appendix N, and a per-stage breakdown of the consolidation pipeline in Appendix O. 
+
+5 Further Analysis 
+
+5.1 Does ACE Mitigate MoE LoRA Fragmentations? 
+
+We evaluate whether ACE mitigates the three frag-mentations from Section 3.1 using effective rank (capacity), gradient statistics (supervision), and CUDA profiling (execution). 
+
+Capacity fragmentation. We measure the effec-tive rank of each learned adapter update ∆W =
+
+BA , computed as the exponential of the entropy of its normalized singular values (Roy and Vetterli, 2007). This metric captures how much of the nom-inal low-rank capacity is effectively used by the learned update. Figure 3 compares the effective-rank distribu-tions of LoRA-r=2 , LoRA-r=64 , and ACE with base rank r=2 . LoRA-r=2 is strongly bottle-necked (mean effective rank 1.77), whereas LoRA-
+
+r=64 shifts the distribution to a mean of 46.8 at the cost of roughly 32 × more trainable parameters. Under the same budget as LoRA-r=2 , ACE shifts the distribution close to LoRA-r=64 , indicating that pooling expert-wise low-rank budgets recov-ers effective adaptation capacity without increasing 6OLMoE Qwen Method # Params (%) ↓ GSM8K ↑ MATH ↑ HEval ↑ CHold ↑ Avg. ↑ # Params (%) ↓ GSM8K ↑ MATH ↑ HEval ↑ CHold ↑ Avg. ↑                                                            
+
+> LoRA 1.08 65.73 25.95 30.49 78.53 50.18 0.86 66.34 36.31 77.44 72.11 63.05 AdaLoRA 2.16 →1.08 65.20 24.68 26.22 75.65 47.94 1.72 →0.86 66.64 38.33 79.27 69.06 63.33 DoRA 1.14 66.11 25.78 28.05 78.64 49.65 0.91 67.10 37.41 77.44 72.26 63.55 PiSSA 1.08 65.88 24.68 32.32 79.83 50.68 0.86 66.19 39.34 75.61 74.93 64.02
+> ACE (ours) 1.08 66.49 26.96 31.10 82.57 51.78 0.86 67.48 37.49 79.27 75.24 64.87
+
+Table 3: Results on mathematical reasoning, code generation, and legal understanding across MoE backbones. We report accuracy for GSM8K, MATH, and CaseHOLD (CHold), and pass@10 for HumanEval (HEval). The Avg. reports the mean across the four benchmarks. The best result for each model and metric is shown in bold. 0 10 20 30 40 50 60 
+
+> Effective rank
+> 0.00 0.05 0.10 0.15 0.20
+> Density
+> Effective rank distribution
+> LoRA (rank=64, params=603M) LoRA (rank=2, params=18M) ACE (rank=2, params=18M)
+
+Figure 3: Distribution of effective ranks for LoRA-
+
+r=2 , LoRA-r=64 , and ACE. The parameter counts denote the total number of trainable parameters for each method. OLMoE Qwen Moonlight   
+
+> 0.0 0.5 1.0 1.5 2.0
+> CV OLMoE Qwen Moonlight
+> 0.0 0.5 1.0 1.5 2.0 2.5 3.0
+> Zero-grad ratio (%)
+> LoRA ACE
+
+Figure 4: Gradient-supervision fragmentation for up-projection LoRA adapters across three MoE backbones. ACE reduces both gradient-norm imbalance and the zero-gradient ratio relative to expert-wise LoRA. 
+
+trainable parameters. 
+
+Gradient-supervision fragmentation. Under sparse routing, each expert-wise LoRA receives gradients only when its expert is selected, pro-ducing uneven and often near-zero updates. To quantify this, we measure two statistics over per-expert gradient norms within each MoE layer: (i) the coefficient of variation (CV), capturing imbal-ance across experts, and (ii) the fraction of adapter rows with entirely zero gradients, capturing the prevalence of unsupervised parameters. Both are averaged over 50 training steps. Additional mea-surement details and gate-projection results are pro-vided in Appendix M. Figure 4 shows that ACE consistently reduces both metrics across Qwen, OLMoE, and Moonlight backbones. For instance, 
+
+Metric LoRA ACE 
+
+Matrix multiplication calls 106.0K 62.2K ( −41 .3% )Matrix multiplication CUDA time 838ms 558ms ( −33 .4% )CUDA kernel events 482.9K 389.0K ( −19 .4% )CUDA kernel time 10.36s 8.14s ( −21 .4% )Wall-clock time 20.24s 17.68s ( −12 .6% )
+
+Table 4: CUDA profiling prefill using torch.profiler .Matrix multiplication rows correspond to PyTorch 
+
+aten::mm operations in the profiled region. Kernel-level rows include all CUDA operations in the same region. Values in parentheses indicate the relative reduc-tion compared with LoRA. 
+
+on OLMoE up_proj , ACE reduces the CV from 1.449 to 0.531 and the zero-gradient ratio from 3.18% to 1.17%. These results indicate that shared-group updates densify supervision by updating each consolidated adapter whenever any expert in its group is routed. 
+
+Execution fragmentation. For execution frag-mentation, we examine whether grouping adapters reduces the many small matrix multiplications in-duced by expert-wise LoRA. We profile prefill on Qwen1.5-MoE-A2.7B, measure matrix multiplica-tion calls, their CUDA execution time, and overall CUDA kernel activity. Table 4 shows that ACE consistently reduces these profiler-level indicators, including matrix multiplication calls, CUDA kernel events, and CUDA execution time. The reduction also translates into lower wall-clock prefill time, although the wall-clock gain is smaller because the profiled region includes non-adapter computa-tion, CPU-side overhead, and framework overhead. These results indicate that ACE reduces execution fragmentation in practice. 
+
+5.2 CKA Similarity Reflects Functional Redundancy 
+
+ACE groups experts whose adapter representations are similar under CKA. To justify this criterion, we test whether high-CKA similarity implies that 70.05 0.1 0.15 0.2 Selection ratio 0.00 0.01 0.02 0.03 
+
+> Δ Mean NLL  High Similarity Swap Low Similarity Swap Random Swap
+
+Figure 5: Adapter swapping analysis. Swapping high-CKA adapters causes much smaller NLL degradation than swapping low-CKA or random adapters, indicating that CKA similarity reflects functional interchangeabil-ity. 
+
+two adapters make similar task-specific corrections. We use adapter swapping as a direct test: if two adapters are functionally redundant, replacing one with the other without retraining should cause only a small change in model behavior. For each MoE layer, we choose an anchor gate-projection adapter, rank the remaining adapters by CKA similarity, and replace either the top-ρ,bottom-ρ, or random-ρ fraction with the anchor, where ρ ∈ { 0.05 , 0.10 , 0.15 , 0.20 }. We then mea-sure the change in negative log-likelihood, ∆NLL ,without retraining. Figure 5 shows that high-similarity swaps cause substantially smaller NLL degradation than low-similarity or random swaps across selection ratios. This indicates that CKA similarity captures func-tional interchangeability, meaning that CKA-based grouping can consolidate adapters while minimiz-ing behavioral disruption. Up-projection results are provided in Appendix I.1. We further observe positive CKA gaps across all four evaluated backbones on commonsense reason-ing (0.298–0.438), as well as across mathematical reasoning, code generation, and legal understand-ing on OLMoE and Qwen. This indicates that the groupable functional structure exploited by ACE generalizes across both model architectures and task domains. Details are provided in Appendix I.2. 
+
+5.3 Ablation Study 
+
+Table 5 ablates the main components of ACE on OLMoE. Full Merge performs worse than LoRA, showing that excessive consolidation can remove useful expert specialization, while Ran-dom Group removes the CKA-based alignment used by ACE. Among the variants that preserve the trainable-parameter budget, Full Merge has the lowest peak memory (97.61 GB) since grouped execution caches one activation per group, con-                                            
+
+> Method Sim. Group Rank Cons. Grp. Exec. Avg. ↑Time ↓Mem. ↓
+> LoRA ×××74.11 2.47 98.21
+> w/o Sim. Group
+> Random ×✓✓74.72 (−0.89) 1.89 98.18 Full Merge ×✓✓73.57 (−2.04) 2.03 (+0 .14) 97.61 w/o Rank Cons. ✓×✓72.63 (−2.98) 1.84 96.54 w/o Grp. Exec. ✓✓×75.61 2.83 (+0 .94) 98.18
+> ACE ✓✓✓75.61 1.89 98.18
+
+Table 5: Component ablation of ACE. Sim. Group 
+
+denotes CKA-based functional grouping; Rank cons. 
+
+pools per-expert ranks into a higher-rank group adapter; 
+
+Grp. exec. evaluates each shared adapter once per active group. Under w/o Sim. Group , Random groups experts randomly, and Full Merge consolidates all experts into one group. Time in hours, memory in GB.                            
+
+> OLMoE Qwen Adaptation Scope # Params Avg. ↑# Params Avg. ↑
+> Attention only (Q, K, V) 0.36 71 .46 ±0.20 0.26 79 .72 ±0.20
+> MoE only (LoRA) 0.27 74 .11 ±0.39 0.21 79 .75 ±0.03
+> MoE only (ACE) 0.27 75 .61 ±0.28 0.21 80 .27 ±0.18
+> Attn + MoE (LoRA) 0.63 75 .12 ±0.38 0.47 80 .46 ±0.13
+> Attn + MoE (ACE) 0.63 75 .99 ±0.16 0.47 80 .59 ±0.12
+
+Table 6: Effect of adaptation scope on OLMoE and Qwen, averaged over eight commonsense reasoning benchmarks and three runs. The # Params columns report the percentage of trainable parameters. 
+
+firming that consolidation reduces activation mem-ory alongside compute. No Rank Cons. isolates the effect of sharing without pooling expert-wise ranks. No Grp. Exec. keeps the same consolidated adapters as ACE but disables grouped execution; accuracy is unchanged, while runtime increases from 1.89 to 2.83 hours. These results show that the components play distinct roles: similarity grouping selects which adapters to consolidate, rank consolidation in-creases effective capacity, and grouped execution provides the runtime gain. 
+
+5.4 Expert Adaptation Is a Primary Target in MoE PEFT 
+
+Finally, we examine whether expert-side adaptation is necessary, or whether one can avoid expert-wise fragmentation by adapting only attention modules. To this end, Table 6 compares attention-only, MoE-only, and combined attention-plus-MoE adaptation on OLMoE and Qwen. Across both backbones, MoE-side adaptation provides a stronger performance–parameter trade-off than attention-only adaptation. In particular, MoE-only ACE outperforms attention-only adap-8tation while using fewer trainable parameters on both OLMoE and Qwen. This trend is consistent with recent findings that MLP-side adaptation can be more effective than attention-side adaptation in Transformer fine-tuning (Hayou et al., 2026; Ward et al., 2025). When attention and MoE adapters are trained to-gether, ACE again improves over the LoRA coun-terpart. This suggests that adapter consolidation is complementary to attention-side adaptation rather than merely replacing it. Overall, these results sup-port our focus on expert-side LoRA fragmentation as a central issue in MoE PEFT. 
+
+6 Conclusion 
+
+We introduced ACE, a PEFT method that addresses the three fragmentations of expert-wise LoRA in MoE models: capacity, gradient supervision, and execution. By consolidating functionally aligned expert adapters into group-shared higher-rank mod-ules with grouped execution, ACE achieves a stronger quality-efficiency trade-off than parameter-matched PEFT baselines across multiple MoE backbones and benchmarks. More broadly, our re-sults suggest that sharing adaptation across experts can be beneficial compared with maintaining fully separate expert-wise adapters in MoE fine-tuning. 
+
+Limitations 
+
+Our work focuses on improving the efficiency of PEFT for MoE models. While the method itself does not introduce new model capabilities, it facil-itates more efficient adaptation of large language models to downstream tasks. Two limitations are worth noting. First, grouped adapter execution re-quires routed experts to share the same per-expert input, so it applies to up and gate projections but not to the down projection. Extending the consoli-dation pipeline to such components is not straight-forward and remains for future work. Second, ACE assumes that expert adapters contain functional re-dundancy. When a task demands strong expert specialization, excessive consolidation can erase useful distinctions, as shown by the Full Merge ablation in Table 5, which underperforms expert-wise LoRA (73.57 vs. 74.11). ACE addresses this through similarity-guided grouping rather than uni-form merging, but the appropriate grouping gran-ularity (e.g., the resolution parameter γ) may still need tuning when expert specialization is critical. 
+
+Acknowledgments 
+
+This work was supported by grants from the In-stitute for Information & Communications Tech-nology Planning & Evaluation (IITP), funded by the Korea government (MSIT): the Artificial Intelli-gence Graduate School Support program (RS-2020-II201336, UNIST), the AI Star Fellowship Program (RS-2025-25442824, Ulsan National Institute of Science and Technology), and the Leading Genera-tive AI Human Resources Development program (IITP-2026-RS-2024-00360227). This work was also supported by the National Research Founda-tion of Korea (NRF) grant funded by the Korea government (MSIT) (RS-2025-00553241). In addi-tion, this research was supported by the “Advanced GPU Utilization Support Program” funded by the Government of the Republic of Korea (Ministry of Science and ICT). We also thank the UAI Lab members, especially Jeonghoon, for their valuable feedback and support in improving the overall quality of this paper. 
+
+References        
+
+> Reza Yazdani Aminabadi, Samyam Rajbhandari, Am-mar Ahmad Awan, Cheng Li, Du Li, Elton Zheng, Olatunji Ruwase, Shaden Smith, Minjia Zhang, Jeff Rasley, and Yuxiong He. 2022. Deepspeed-inference: enabling efficient inference of transformer models at unprecedented scale. In Proceedings of the Interna-tional Conference on High Performance Computing, Networking, Storage and Analysis , SC ’22. IEEE Press. Yonatan Bisk, Rowan Zellers, Ronan Le Bras, Jianfeng Gao, and Yejin Choi. 2020. Piqa: Reasoning about physical commonsense in natural language. In Thirty-Fourth AAAI Conference on Artificial Intelligence .Vincent D Blondel, Jean-Loup Guillaume, Renaud Lambiotte, and Etienne Lefebvre. 2008. Fast un-folding of communities in large networks. Jour-nal of statistical mechanics: theory and experiment ,2008(10):P10008. Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, Alex Ray, Raul Puri, Gretchen Krueger, Michael Petrov, Heidy Khlaaf, Girish Sastry, Pamela Mishkin, Brooke Chan, Scott Gray, and 39 others. 2021. Evaluating large language models trained on code. Preprint , arXiv:2107.03374. Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and Kristina Toutanova. 2019. BoolQ: Exploring the surprising difficulty of natural yes/no questions. In Proceedings
+
+9of the 2019 Conference of the North American Chap-ter of the Association for Computational Linguistics: Human Language Technologies, Volume 1 (Long and Short Papers) , pages 2924–2936, Minneapolis, Min-nesota. Association for Computational Linguistics. Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. 2018. Think you have solved question answering? try arc, the ai2 reasoning challenge. 
+
+arXiv:1803.05457v1 .Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. 2021. Training verifiers to solve math word prob-lems. arXiv preprint arXiv:2110.14168 .Damai Dai, Chengqi Deng, Chenggang Zhao, R.X. Xu, Huazuo Gao, Deli Chen, Jiashi Li, Wangding Zeng, Xingkai Yu, Y. Wu, Zhenda Xie, Y.K. Li, Panpan Huang, Fuli Luo, Chong Ruan, Zhifang Sui, and Wen-feng Liang. 2024. DeepSeekMoE: Towards ultimate expert specialization in mixture-of-experts language models. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Vol-ume 1: Long Papers) , pages 1280–1297, Bangkok, Thailand. Association for Computational Linguistics. Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke Zettlemoyer. 2023. Qlora: Efficient finetuning of quantized llms. In Advances in Neural Information Processing Systems , volume 36, pages 10088–10115. Curran Associates, Inc. Nan Du, Yanping Huang, Andrew M Dai, Simon Tong, Dmitry Lepikhin, Yuanzhong Xu, Maxim Krikun, Yanqi Zhou, Adams Wei Yu, Orhan Firat, Barret Zoph, Liam Fedus, Maarten P Bosma, Zongwei Zhou, Tao Wang, Emma Wang, Kellie Webster, Marie Pel-lat, Kevin Robinson, and 8 others. 2022. GLaM: Efficient scaling of language models with mixture-of-experts. In Proceedings of the 39th International Conference on Machine Learning , volume 162 of 
+
+Proceedings of Machine Learning Research , pages 5547–5569. PMLR. William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23(120):1–39. Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schel-ten, Alex Vaughan, Amy Yang, Angela Fan, Anirudh Goyal, Anthony Hartshorn, Aobo Yang, Archi Mi-tra, Archie Sravankumar, Artem Korenev, Arthur Hinsvark, and 542 others. 2024. The llama 3 herd of models. Preprint , arXiv:2407.21783. Soufiane Hayou, Nikhil Ghosh, and Bin Yu. 2026. PLop: Precise loRA placement for efficient finetun-ing of large models. In The Fourteenth International Conference on Learning Representations .Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. 2021. Measuring mathematical problem solving with the math dataset. NeurIPS .Neil Houlsby, Andrei Giurgiu, Stanislaw Jastrzebski, Bruna Morrone, Quentin De Laroussilhe, Andrea Gesmundo, Mona Attariyan, and Sylvain Gelly. 2019. Parameter-efficient transfer learning for nlp. In In-ternational conference on machine learning , pages 2790–2799. PMLR. Edward J Hu, yelong shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen. 2022. LoRA: Low-rank adaptation of large language models. In International Conference on Learning Representations .Zhiqiang Hu, Lei Wang, Yihuai Lan, Wanyu Xu, Ee-Peng Lim, Lidong Bing, Xing Xu, Soujanya Poria, and Roy Lee. 2023. LLM-adapters: An adapter fam-ily for parameter-efficient fine-tuning of large lan-guage models. In Proceedings of the 2023 Confer-ence on Empirical Methods in Natural Language Pro-cessing , pages 5254–5276, Singapore. Association for Computational Linguistics. Jiachen Jiang, Jinxin Zhou, and Zhihui Zhu. 2025. Trac-ing representation progression: Analyzing and en-hancing layer-wise similarity. In International Con-ference on Learning Representations , volume 2025, pages 1118–1143. Rabeeh Karimi Mahabadi, Sebastian Ruder, Mostafa Dehghani, and James Henderson. 2021. Parameter-efficient multi-task fine-tuning for transformers via shared hypernetworks. In Proceedings of the 59th Annual Meeting of the Association for Computational Linguistics and the 11th International Joint Confer-ence on Natural Language Processing (Volume 1: Long Papers) , pages 565–576, Online. Association for Computational Linguistics. Young Jin Kim, Ammar Ahmad Awan, Alexandre Muzio, Andres Felipe Cruz Salinas, Liyang Lu, Amr Hendy, Samyam Rajbhandari, Yuxiong He, and Hany Hassan Awadalla. 2021. Scalable and effi-cient moe training for multitask multilingual models. 
+
+arXiv preprint arXiv:2109.10465 .Simon Kornblith, Mohammad Norouzi, Honglak Lee, and Geoffrey Hinton. 2019. Similarity of neural network representations revisited. In International conference on machine learning , pages 3519–3529. PMLR. Ahin Lee, Sehyun Yun, and Taesik Gong. 2026. Epng: Adaptive expert prune-and-grow for parameter-efficient moe fine-tuning. In Proceedings of the 24th Annual International Conference on Mobile Systems, Applications and Services Workshops , pages 93–98. Brian Lester, Rami Al-Rfou, and Noah Constant. 2021. The power of scale for parameter-efficient prompt tuning. In Proceedings of the 2021 Conference on Empirical Methods in Natural Language Processing ,
+
+10 pages 3045–3059, Online and Punta Cana, Domini-can Republic. Association for Computational Lin-guistics. Dengchun Li, Yingzi Ma, Naizheng Wang, Zhengmao Ye, Zhiyuan Cheng, Yinghao Tang, Yan Zhang, Lei Duan, Jie Zuo, Cal Yang, and Mingjie Tang. 2024. Mixlora: Enhancing large language models fine-tuning with lora-based mixture of experts. Preprint ,arXiv:2404.15159. Xiang Lisa Li and Percy Liang. 2021. Prefix-tuning: Optimizing continuous prompts for generation. In 
+
+Proceedings of the 59th Annual Meeting of the Asso-ciation for Computational Linguistics and the 11th International Joint Conference on Natural Language Processing (Volume 1: Long Papers) , pages 4582– 4597, Online. Association for Computational Lin-guistics. Jingyuan Liu, Jianlin Su, Xingcheng Yao, Zhejun Jiang, Guokun Lai, Yulun Du, Yidao Qin, Weixin Xu, En-zhe Lu, Junjie Yan, Yanru Chen, Huabin Zheng, Yibo Liu, Shaowei Liu, Bohong Yin, Weiran He, Han Zhu, Yuzhi Wang, Jianzhou Wang, and 9 others. 2025. Muon is scalable for llm training. Preprint ,arXiv:2502.16982. Shih-Yang Liu, Chien-Yi Wang, Hongxu Yin, Pavlo Molchanov, Yu-Chiang Frank Wang, Kwang-Ting Cheng, and Min-Hung Chen. 2024. Dora: Weight-decomposed low-rank adaptation. In Forty-first In-ternational Conference on Machine Learning .Yilun Liu, Yunpu Ma, Yuetian Lu, Shuo Chen, Zifeng Ding, and Volker Tresp. 2026. Parameter-efficient routed fine-tuning: Mixture-of-experts demands mix-ture of adaptation modules. In Findings of the Asso-ciation for Computational Linguistics: EACL 2026 ,pages 4439–4457, Rabat, Morocco. Association for Computational Linguistics. Fanxu Meng, Zhaohui Wang, and Muhan Zhang. 2024. Pissa: Principal singular values and singular vectors adaptation of large language models. Advances in Neural Information Processing Systems , 37:121038– 121072. Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal. 2018. Can a suit of armor conduct elec-tricity? a new dataset for open book question an-swering. In Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing ,pages 2381–2391, Brussels, Belgium. Association for Computational Linguistics. Niklas Muennighoff, Luca Soldaini, Dirk Groeneveld, Kyle Lo, Jacob Morrison, Sewon Min, Weijia Shi, Evan Pete Walsh, Oyvind Tafjord, Nathan Lam-bert, Yuling Gu, Shane Arora, Akshita Bhagia, Dustin Schwenk, David Wadden, Alexander Wet-tig, Binyuan Hui, Tim Dettmers, Douwe Kiela, and 5 others. 2025. OLMoe: Open mixture-of-experts language models. In The Thirteenth International Conference on Learning Representations .Shashi Narayan, Shay B. Cohen, and Mirella Lapata. 2018. Don’t give me the details, just the summary! topic-aware convolutional neural networks for ex-treme summarization. In Proceedings of the 2018 Conference on Empirical Methods in Natural Lan-guage Processing , pages 1797–1807, Brussels, Bel-gium. Association for Computational Linguistics. NVIDIA Corporation. 2026. cuBLAS Library Docu-mentation . NVIDIA Corporation. cuBLAS 13.2 documentation. Accessed: 2026-05-19. OpenAI, Josh Achiam, Steven Adler, Sandhini Agarwal, Lama Ahmad, Ilge Akkaya, Florencia Leoni Ale-man, Diogo Almeida, Janko Altenschmidt, Sam Alt-man, Shyamal Anadkat, Red Avila, Igor Babuschkin, Suchir Balaji, Valerie Balcom, Paul Baltescu, Haim-ing Bao, Mohammad Bavarian, Jeff Belgum, and 262 others. 2024. Gpt-4 technical report. Preprint ,arXiv:2303.08774. Ian Pons, Bruno Yamamoto, Anna H Reali Costa, and Artur Jordao. 2024. Effective layer pruning through similarity metric perspective. In Interna-tional Conference on Pattern Recognition , pages 423– 438. Springer. Qwen. 2024. Qwen1.5-moe: Matching 7b model per-formance with 1/3 activated parameters. https:// qwenlm.github.io/blog/qwen-moe/ . Accessed: 2025-09-23. Olivier Roy and Martin Vetterli. 2007. The effective rank: A measure of effective dimensionality. In 2007 15th European signal processing conference , pages 606–610. IEEE. Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavat-ula, and Yejin Choi. 2021. Winogrande: an adver-sarial winograd schema challenge at scale. Commun. ACM , 64(9):99–106. Maarten Sap, Hannah Rashkin, Derek Chen, Ronan Le Bras, and Yejin Choi. 2019. Social IQa: Com-monsense reasoning about social interactions. In 
+
+Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Lan-guage Processing (EMNLP-IJCNLP) , pages 4463– 4473, Hong Kong, China. Association for Computa-tional Linguistics. Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. 2017. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. In Inter-national Conference on Learning Representations .Kimi Team, Yu Zhang, Zongyu Lin, Xingcheng Yao, Jiaxi Hu, Fanqing Meng, Chengyin Liu, Xin Men, Songlin Yang, Zhiyuan Li, Wentao Li, Enzhe Lu, Weizhou Liu, Yanru Chen, Weixin Xu, Longhui Yu, Yejie Wang, Yu Fan, Longguang Zhong, and 41 oth-ers. 2025. Kimi linear: An expressive, efficient atten-tion architecture. Preprint , arXiv:2510.26692. 
+
+11 Zihan Wang, Deli Chen, Damai Dai, Runxin Xu, Zhu-oshu Li, and Yu Wu. 2024. Let the expert stick to his last: Expert-specialized fine-tuning for sparse ar-chitectural large language models. In Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing , pages 784–801, Mi-ami, Florida, USA. Association for Computational Linguistics. Jake Ward, Paul Riechers, and Adam Shai. 2025. Rank-1 loras encode interpretable reasoning signals. arXiv preprint arXiv:2511.06739 .Ran Xu, Wenqi Shi, Yue Yu, Yuchen Zhuang, Yanqiao Zhu, May Dongmei Wang, Joyce C. Ho, Chao Zhang, and Carl Yang. 2024. BMRetriever: Tuning large language models as better biomedical text retrievers. In Proceedings of the 2024 Conference on Empiri-cal Methods in Natural Language Processing , pages 22234–22254, Miami, Florida, USA. Association for Computational Linguistics. Longhui Yu, Weisen Jiang, Han Shi, Jincheng Yu, Zhengying Liu, Yu Zhang, James Kwok, Zhenguo Li, Adrian Weller, and Weiyang Liu. 2024. Meta-math: Bootstrap your own mathematical questions for large language models. In International Con-ference on Learning Representations , volume 2024, pages 45040–45061. Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. 2019. HellaSwag: Can a ma-chine really finish your sentence? In Proceedings of the 57th Annual Meeting of the Association for Com-putational Linguistics , pages 4791–4800, Florence, Italy. Association for Computational Linguistics. Qingru Zhang, Minshuo Chen, Alexander Bukharin, Pengcheng He, Yu Cheng, Weizhu Chen, and Tuo Zhao. 2023. Adaptive budget allocation for parameter-efficient fine-tuning. In The Eleventh In-ternational Conference on Learning Representations .Weixiang Zhao, Shilong Wang, Yulin Hu, Yanyan Zhao, Bing Qin, Xuanyu Zhang, Qing Yang, Dongliang Xu, and Wanxiang Che. 2024. SAPT: A shared attention framework for parameter-efficient continual learn-ing of large language models. In Proceedings of the 62nd Annual Meeting of the Association for Compu-tational Linguistics (Volume 1: Long Papers) , pages 11641–11661, Bangkok, Thailand. Association for Computational Linguistics. Lucia Zheng, Neel Guha, Brandon R Anderson, Peter Henderson, and Daniel E Ho. 2021. When does pre-training help? assessing self-supervised learning for law and the casehold dataset of 53,000+ legal hold-ings. In Proceedings of the eighteenth international conference on artificial intelligence and law , pages 159–168. Tianyu Zheng, Ge Zhang, Tianhao Shen, Xueling Liu, Bill Yuchen Lin, Jie Fu, Wenhu Chen, and Xiang Yue. 2024. OpenCodeInterpreter: Integrating code gener-ation with execution and refinement. In Findings of the Association for Computational Linguistics: ACL 2024 , pages 12834–12859, Bangkok, Thailand. As-sociation for Computational Linguistics. 
+
+A Model Configurations 
+
+We summarize the key hyperparameters of the MoE models used in our experiments, OLMoE-1B-7B (Muennighoff et al., 2025) and Qwen1.5-MoE-A2.7B (Qwen, 2024), Moonlight-16B-A3B (Liu et al., 2025), and Kimi-Linear-48B-A3B (Team et al., 2025), in Table 7. This provides a clear overview of the architectural differences between the models. 
+
+B Computing Infrastructure 
+
+All experiments were conducted on a workstation running Ubuntu 22.04.5 LTS with CUDA 12.8. Un-less otherwise specified, each experiment was con-ducted using NVIDIA H200 GPUs with 141 GiB of memory. For efficiency measurements, wall-clock time is reported as the actual end-to-end elapsed training time, and peak GPU memory is measured using 
+
+torch.cuda.max_memory_allocated() .
+
+B.1 Configuration for Table 1 and Table 2 B.1.1 Hyperparameters 
+
+Unless otherwise specified, all methods were trained under the same optimization setup across the four MoE backbones used in Table 1 and 17: OLMoE-1B-7B-0125, Qwen1.5-MoE-A2.7B, Moonlight-16B-A3B, and Kimi-Linear-48B-A3B. We use the AdamW optimizer with weight decay 0.1 and a constant learning-rate schedule. The max-imum sequence length was set to 256, and the ef-fective batch size was 64. For Table 1, we report results over three random seeds (0, 1, and 2). For all low-rank adaptation methods, the rank was fixed to 
+
+r = 2 . We trained all models for 3 epochs, follow-ing (Liu et al., 2026; Hu et al., 2023). For LoRA methods, the LoRA scaling factor was set to 16 and the LoRA dropout was set to 0.05. Follow-ing prior LoRA-based fine-tuning work that uses smaller learning rates for larger backbones (Zhao et al., 2024; Xu et al., 2024), we use 1 × 10 −5
+
+for ACE, LoRA, DoRA, and PiSSA on OLMoE and Qwen, 5 × 10 −6 on Moonlight, and 2 × 10 −6
+
+on Kimi-Linear. Our learning rate for OLMoE is also consistent with prior MoE PEFT work (Liu et al., 2026). AdaLoRA is treated separately, as it required a larger learning rate than the shared 12 Hyperparameter OLMoE-1B-7B Qwen1.5-MoE-A2.7B Moonlight-16B-A3B Kimi-Linear-48B-A3B                              
+
+> Total Parameters 6.9B 14.3B 16B 48B Active Parameters 1.3B 2.7B 3B 3B Layers ( L)16 24 27 27 Hidden Dimension ( dmodel )2048 2048 2048 2304 Number of Experts ( N)64 60 + 1 (shared) 64 + 2 (shared) 256 + 1 (shared) Top-K Routing ( k)8468Expert FFN Intermediate Size 1024 1408 1408 1024
+> Table 7: A summary of the MoE model configurations used in our experiments.
+
+setting used for the other methods (Zhang et al., 2023). We therefore use 7 × 10 −5 on OLMoE and Qwen, 4 × 10 −5 on Moonlight, and 1 × 10 −5 on Kimi-Linear for AdaLoRA. For ACE, in addition to the shared training setup above, we set the Tinit = 150 and the Louvain res-olution parameter γ to 0.8. We apply ACE to the up and gate projections; the down projection re-tains standard expert-wise LoRA, since its input is already expert-specific and does not admit grouped adapter execution (see Section 3.5 for details). 
+
+B.1.2 Baselines 
+
+• LoRA (Hu et al., 2022): A parameter-efficient fine-tuning method that learns low-rank up-date matrices while keeping the original model weights frozen. • DoRA (Liu et al., 2024): A LoRA-based vari-ant that separates weight updates into direc-tional and magnitude components to improve adaptation quality. • AdaLoRA (Zhang et al., 2023): A dynamic extension of LoRA that redistributes the adap-tation rank during training according to the estimated importance of different parameters. • PiSSA (Meng et al., 2024): A low-rank adap-tation method that initializes adapters using principal singular components of pretrained weights, leading to more effective and stable optimization. • PERFT-R (Liu et al., 2026): A MoE-aware PEFT method that introduces separately routed LoRA adapter experts, applying MoE-style routing on top of the adapter modules. • EPnG (Lee et al., 2026): A MoE-aware PEFT method that reallocates LoRA capacity across experts according to their routing importance, assigning larger adaptation capacity to more important experts. 
+
+B.1.3 Notes on MoE-Specific Baselines 
+
+We provide additional context on how MoE-specific PEFT methods are positioned in our com-parison. 
+
+PERFT-R. PERFT-R (Liu et al., 2026) is a MoE-aware PEFT method that introduces MoE-style routing over LoRA adapters through separately routed adapter experts. We include PERFT-R as a MoE-specific PEFT baseline because it explic-itly incorporates MoE structure into adapter tuning, unlike generic PEFT methods adapted from dense Transformers. We note that our reported numbers may differ from those in the original PERFT-R paper, as we evaluate all methods under a unified setup that matches the expert-wise LoRA config-uration used for the other baselines in this work (e.g., adapted projections, parameter budget, and optimization hyperparameters), rather than the con-figuration adopted in the original PERFT-R eval-uation. This setup is chosen to ensure a fair com-parison across all PEFT baselines under matched conditions. 
+
+ESFT. ESFT (Wang et al., 2024) selects task-relevant experts and directly fine-tunes their pa-rameters. It is therefore a selective expert tuning method rather than a LoRA-style adapter-based PEFT method. Since its trainable parameter count depends on the number of selected experts and tuned layers, ESFT is difficult to match to the adapter-based budget used by ACE and the LoRA baselines. For a fair comparison, we restrict the main quantitative evaluation to methods under the same LoRA-based PEFT setting, and discuss ESFT as related MoE fine-tuning work in Section 2. 
+
+B.1.4 Seed-wise Consistency 
+
+To further characterize run-to-run variability in the main results, we compare ACE with the strongest fully evaluated non-ACE baseline for each back-bone in Table 1. 13 Backbone Method Seed 0 Seed 1 Seed 2                       
+
+> OLMoE PiSSA 74.58 74.90 74.78 ACE 75.70 75.84 75.30
+> Qwen PiSSA 80.11 79.96 79.89 ACE 80.32 80.42 80.07
+> Moonlight EPnG 79.89 80.13 80.36 ACE 80.98 81.35 81.19
+> Table 8: Seed-wise average accuracy against the strongest fully evaluated non-ACE baseline for each backbone.
+
+Across all three random seeds, ACE consistently achieves higher average accuracy than the corre-sponding strongest baseline on each backbone. In total, ACE is higher in all nine matched backbone– seed comparisons. These results indicate that the improvements reported in Table 1 are consistent across random seeds. 
+
+B.2 Configuration for Table 3 
+
+For mathematical reasoning and code generation, we use the same optimization setup as in Sec-tion B.1.1, except that the maximum sequence length was set to 1024, the effective batch size was 16, the rank was set to 8, and all models were trained for 1 epoch. For code datasets, we report pass@10 using a sampling temperature of 0.7; for math datasets, we report exact-match accuracy. For legal understanding, we follow the optimization setup of Section B.1.1 with rank 8 and report accu-racy. 
+
+B.3 Dataset Statistics 
+
+We use four training datasets comprising 764,455 source examples: Commonsense170K (170,420), MetaMathQA (395,000), CodeFeedback-Filtered-Instruction (156,526), and CaseHOLD (42,509). For the commonsense reasoning results in Table 1, following Hu et al., 2023, Commonsense170K combines the training splits of eight commonsense tasks. After tokenization and sequence packing, each training set is randomly split into 98% train-ing and 2% validation subsets. For evaluation, we use 30,403 examples across 12 benchmarks: HellaSwag (10,042), Wino-Grande (1,267), ARC-Challenge (1,172), ARC-Easy (2,376), BoolQ (3,270), OpenBookQA (500), PIQA (1,838), Social IQA (1,954), GSM8K (1,319), MATH (1,187), HumanEval (164), and CaseHOLD (5,314). 
+
+B.4 Configuration for Table 5 
+
+The ablation study in Table 5 is conducted on OLMoE-1B-7B-0125 using the same training setup and hyperparameters as Table 1 (Appendix B.1.1). All compared methods share the same optimiza-tion configuration. The trainable parameter budget is matched for LoRA, Random, Full Merge, w/o Grp. Exec., and ACE, while w/o Rank Cons. is reported separately because disabling rank consol-idation changes the number of trainable adapter parameters. 
+
+B.5 Licenses and Terms of Use 
+
+All model backbones and datasets used in this work are publicly available, and we cite their original sources throughout the paper. OLMoE-1B-7B-0125 is released under Apache-2.0, Qwen1.5-MoE-A2.7B under the Tongyi Qianwen License, and Moonlight-16B-A3B and Kimi-Linear-48B-A3B under the MIT License. For the datasets, we use only their publicly released versions for research evaluation and follow the applicable licenses and terms of use specified by their original providers. Some datasets do not provide unambiguous stan-dalone license information in their original releases; for these resources, we follow the usage conditions provided by the corresponding authors or bench-mark distributions. 
+
+C Sensitivity and Robustness to Hyperparameters 
+
+C.1 Stability Analysis for Fixed Grouping and Warm-up Duration Local grouping stability. To justify using a fixed grouping after warm-up, we examine the trajectory of expert grouping over training across the model. Every 15 optimization steps, we compute the expert similarity matrices and apply the same grouping procedure as in the main method, yielding a group-ing structure at step t.For each step, we convert the partition into the set of expert pairs assigned to the same group, 
+
+S(t) = {(i, j ) | 1 ≤ i < j ≤ E, Π(t)(i) = Π (t)(j)}.
+
+We then compare the grouping at step t with the grouping from the previous measurement step t−∆
+
+using Jaccard similarity: 
+
+Jlocal (t) = |S (t) ∩ S (t−∆) ||S (t) ∪ S (t−∆) | .
+
+14 Method Tinit HS WG ARC-c ARC-e BoolQ OBQA PIQA SIQA Avg. LoRA – 90.82 70.08 69.42 85.61 66.71 74.60 83.10 52.51 74.11 ACE 50 92.14 72.45 71.33 86.62 69.36 77.40 82.37 53.38 75.63 ACE 150 92.27 73.32 70.82 86.45 69.14 76.60 84.06 52.97 75.70 
+
+ACE 500 92.52 70.88 69.62 86.41 68.78 76.40 83.73 53.53 75.23       
+
+> Table 9: Effect of warm-up duration on ACE. We vary Tinit while keeping all other settings fixed, and include LoRA as a baseline. ACE shows limited sensitivity to the exact warm-up duration and outperforms LoRA at every Tinit ,with Tinit = 150 giving the best average performance in this sweep. Results are from one random seed.
+
+Here, ∆ = 15 corresponds to the interval between two consecutive grouping measurements.  
+
+> Figure 6: Local stability of expert grouping over training in the all-layer view. Every 15 steps, we recompute the grouping and compare it with the grouping from the previous measurement step using Jaccard similarity. The left and right panels correspond to training on the HellaSwag and WinoGrande datasets, respectively. In both settings, the local similarity increases quickly and then plateaus, indicating that the grouping structure has stabilized.
+
+Figure 6 shows that the grouping changes rapidly early in training and then enters a stable regime, where consecutive grouping estimates become highly similar. This supports our design choice of using a single grouping after warm-up, since the grouping structure does not continue to change substantially once it enters the stable regime. We choose Tinit = 150 as a conservative default: it lies in the stable regime while still leaving most of training for shared-adapter optimization. 
+
+Effect on routing statistics. ACE keeps the pre-trained router frozen and applies the fixed group assignment only after expert selection. To examine whether fixed grouping alters routing behavior, we compare aggregate routing statistics between ACE and expert-wise LoRA throughout training. Across training, the maximum absolute differ-ences between ACE and LoRA are only 0.0008 in load entropy and 0.0046 in auxiliary loss. These re-sults indicate that fixed group assignments have lit-tle effect on the measured aggregate routing statis-tics in this setting.            
+
+> Step Load Entropy ↑Aux. Loss ↓
+> LoRA / ACE LoRA / ACE
+> 500 0.9613 / 0.9605 1.1168 / 1.1214 1000 0.9614 / 0.9616 1.1161 / 1.1162 Final 0.9619 / 0.9620 1.1142 / 1.1133
+> Table 10: Routing statistics for LoRA and ACE during training.
+
+CKA consistency with later training. To assess whether the similarity structure identified during warm-up remains representative later in training, we compare intermediate CKA matrices with those at the final checkpoint. For this post-hoc diagnostic, we recompute centered linear CKA at each check-point using the same fixed 10,000-token held-out validation probe, which is distinct from the train-ing examples used for consolidation (Appendix K). This allows us to compare checkpoints under a common, unseen input set. For each of the 16 MoE layers and two projection types ( gate_proj and 
+
+up_proj ), we vectorize the strict upper triangle of the 64 × 64 CKA matrix, corresponding to 2,016 unique expert pairs, and compute its Pearson and Spearman correlations with the corresponding vec-tor at the final checkpoint (step 2,805). We report the unweighted mean across the resulting 32 layer– projection combinations. The Pearson/Spearman correlations increase from 0.577/0.587 at step 150 to 0.771/0.772 at step 500 and 0.901/0.896 at step 1000, indicating that the structure identified at our default consolidation step already shows moder-ate alignment with the final structure and becomes progressively more consistent during training. However, stronger CKA agreement does not nec-essarily lead to better downstream performance: consolidation at step 500 yields a slightly lower average accuracy than at step 150 (75.23 vs. 75.70; Table 9). These results suggest that Tinit should balance structural reliability with the remaining optimization time after consolidation, rather than 15 simply maximizing agreement with the final check-point. 
+
+Sensitivity to warm-up duration. Table 9 shows that performance is stable across Tinit , with a max-imum gap of only 0.47 points between configura-tions. This robustness stems from an inherent trade-off: a larger Tinit yields more stable grouping esti-mates, while a smaller Tinit lets the shared adapters benefit from group-level updates for longer. These two competing effects offset each other, making ACE relatively insensitive to the exact choice of 
+
+Tinit . Notably, ACE outperforms LoRA (74.11) across all Tinit settings, confirming robustness to this hyperparameter. We adopt Tinit = 150 as the default, which yields the best average score in this sweep. 
+
+Practical guidance. The warm-up duration Tinit 
+
+controls a trade-off between grouping reliability and remaining optimization time after consolida-tion. Consolidating too early can use unstable adapter representations, whereas consolidating too late leaves limited time for shared adapters to bene-fit from group-level updates. Our sensitivity results show that ACE is robust within a reasonable range, so Tinit does not need to be finely tuned. In practice, we recommend consolidating after the steepest ini-tial loss decrease, when training begins to enter a more gradual descent, but well before the majority of training is complete. 
+
+C.2 Sensitivity to the Louvain Resolution Parameter 
+
+We analyze how the Louvain resolution parameter 
+
+γ affects performance and efficiency on OLMoE-1B-7B-0125 across the eight commonsense reason-ing benchmarks of Section 4.1. A larger γ produces more, smaller groups (approaching one adapter per expert), while a smaller γ produces fewer, larger groups (approaching full consolidation). Table 11 shows three consistent trends. First, ACE robustly outperforms LoRA across all eval-uated group counts (46-242), with average accu-racy varying by only 1.23 points, so γ does not require careful tuning. Second, over-aggressive consolidation hurts performance: fully merging all experts ( γ → 0) drops below LoRA (73.57 vs. 74.11), indicating that some degree of expert spe-cialization must be preserved. Third, evaluation time decreases monotonically as γ shrinks (fewer, larger groups), achieving up to a 19.1% reduction                                     
+
+> Method Group Count Avg. ↑Eval Time (s) ↓
+> LoRA –74.11 20.82 ACE ( γ= 3 .2)242 74.59 19.76 ACE ( γ= 1 .6)215 75.04 17.67 ACE ( γ= 1 .2)141 75.21 17.24 ACE ( γ= 0 .8, default) 97 75.61 17.22 ACE ( γ= 0 .4)67 75.75 16.97 ACE ( γ= 0 .1)46 75.82 16.85 ACE (full merge, γ→0)–73.57 16.41
+
+Table 11: Effect of the Louvain resolution parameter γ
+
+on OLMoE. Group Count is the total number of con-solidated adapter groups across all MoE layers. Avg. is the eight-benchmark commonsense reasoning average. Eval time is the wall-clock duration of one full evalua-tion pass on a single H200. 
+
+over LoRA at γ = 0 .1. We adopt γ = 0 .8 as the de-fault because it offers a robust accuracy-efficiency trade-off (+1.50 over LoRA, −17 .3% eval time) and shows the most consistent behavior across mod-els and datasets in our experiments. At the default γ = 0 .8, ACE forms 97 multi-expert consolidated groups together with 42 sin-gleton experts that remain unmerged. Among the consolidated groups, the median group size is 23 experts and the largest contains 43 experts. This places ACE between expert-wise LoRA and uni-form full consolidation. 
+
+C.3 Necessity of Centering in CKA Calculation 
+
+Standard CKA mean-centers representation matri-ces over the probe set before computing similar-ity (Kornblith et al., 2019). Since expert activations in ACE already reside in a shared feature space, centering is not strictly required from a coordinate-alignment perspective. We use centered CKA sim-ply for consistency with the standard formulation. To verify that this choice does not affect our results, we compare centered and uncentered CKA at the grouping step on OLMoE.            
+
+> Metric Centered CKA Uncentered CKA
+> Raw MSE Gap ↑-2.417e-6 -3.911e-6 Louvain Q ↑0.395 0.374 Downstream Average Accuracy ↑75.70 75.44
+
+Table 12: Comparison between centered and uncen-tered CKA on OLMoE commonsense reasoning. Both variants use the same ACE pipeline and differ only in whether the representation matrices are mean-centered before computing CKA similarity. Results are from one random seed. 
+
+The two variants yield broadly comparable 16 Probe Tokens Jaccard Pair-F1 ARI                
+
+> 512 0.923 0.953 0.922 1,000 0.946 0.969 0.948 2,000 0.958 0.976 0.960 5,000 0.989 0.994 0.991 10,000 1.000 1.000 1.000
+
+Table 13: Similarity of group assignments obtained with different probe-set sizes to the default 10k-token reference on OLMoE. 
+
+grouping quality and downstream performance, confirming that the centering choice does not criti-cally affect ACE. 
+
+C.4 Sensitivity to Probe-Set Size 
+
+To examine whether the expert grouping discov-ered by ACE is sensitive to the probe-set size, we compare group assignments obtained with smaller probe sets against the default 10k-token reference in the OLMoE commonsense setting. Even 512 probe tokens recover a highly similar grouping (ARI = 0 .922 ), while 5k tokens produce nearly identical assignments to the 10k-token refer-ence. These results indicate that ACE is robust to substantial reductions in probe-set size. 
+
+D Rank Variation and Optimization Dynamics 1 2 4 8 16 32 64 44 46 48        
+
+> Average Accuracy (%)
+> LoRA ACE
+> (a) Average accuracy on GSM8K and MATH across ranks. 124816 32 64 0.25 0.26
+> MetaMathQA Loss
+> (b) Final training loss across ranks.
+
+Figure 7: Rank sensitivity analysis of ACE and LoRA. ACE maintains stronger average performance across different adapter ranks and shows lower final training loss, indicating robustness to the choice of adaptation capacity. 
+
+To examine whether the gains of ACE depend on the adapter rank used in the main experi-ments, we compare ACE and LoRA across r ∈{1, 2, 4, 8, 16 , 32 , 64 }. Figure 7(a) reports the aver-age accuracy over GSM8K and MATH, and Figure 7(b) reports the final training loss at each rank. As shown in Figure 7(a), ACE maintains higher average accuracy than LoRA across most rank set-tings. Importantly, this trend holds not only at the main experimental setting, but also when the adapter capacity is made smaller or larger. This in-dicates that the improvement of ACE is not tied to a particular rank choice, but is consistently observed across different adaptation-capacity regimes. Figure 7(b) provides optimization-side evidence for the same trend. ACE obtains lower final training loss than LoRA across ranks, suggesting that the accuracy improvement is accompanied by a more favorable training objective rather than appearing only in downstream evaluation. Taken together, the rank-wise accuracy and final-loss results show that ACE remains robust to the choice of adapter rank and continues to provide stable gains when the available adaptation capacity changes. 
+
+E Analysis of Group-Anchor Strategies 
+
+To minimize functional discontinuity during consol-idation, ACE initializes each shared adapter from a similarity-central anchor within the group while as-signing the remaining rank dimensions using stan-dard LoRA initialization. We further compare three strategies for constructing this group anchor. Avg. 
+
+∆W forms a representative update by averaging the expert-specific full updates within a group and then refitting the result to the low-rank LoRA form via SVD. Max ∆W selects the expert with the largest update magnitude as the anchor. CKA-center se-lects the expert that is most central with respect to the within-group CKA similarities, thereby match-ing the similarity-based initialization principle used in our methodology.                   
+
+> Method HellaSwag WinoGrande OBQA Average Avg. ∆W92.52 67.17 76.60 78.76 Max ∆W92.46 68.27 76.40 79.04 CKA-center 92.27 68.98 76.60 79.28
+
+Table 14: Analysis of group-anchor strategies for shared-adapter initialization. 
+
+As shown in Table 14, the three strategies yield broadly comparable results, but CKA-center pro-vides the strongest overall performance. It is also the most efficient choice. Avg. ∆W introduces the highest overhead because it requires constructing an averaged full update and performing an addi-tional SVD refitting step. Max ∆W also incurs 17 extra computation due to the additional update-magnitude scoring required for anchor selection. In contrast, CKA-center directly reuses the simi-larity statistics already computed during grouping and therefore adds essentially no extra cost. Since it is both the most effective and the most efficient option, we adopt CKA-center as the default group-anchor strategy. 
+
+F Details for Figure 2 
+
+Figure 2 presents the pairwise CKA similarity ma-trix of OLMoE-1B-7B-0125, computed using the gate projection outputs from the 0-th, 4-th and 14-th layers. The similarity is measured for all pairs of experts, resulting in a full pairwise similarity matrix. The CKA scores used for the visualization are computed from the HellaSwag dataset. Values closer to 1 indicate higher similarity, while values closer to 0 indicate lower similarity. 
+
+G Results with Dataset-Specific Training 
+
+In addition to the main experiments, we evaluate our method in a dataset-specific training setting, where a separate model is trained for each dataset, to analyze its behavior on individual benchmarks. We use two MoE backbones, OLMoE-1B-7B-0125 and Qwen1.5-MoE-A2.7B, and report results on HellaSwag, WinoGrande, ARC-Challenge, ARC-Easy, BoolQ, OpenBookQA, and PIQA. We compare our approach with LoRA, AdaLoRA, and DoRA. For a fair comparison, all methods apply adapters to the expert modules and use the same rank configuration within each setting, so that the number of trainable parameters remains nearly identical across methods. Unless otherwise noted, we use the same training setup and hyperparameters as in Appendix B.1.1, except that each model is trained for 1,500 steps. As shown in Table 15, ACE achieves stronger performance than the competing methods on most benchmarks and consistently outperforms the base-lines across several datasets. 
+
+H Free-Form Generation on XSum 
+
+To evaluate generation quality beyond accuracy and pass@10, we evaluate PEFT methods on the XSum (Narayan et al., 2018) summarization bench-mark using OLMoE. All methods are compared under matched trainable-parameter budgets. ACE achieves the highest score on all three ROUGE metrics, indicating that its gains extend to free-form text generation. 
+
+I Additional Functional Redundancy Analyses 
+
+I.1 Expert Swap on Up Projection 0.05 0.1 0.15 0.2 Selection ratio 0.00 0.01 0.02 0.03 0.04 
+
+> Δ Mean NLL  High Similarity Swap Low Similarity Swap Random Swap
+
+Figure 8: Effect of adapter swapping based on expert similarity applied on up projection. Replacing adapters with high similarity experts causes only minor increases in NLL, while dissimilar or random experts lead to substantially larger degradation. 
+
+We conduct this analysis on OLMoE-1B-7B-0125 with ∆NLL evaluated on HellaSwag. Fig-ure 8 reveals a strong dependence on LoRA simi-larity. Replacing LoRA with highly similar ones results in only minor increases in Negative Log Likelihood (NLL) across all selection ratios. For instance, when ρ = 0 .05 , the NLL rises by approx-imately 0.0034 relative to the baseline. In contrast, swapping with low-similarity adapters leads to sub-stantially larger degradation, increasing the NLL by 
+
+0.0187 , while random swaps produce a moderate increase of about 0.0051 .This trend persists as the replacement ratio in-creases. At ρ = 0 .20 , high-similarity swaps in-crease the NLL by only 0.0109 , whereas low-similarity swaps cause a much larger rise of 0.0396 .Random swaps again fall between these two ex-tremes, increasing the NLL by 0.0235 .Taken together, these results indicate that CKA similarity reliably reflects functional interchange-ability between expert adapters. Experts with highly aligned adapter responses can therefore sub-stitute for one another with minimal performance degradation, supporting the design principle of ACE that adaptation capacity can be consolidated across redundant experts. 
+
+I.2 Functional Redundancy across Models and Tasks 
+
+Across commonsense reasoning, the CKA gaps are 0.299, 0.298, 0.438, and 0.344 for OLMoE, Qwen, Moonlight, and Kimi, respectively. We addition-ally observe positive gaps on mathematical reason-18 Model Method # Params (%) HellaSwag WinoGrande ARC-c ARC-e BoolQ OBQA PIQA Avg. OLMoE                                                                             
+
+> LoRA 0.27 87.58 64.09 53.92 67.85 73.55 64.40 70.13 68.79 AdaLoRA 0.54 →0.27 86.06 62.27 55.63 73.99 71.83 62.60 64.64 68.15 DoRA 0.33 87.41 63.06 52.13 69.99 75.90 60.80 74.97 69.18
+> ACE (Ours) 0.27 89.08 71.11 55.46 75.29 78.90 64.60 78.51 73.28 Qwen
+> LoRA 0.21 91.82 77.03 73.98 87.84 83.70 78.60 84.77 82.53 AdaLoRA 0.42 →0.21 90.19 65.90 75.26 88.30 73.24 60.60 82.48 76.57 DoRA 0.26 91.67 75.37 72.10 87.54 83.88 77.20 84.11 81.70
+> ACE (Ours) 0.21 92.61 77.19 74.40 88.01 84.16 79.80 84.98 83.02
+
+Table 15: Accuracy (%) on commonsense reasoning benchmarks. All methods use the same adapter rank on MoE experts, resulting in nearly identical trainable parameter budgets.                         
+
+> Method ROUGE-1 ↑ROUGE-2 ↑ROUGE-L ↑
+> LoRA 32.98 13.77 26.27 DoRA 33.16 13.90 26.45 AdaLoRA 30.01 11.82 24.17 PiSSA 30.48 12.26 24.72 PERFT-R 33.57 14.31 26.90 ACE 33.82 14.37 27.01
+
+Table 16: XSum summarization results on OLMoE un-der matched trainable-parameter budgets. 
+
+ing (0.259/0.215), code generation (0.251/0.208), and legal understanding (0.323/0.286) for OL-MoE/Qwen, respectively. To verify that this separation is not specific to the data used for group construction, we construct groups on one data split and evaluate their CKA separation on an independent split. In the OLMoE commonsense setting, the discovered groups re-tain a CKA gap of 0.293 on the held-out split, whereas random groupings yield a near-zero gap of −0.0006 ± 0.0034 .
+
+J Extended Backbone Comparison Including Kimi 
+
+To examine whether ACE’s gains over expert-wise LoRA generalize to a larger MoE backbone, we extend the comparison to Kimi-Linear-48B-A3B. Table 17 compares ACE with LoRA across all four MoE backbones evaluated in this work. For each backbone we report the eight-benchmark average and per-task accuracies, with results for OLMoE, Qwen1.5-MoE, and Moonlight from Table 1. ACE consistently improves over LoRA on every back-bone, including Kimi (84.18 vs. 83.66), indicating that the gains of adapter consolidation extend to a larger backbone with substantially more experts. 
+
+K Details for Louvain Method 
+
+K.1 Grouping Implementation Details Probe set construction. We construct the probe set Xprobe exclusively from the fine-tuning train-ing split and do not use validation or test exam-ples for expert grouping. After the warm-up phase, We collect N = 10 ,000 non-padding token activa-tions from randomly ordered packed training se-quences. The same probe set is used for all experts within a layer, so the resulting CKA scores reflect adapter-induced representations under identical in-puts rather than differences in routing frequency. We keep the probe set fixed across ACE variants and do not tune it on downstream validation perfor-mance. 
+
+Layer-wise graph construction. We perform ex-pert grouping independently for each MoE layer. Let S(ℓ) ∈ REℓ×Eℓ denote the CKA similarity ma-trix among the Eℓ experts in layer ℓ. We first sym-metrize S(ℓ) and set its diagonal entries to zero to remove self-similarity. We then construct a non-negative weighted adjacency matrix W (ℓ) as 
+
+W (ℓ) 
+
+> ij
+
+= max  0, S (ℓ) 
+
+> ij
+
+− b(ℓ),
+
+where b(ℓ) is the median of the off-diagonal entries of S(ℓ). This transformation suppresses weak pair-wise similarities and retains only expert relations that exceed the typical similarity level within layer 
+
+ℓ. The resulting graph is therefore a layer-specific weighted graph whose nodes correspond to experts and whose edge weights encode CKA similarity above the layer-specific baseline. 
+
+K.2 Layer-wise Grouping with the Louvain Method 
+
+Given the preprocessed graph W (ℓ), we apply the Louvain method independently to each MoE layer. 19 Model Method # Params (%) ↓ HS ↑ WG ↑ ARC-c ↑ ARC-e ↑ BoolQ ↑ OBQA ↑ PIQA ↑ SIQA ↑ Avg. ↑                                                                                        
+
+> OLMoE (1B/7B) LoRA 0.27 90.82 70.08 69.42 85.61 66.71 74.60 83.10 52.51 74.11
+> ACE 0.27 92.24 72.85 70.88 86.21 68.04 77.33 83.93 53.41 75.61 Qwen (3B/14B) LoRA 0.21 93.23 77.66 79.44 90.63 70.84 82.67 86.80 56.72 79.75
+> ACE 0.21 93.81 79.19 79.50 90.66 71.49 83.87 86.67 56.99 80.27 Moonlight (3B/16B) LoRA 0.22 92.23 74.59 84.67 94.28 67.17 82.00 86.92 52.47 79.29
+> ACE 0.22 93.49 79.95 84.30 94.75 69.31 84.93 87.71 54.93 81.17 Kimi (3B/48B) LoRA 0.27 94.33 79.24 91.04 97.35 75.14 87.40 90.59 54.15 83.66
+> ACE 0.27 94.82 81.14 90.36 97.43 76.30 88.00 90.97 54.45 84.18
+
+Table 17: Commonsense reasoning comparison between LoRA and ACE across four MoE backbones. Results for OLMoE, Qwen1.5-MoE, and Moonlight are from Table 1; Kimi-Linear-48B-A3B is added here. ACE achieves higher average accuracy than LoRA on every backbone, including the largest one. The best result per backbone-row pair is in bold. 
+
+Group. HS WG ARC-c ARC-e BoolQ OBQA PIQA SIQA Avg. Louvain 92.24 72.85 70.88 86.21 68.04 77.33 83.93 53.41 75.61 Thresh. 92.17 71.77 71.05 86.66 67.94 77.07 84.21 53.15 75.50 
+
+Table 18: Comparison between Louvain-based grouping and fixed-threshold grouping on OLMoE commonsense reasoning. “Thresh.” denotes fixed-threshold grouping with t = 0 .9. Both variants use the same ACE pipeline and differ only in how CKA-based expert groups are formed. 
+
+We optimize the generalized weighted modularity 
+
+Q = 12m
+
+X
+
+> i,j
+
+
+
+Wij − γ kikj
+
+2m
+
+
+
+1[zi = zj ],
+
+where ki = P 
+
+> j
+
+Wij is the weighted degree of expert i, 2m = P 
+
+> i,j
+
+Wij , zi denotes the group assignment of expert i, and γ is the resolution pa-rameter. In all experiments, we set γ = 0 .8.Starting from singleton groups, the Louvain method repeatedly considers moving an expert i
+
+to one of its neighboring groups. After removing 
+
+i from its current group, the modularity gain of assigning it to a candidate group C is proportional to 
+
+∆Q(i → C ) ∝ ki, in (C) − γ ki tot( C)2m ,
+
+where ki, in (C) denotes the total edge weight from expert i to group C, and tot( C) is the sum of weighted degrees of the experts currently assigned to C. We therefore greedily move each expert to the neighboring group that yields the largest pos-itive increase in modularity; if no positive gain is available, the expert remains in its current group. Once no further positive local move is possible, the resulting groups are collapsed into super-nodes and the same procedure is repeated on the coarsened graph. This yields a set of expert groups {G (ℓ) 
+
+> g
+
+}Gℓ
+
+> g=1
+
+for each layer ℓ.
+
+K.3 Comparison with Fixed-Threshold Grouping 
+
+The default ACE implementation forms expert groups by applying Louvain community detection to the CKA similarity graph. To examine whether ACE depends critically on Louvain grouping, we compare it with a fixed-threshold variant that uses the same CKA similarity matrix but replaces only the grouping rule. For each layer ℓ and projection type p, let 
+
+S(ℓ,p ) ∈ RE×E denote the CKA similarity ma-trix across E experts. Fixed-threshold grouping constructs an expert graph using a threshold t:
+
+E(ℓ,p ) 
+
+> t
+
+= {(i, j ) | i̸ = j, S (ℓ,p ) 
+
+> ij
+
+≥ t}.
+
+The expert groups are then defined as the con-nected components of G(ℓ,p ) 
+
+> t
+
+= ( V, E(ℓ,p ) 
+
+> t
+
+), where 
+
+V is the set of experts in layer ℓ. We set t = 0 .9.We use the same training setup as in Table 1 and keep all other components of ACE unchanged, in-cluding rank consolidation, shared adapter updates, grouped adapter execution, and optimization hyper-parameters. Table 18 shows that fixed-threshold grouping achieves performance close to Louvain grouping on OLMoE commonsense reasoning, with an average 20 score of 75.50 compared to 75.61 for Louvain. This indicates that ACE does not depend critically on a specific grouping algorithm, as long as functionally similar experts are consolidated. However, Louvain slightly outperforms the fixed-threshold variant and avoids manually selecting a global threshold. We therefore use Louvain grouping as the default strat-egy. 
+
+L Implementation and Profiling of Grouped Adapter Execution 
+
+L.1 Implementation Details 
+
+Section 3.5 presents grouped execution for a repre-sentative adapted linear transformation and omits projection indices for clarity. In practice, however, LoRA can be attached independently to the up, gate, and down projections of each expert, and the grouped execution argument applies only when the shared-input property holds. For expert e, the feed-forward network (FFN) can be written as 
+
+ue = ( W up  
+
+> e
+
++ ∆ W up  
+
+> e
+
+)x, ve = ( W gate  
+
+> e
+
++ ∆ W gate  
+
+> e
+
+)x, he = ϕ(ve) ⊙ ue,ye = ( W down  
+
+> e
+
++ ∆ W down  
+
+> e
+
+)he,
+
+where x is the routed token representation and 
+
+ϕ(·) denotes the gating nonlinearity. This gated-FFN (SwiGLU-style) form is the architecture used by all MoE backbones in our experiments. The key distinction is that the up and gate projections both receive the same pre-expert input x, whereas the down projection receives he, which is already expert-specific because it depends on the outputs of the expert’s own up/gate branches. This distinction determines where grouped exe-cution is effective. After consolidation, the shared adapter corrections for the up and gate projections can be computed once per active group, 
+
+cup  
+
+> g
+
+(x) = ∆ W up ,share  
+
+> g
+
+x, cgate  
+
+> g
+
+(x) = ∆ W gate ,share  
+
+> g
+
+x, 
+
+using grouped GEMM, and then scattered to all routed experts assigned to that group. The same reuse is not available for the down projection. Even when the routed token is the same, the intermediate state he differs across experts, so evaluating a down-side adapter still requires expert-specific inputs.                                  
+
+> Component LoRA (ms) ACE (ms) Reduction
+> Total step 3010 .38 ±33 .86 1688 .13 ±9.31 43.92% Forward 1351 .95 ±17 .20 845 .43 ±6.49 37.47% Adapter forward 517 .48 ±3.14 56 .09 ±0.28 89.16%
+> Backward 1619 .53 ±21 .18 809 .91 ±3.30 49.99% Optimizer 24 .35 ±0.66 21 .88 ±0.25 –Router linear 0.330 ±0.001 0.330 ±0.001 –
+
+Table 19: Fine-grained runtime profiling of expert-wise LoRA and ACE with grouped adapter execution on OLMoE. Adapter forward is a subrange of the forward pass. 
+
+Recovering the same acceleration for the down pro-jection would require additional adapter merging or weight materialization, which introduces nontrivial overhead. For this reason, our accelerated grouped adapter execution is implemented only for the up and gate projections. 
+
+L.2 Fine-Grained Runtime Profiling 
+
+To identify the source of the runtime improvement from grouped adapter execution, we profile expert-wise LoRA and ACE on OLMoE under matched input batches, routing, trainable-parameter budgets, and optimizer settings. Results are mean ± stan-dard deviation over five runs, each with 20 warm-up and 100 measured steps. Grouped execution reduces post-consolidation step time by 43.92%, with the largest reduction occurring in adapter forward execution (89.16%). The adapter-forward reduction accounts for approx-imately 91% of the measured forward-time reduc-tion, confirming that the efficiency gain is concen-trated in the fragmented adapter computation tar-geted by ACE. These synchronized profiling measurements are intended for component-level attribution and are therefore not directly comparable to the end-to-end wall-clock measurements in Table 2, which additionally include data-pipeline and framework overhead. 
+
+M Gradient Supervision Analysis Details 
+
+We provide additional details for the gradient-supervision fragmentation analysis in Section 5.1. We conduct this analysis under the common-sense fine-tuning setting, using Commonsense-170K as the training data. For each backbone and method, we measure LoRA-adapter gradients over 50 matched training steps, using the post-consolidation phase for ACE. We compute the 21 OLMoE Qwen Moonlight   
+
+> 0.0 0.5 1.0 1.5 2.0
+> CV OLMoE Qwen Moonlight
+> 0.0 0.5 1.0 1.5 2.0 2.5 3.0
+> Zero-grad ratio (%)
+> LoRA ACE
+
+Figure 9: Gradient-supervision fragmentation for gate-projection LoRA adapters across three MoE backbones. ACE reduces both gradient-norm imbalance and the zero-gradient ratio relative to expert-wise LoRA. 
+
+statistics separately for each MoE layer and then average across layers. For each expert adapter, we first compute the gra-dient norm of its LoRA parameters. We then mea-sure two quantities. The first is the coefficient of variation (CV) of per-expert gradient norms within the same MoE layer, 
+
+CV = Std e (∥∇ ∆We∥)Mean e (∥∇ ∆We∥) ,
+
+which captures how unevenly gradient signal is distributed across experts. The second is the zero-gradient ratio, defined as the fraction of LoRA adapter rows whose gradients are exactly zero, 
+
+ZeroGrad = #{adapter rows with zero gradient }
+
+#{adapter rows } .
+
+A lower CV indicates more balanced supervision across experts, and a lower zero-gradient ratio in-dicates that fewer adapter parameters are left unsu-pervised at each step. Figure 9 reports the same analysis for gate-projection adapters. Consistent with the up-projection results in Figure 4, ACE reduces both gradient imbalance and zero-gradient ratios across MoE backbones. This supports the conclusion that shared-group updates densify supervision not only for up projections but also for gate projections. 
+
+N Additional Training Efficiency Results 
+
+Table 20 reports method-level training time and peak memory across MoE backbones. All methods are evaluated under the same effective batch size within each backbone. When a method requires a smaller per-device batch size due to memory con-straints, gradient accumulation is adjusted to keep the effective batch size fixed. We report wall-clock training time over 3 epochs and peak GPU memory. Means and standard deviations are computed over available seeds(0, 1, 2).                                                                                                           
+
+> Model Method Train Time (hr) Peak Memory (GB)
+> Moonlight LoRA 23.75 ±0.60 48.80 ±0.00 AdaLoRA 43.84 ±2.05 50.07 ±0.62 DoRA 41.10 ±0.95 80.88 ±0.02 PiSSA 23.64 ±0.33 48.80 ±0.00
+> ACE (ours) 16.77 ±0.23 48.80 ±0.00 Qwen LoRA 6.18 ±0.05 89.90 ±0.01 AdaLoRA 10.90 ±0.34 90.58 ±0.00 DoRA 18.56 ±0.06 96.57 ±0.01 PiSSA 6.25 ±0.09 89.84 ±0.01
+> ACE (ours) 4.19 ±0.02 89.84 ±0.01 OLMoE LoRA 2.47 ±0.03 98.21 ±0.01 AdaLoRA 3.90 ±0.05 98.54 ±0.00 DoRA 7.36 ±0.45 85.10 ±0.00 PiSSA 2.40 ±0.03 98.22 ±0.00
+> ACE (ours) 1.89 ±0.02 98.18 ±0.02 Kimi-Linear LoRA 87.39 ±0.80 118.22 ±0.00
+> ACE (ours) 60.41 ±0.38 118.22 ±0.00
+
+Table 20: Additional training efficiency results across PEFT methods and MoE backbones. Training time is reported as wall-clock hours over 3 epochs, and peak memory is reported in GB. Means and standard devia-tions are computed over three seeds (0, 1, and 2). All methods use the same effective batch size within each backbone; methods with higher memory requirements may use smaller per-device batches with additional gra-dient accumulation. For Kimi-Linear, we report the available LoRA comparison. 
+
+O Overhead Analysis of the Consolidation Pipeline 
+
+The consolidation pipeline of ACE introduces a one-time preprocessing cost that consists of three stages: (i) CKA computation across all expert pairs within each MoE layer, (ii) Louvain com-munity detection on the resulting similarity graph, and (iii) adapter consolidation (CKA-center anchor selection, shared high-rank adapter initialization, and optimizer-state reallocation). Note that the warm-up phase itself contributes no additional cost: during Tinit steps, ACE simply trains expert-wise LoRA adapters identically to the LoRA baseline, so the warm-up time is already accounted for in the total training time and is not counted as over-head. The dominant scaling term is the pairwise CKA computation, which has O(E2) complexity per layer, where E is the number of experts. We report a per-stage breakdown across all four MoE backbones to characterize how this overhead grows with E and how much it costs relative to total train-ing time. Table 21 shows three observations. First, the consolidation pipeline accounts for at most 1.83% of total ACE training time across all evaluated back-bones, despite the O(E2) scaling of pairwise CKA. Second, CKA computation dominates the overhead, 22 Model E Layers Total Experts Warm-up Overhead (s) CKA (s) Louvain (s) Consolidation (s) Total Overhead (% of ACE) ACE Speedup over LoRA                                     
+
+> OLMoE-1B-7B 64 16 1,024 0.00 123.90 0.12 0.37 0.035 hr (1.83%) 1.31 ×
+> Qwen1.5-MoE-A2.7B 60 24 1,440 0.00 275.17 0.15 0.94 0.077 hr (1.83%) 1.48 ×
+> Moonlight-16B-A3B 64 27 1,728 0.00 328.89 0.19 0.56 0.092 hr (0.55%) 1.42 ×
+> Kimi-Linear-48B-A3B 256 27 6,912 0.00 2393.11 0.79 3.19 0.666 hr (1.10%) 1.45 ×
+
+Table 21: Per-stage breakdown of the ACE consolidation pipeline. The three stages (pairwise CKA computation, Louvain community detection, and adapter consolidation) are reported in seconds. Total overhead is the sum of the three stages relative to total ACE training time. The warm-up phase itself adds no extra cost, as it is identical to standard LoRA training. All models are trained for 3 epochs, following the configuration of Table 1. Shared experts, which are not included in the ACE grouping procedure, are excluded from the expert counts. 
+
+consistently accounting for the overwhelming ma-jority of the one-time cost across all backbones, while Louvain and adapter consolidation remain almost flat and contribute a negligible fraction even at the largest scale. The cost of CKA computa-tion is controllable via the size of the probe set used to compute the similarity matrices. A smaller probe set proportionally reduces CKA runtime, re-ducing overhead on larger MoE backbones. Third, the overhead is more than offset by per-step effi-ciency gains from grouped adapter execution: ACE achieves at least a 1.31 × end-to-end speedup over LoRA on every backbone. 
+
+P Optimization Dynamics 0 1000 2000 0.5 1.0 1.5 2.0       
+
+> Training Loss
+> OLMoE
+> 01000 2000 1.0 1.5 2.0 Qwen
+> 01000 2000 0.5 1.0 1.5 2.0 Moonlight
+> LoRA ACE
+
+Figure 10: Training loss curves on OLMoE, Qwen, Moonlight with Commonsense. 0 1000 2000 3000 4000 0.25 0.30 0.35 0.40 0.45      
+
+> Training Loss
+> OLMoE
+> 01000 2000 3000 4000 0.175 0.200 0.225 0.250 0.275 0.300 Qwen
+
+Figure 11: Training loss curves on OLMoE, Qwen with MetaMathQA. 0 1000 2000 3000 0.75 0.80 0.85 0.90 0.95     
+
+> Training Loss
+> OLMoE
+> 01000 2000 3000 0.50 0.55 0.60 0.65 Qwen
+
+Figure 12: Training loss curves on OLMoE, Qwen with CodeFeedback. OLMoE Qwen Moonlight OLMoE Qwen OLMoE Qwen 0.0 0.2 0.4 0.6 0.8    
+
+> Final Loss  0.587 0.745 0.572 0.261 0.176 0.768 0.520 0.567 0.734 0.552 0.258 0.175 0.763 0.514
+> Commonsense Math Code
+> LoRA ACE
+
+Figure 13: Final training loss of LoRA and ACE across datasets and MoE backbones. Lower values indicate better convergence. 
+
+As shown in Figure 10, 11, and 12, after the merge step, ACE demonstrates a steeper decrease in training loss compared to LoRA, suggesting that consolidating functionally similar adapters leads to more effective optimization dynamics. This im-provement disappears immediately after merging due to initialization overhead. After stabilization, the improvement appears and persists throughout training. Consistently, Figure 13 shows that ACE reaches lower final training loss than LoRA across all evaluated dataset–backbone pairs, indicating that the post-merge optimization benefit carries through to convergence. For analysis, we report training loss curves after applying one-dimensional Gaussian smoothing to the plotted loss values. The Gaussian smoothing scale was set separately for each dataset: σ = 1.5 for MetaMathQA, σ = 2.0 for CodeFeedback, and σ = 1.0 for Commonsense Reasoning. 
+
+Q LLM Usage 
+
+We used an LLM to refine the writing, improve grammatical accuracy, and assist with code organi-zation and cleanup. 23

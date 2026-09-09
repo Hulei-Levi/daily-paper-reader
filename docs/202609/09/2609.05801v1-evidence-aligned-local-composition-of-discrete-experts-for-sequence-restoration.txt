@@ -1,0 +1,1255 @@
+Title: Evidence-Aligned Local Composition of Discrete Experts for Sequence Restoration
+
+URL Source: https://arxiv.org/pdf/2609.05801v1
+
+Published Time: Wed, 09 Sep 2026 00:21:36 GMT
+
+Number of Pages: 37
+
+Markdown Content:
+# Evidence-Aligned Local Composition of Discrete Experts for Sequence Restoration 
+
+Mohammad Panahazari 1, Usman A. Khan 2, Shuchin Aeron 1 ∗
+
+September 9, 2026 
+
+Abstract 
+
+A document modeled as a discrete sequence of tokens can be thought of as being generated from a composition of texts from different domains; a README file, for example, moves between prose, code, and configuration. When such a document is corrupted and only frozen domain experts are available, restoring it requires deciding both what is missing and which expert to trust at each position, at test time and without region labels or a trained router. We introduce evidence-aligned local composition, which infers a soft, position-wise weighting over the experts from the marginal evidence of the corrupted observation under a given corruption model, estimating the evidence from the experts’ own denoising losses and smoothing the weights across positions. Because the weighting is soft, it recovers a mixture when the true composition is mixed and concentrates on one expert when that suffices. Across a categorical simulator, byte-level experts, and experts fine-tuned from a 1.3B discrete flow-matching model, the inferred weights track the true regions at 0.85 field accuracy on naturally mixed scientific documents, and at 0.98 on constructed mixtures whose regions are lexically disjoint. Restoration improves over a single global weight when the experts are genuinely distinct and reduces to it when they converge, tracking a measure of expert separation. Code is available at https://github.com/panahazari/evidence-aligned-local-composition .
+
+# 1 Introduction 
+
+Real documents mix several kinds of content. A software README interleaves prose, code, and configuration; a scientific article interleaves prose and mathematics; a data-processing script embeds queries in a host language. When such a document is damaged, by imperfect optical character recognition, a lossy channel, or aggressive filtering during data curation, restoring it means recovering the missing symbols. We call this channel a corruption channel, or forward model, and we assume access to it, expressed as the likelihood of the corrupted output conditioned on the true input. Strong generative priors for each kind of content already exist as frozen, separately trained models, yet no single one serves a whole document well: the best expert changes from position to position, and  
+
+> ∗1
+
+Department of Electrical and Computer Engineering, Tufts University, Medford, Massachusetts  
+
+> 2
+
+Boston College, Chestnut Hill, Massachusetts E-mail: mohammad.panahazari@tufts.edu, usman.khan@bc.edu, shuchin@ece.tufts.edu 
+
+1arXiv:2609.05801v1 [cs.AI] 5 Sep 2026 Table 1: Methods along our three axes and their data domain. Local : the weights vary by position within one input, rather than one weighting being applied to the whole input. Test-time : the weights are set at inference from the input itself, with no router or weight predictor trained beforehand. 
+
+Corruption-aware : inferred from the corrupted observation under a given channel. wPoE optimizes a single scalar at test time from one data point, so it is test-time but not local.                                         
+
+> Method Experts Domain Local Test-time Corruption-aware Composable diffusion [2, 3] continuous diffusion image ×✓×
+> DEMix [9] autoregressive LMs text ×✓×
+> PackLLM [4] autoregressive LMs text ×✓×
+> wPoE [5] autoregressive LMs text ×✓×
+> FactorDiff [10] discrete diffusion image ✓✓×
+> Evidence-optimized priors [7] continuous diffusion image ×✓✓
+> Ours discrete flow matching text ✓✓✓
+
+the regions carry no labels. We study how to restore such a document at test time by composing frozen domain experts, inferring at each position both what symbol is missing and which combination or composition of experts to trust, without position labels or a trained model, i.e. a router for composition. We do not assume a single expert per position. The object we infer is a composition of experts at each position; routing to one expert is the special case in which the composition concentrates on a single vertex of the simplex. This poses two coupled problems: the missing content must be inferred, but also the composition of the experts that should guide each position. Weighted products of experts, or equivalently weighted sums of their log probabilities, provide a natural way to compose models [1–3]. However, most existing approaches assign one weight to each expert for the entire sequence [4], which works when expert competence is roughly uniform but not when the preferred composition changes across positions. Local positional weights offer the needed flexibility but are usually supplied by supervision or a trained router, while the test-time mixtures that need no training fix one weight for the whole sequence, chosen from the input’s own likelihood [4, 5]; Table 1 places these lines along the three axes that define our setting. Our question is different: Can a soft field of expert weights be inferred at test time from the corrupted observation and the given corruption channel, without region labels or router training? We approach this question through marginal evidence: the position-dependent weights parameterize a composed prior, and the likelihood of the observation determines how they should change [6], connecting to evidence optimization and model selection for continuous-diffusion priors [7, 8] but making the weights local and discrete. The resulting update compares each expert’s fit to the observation with its fit under the current composition, a posterior-minus-prior difference we make precise in Section 4. Because the exact update is not directly computable, we approximate it, which motivates the name evidence-aligned local composition .
+
+Main Contributions. 
+
+• Local composition from corrupted-observation evidence. We define a normalized sequence energy model with a simplex-valued expert weight at every position and infer it at test time by 2an exponentiated-gradient update on the marginal evidence, smoothed across positions. The evidence gradient compares posterior and prior expectations of the same local expert energy. • Denoising losses as local energies. We score candidate sequences with the experts’ denoising losses. For mask-source experts, the schedule-weighted population loss upper-bounds sequence negative log likelihood; an unrestricted Bayes-optimal denoiser recovers the associated any-order conditional decomposition on supported contexts. The deployed unweighted score remains a surrogate. • Field recovery without supervision. Through extensive experiments, we show that, without region labels, the inferred field closely matches the true regions and improves restoration over an independently optimized global weight on constructed mixtures; on natural documents the gain tracks how distinct the experts are, improving restoration over the global family on scientific text mixing prose and mathematics and tying when the experts converge. 
+
+# 2 Related Work 
+
+Composing and fusing experts. Composing models by multiplying densities, or summing log scores, underlies products of experts [1] and compositional or superposed diffusion [2, 3, 11, 12]; frozen language models are similarly fused or merged without training, as in PackLLM’s perplexity-optimized global mixture [4], DEMix’s parameter-free domain posterior [9], wPoE’s single test-time scalar for compression [5], and output- or parameter-level ensembling and merging [13–15]. All of these assign one weighting to the whole input. Position-dependent weights are otherwise supplied by supervision or, in concurrent work, produced by factorized composition of discrete diffusion experts from confidence margins [10]. In contrast, our weight varies with position and is inferred at test time from the corrupted observation and a given channel, with no router training or region labels. 
+
+Discrete diffusion priors and inverse problems. Our experts are discrete diffusion and flow-matching models [16–22] that now scale to billions of parameters [23–26]; for mask-source absorbing diffusion, the schedule-weighted denoising objective upper-bounds sequence negative log likelihood and a Bayes-optimal denoiser recovers clean-data conditionals and their expected any-order autoregressive decomposition [27–29]. Restoring an observation under such a prior is the subject of diffusion inverse problems, in the continuous setting [7, 30, 31] and, more recently, with guidance tailored to discrete state spaces [32, 33], while marginal-evidence estimation also drives model selection [6, 8]. Our corruption channel plays the role of the forward operator, but the quantity we infer is a local composition field over frozen experts rather than a single guided reconstruction. 
+
+# 3 Problem Formulation 
+
+Problem setting. Let V be a finite vocabulary and x = ( x1, . . . , x L) ∈ V L a clean sequence, where 
+
+ℓ ∈ [1 : L] is the position index. The goal is to recover x from y. In order to do this, We are given 3m generative experts q1, . . . , q m, each defining a distribution over VL. These experts are contextual: the per-position conditional qi(xℓ | x\ℓ) over V depends on the other positions x\ℓ, as in the discrete flow-matching models we use. A position-factorized expert, whose conditional ignores x\ℓ, is the special case we use for the local pool in Eq. (1). The experts remain frozen during composition, and their training data are not available. We observe only y, produced from x by a given corruption channel 
+
+pc(y | x). In the mask channel , each token is independently replaced with probability r by a symbol 
+
+[MASK ] /∈ V ; in the replacement channel , it is replaced by a uniform draw from V. Both channels factorize across positions, so pc(y | x) = Q 
+
+> ℓ
+
+pc(yℓ | xℓ). We denote the local likelihood of candidate token v by cℓ(v) = pc(yℓ | xℓ = v).
+
+Local composition. We attach a simplex-valued weight to every position. Specifically, the com-position field is λ1: L = ( λ1, . . . , λ L) with λℓ ∈ ∆m = {λ ∈ Rm 
+
+> +
+
+: P 
+
+> i
+
+λi = 1 }. If expert i assigns the categorical distribution πi,ℓ to the token at position ℓ, their local log-linear pool is 
+
+πλℓ,ℓ (v) = exp   P  
+
+> i
+
+λℓ,i log πi,ℓ (v)P 
+
+> u∈V
+
+exp   P  
+
+> i
+
+λℓ,i log πi,ℓ (u) . (1) A vertex λℓ = ei (the i-th standard basis vector of Rm) routes the position to the single i-th expert, whereas an interior point composes several experts. We say a sequence has a region structure when its positions split into contiguous blocks, each generated by a single expert; the field is then near a vertex inside a block and mixed near a boundary. Region labels are never given to the method. Where they exist, we use them only to evaluate the inferred field (Section 5). The local pool of Eq. (1) composes the experts one position at a time and is well defined only when the experts are position-factorized. Our experts are contextual, so a token’s conditional depends on the rest of the sequence, and the product of their local conditionals need not be a valid joint distribution. We therefore, compose the experts at the level of the whole sequence, and recover the local pool as the position-factorized special case. 
+
+Sequence-level composition. The local pool in (1) is sufficient for position-factorized experts. The contextual experts here are the same q1, . . . , q m defined above; there is no separate set of models. For these experts, however, multiplying their position-wise conditionals need not produce a normalized joint distribution. We therefore define the sequence model directly. Let ϕi,ℓ (x) ∈ R denote the energy that expert i assigns to position ℓ within sequence x; Section 4 later constructs its practical surrogate. The resulting normalized log-linear prior is 
+
+Qλ(x) = 1 
+
+> Z(λ)
+
+exp 
+
+ PLℓ=1 
+
+Pmi=1 λℓ,i ϕi,ℓ (x)
+
+
+
+,Z(λ) = P 
+
+> x′∈V L
+
+exp 
+
+ P 
+
+> ℓ,i
+
+λℓ,i ϕi,ℓ (x′)
+
+
+
+.
+
+(2) Its marginal likelihood for the observation is pλ(y) = P 
+
+> x
+
+pc(y | x)Qλ(x). When all experts are position-factorized and ϕi,ℓ (x) = log πi,ℓ (xℓ), Qλ factorizes and reduces to the local construction in (1). For contextual experts, the evidence under (2) remains our target, although the practical sampler is 4not known to draw from Qλ. Section 4 makes this approximation explicit. 
+
+Objective. Given the composed prior (2), the field is inferred from the corrupted observation alone. Define the log marginal likelihood of the observation, with the unknown clean sequence integrated out, and the total variation of the field along the sequence: 
+
+L(λ; y) = log P 
+
+> x∈V L
+
+pc(y | x) Qλ(x), Ω( λ) = PLℓ=2 ∥λℓ − λℓ−1∥1,
+
+ˆλ1: L ∈ arg max 
+
+> λ1: L∈∆Lm
+
+F (λ; y), F (λ; y) = L(λ; y) − τ Ω( λ), τ ≥ 0. (3) The regularizer admits a prior reading. A Laplace density on the increments λℓ − λℓ−1 with scale τ −1
+
+has log p(λ) = −τ Ω( λ) up to an additive constant, so F is the log posterior log p(y | λ) + log p(λ).Penalizing the increments in ℓ1 makes the maximizer piecewise constant, matching regions that persist and then change at a boundary. At τ = 0 the objective reduces to the evidence. When N corrupted observations share one field, as in the simulator of Section 5.1, we average 
+
+L(λ; y(n)) over n; every real-data experiment has one observation per document. For position-factorized experts and a memoryless channel (one that acts on each position indepen-dently, pc(y | x) = Q 
+
+> ℓ
+
+pc(yℓ | xℓ), as with the mask and replacement channels above), the evidence term separates across positions; this is proved as Proposition 2 in Appendix A.2. Only Ω couples adjacent positions, so at τ = 0 the objective decouples and each λℓ is optimized independently. This is the case used in the controlled simulator. Writing cn,ℓ (v) = pc(y(n) 
+
+> ℓ
+
+| xℓ = v), the contribution of position ℓ to the N -observation average becomes 
+
+Lℓ(λℓ) = 1
+
+> N
+
+PNn=1 log P 
+
+> v∈V
+
+cn,ℓ (v) πλℓ,ℓ (v),
+
+ˆλℓ ∈ arg max 
+
+> λℓ∈∆m
+
+Lℓ(λℓ). (4) We use this tractable case for controlled validation. For contextual experts, the sequence-level objective (3) remains the target. 
+
+Expert requirements. Each expert qi must expose two operations for our method; we do not introduce new models here. A discrete flow-matching model, equivalently a mask-source discrete diffusion model, generates a sequence from a fully masked state by iteratively revealing tokens along a time schedule: at each step a denoiser predicts the clean token at every masked position from the revealed context, trained by a schedule-weighted denoising cross-entropy whose population value upper-bounds sequence negative log likelihood [16–21]. Unlike autoregressive models the denoiser is non-causal, conditioning on both sides of a masked position, which makes these models natural priors for restoration; we use them as our experts. Given a partially masked context z and time t, each expert returns logits hi(z, t )ℓ,v for the clean token at each position, with softmax pθi (xℓ = v | z, t ). It must also evaluate its denoising loss on a candidate clean sequence. Beyond these operations, the method is agnostic to architecture and model size. 54 Method 
+
+Proofs of the statements in this section are collected in Appendix A, apart from the short argument for Lemma 1, which we keep in place because it is what makes the update a minorize-maximize step. 
+
+4.1 The evidence gradient 
+
+The update direction is the gradient with respect to λ of the sequence-level evidence (3). The simplex constraint λℓ ∈ ∆m is not imposed on the gradient itself; it is maintained by the multiplicative exponentiated-gradient update in Eq. (10), which renormalizes each λℓ back onto the simplex after every step. The deployed sampler is not known to draw from Qλ, so the result below describes the exact target rather than the practical estimator. 
+
+Proposition 1 (Sequence-level evidence gradient) . Let Qλ be the normalized composed prior (2) with finite energies ϕi,ℓ , let pc(y | x) be a channel with P 
+
+> x
+
+pc(y | x)Qλ(x) > 0, and let Qλ(x | y) ∝ pc(y |
+
+x)Qλ(x) be the induced posterior. Then L(λ; y) = log pλ(y) is differentiable in λ on the relative interior of ∆Lm and, for every position ℓ and expert i,
+
+∂L (λ; y)
+
+∂λ ℓ,i 
+
+= Ex∼Qλ(·| y)
+
+ϕi,ℓ (x)
+
+− Ex∼Qλ
+
+ϕi,ℓ (x).
+
+(5) Appendix A.1 gives the proof. The gradient has a simple interpretation: it compares the same local expert energy under sequences consistent with the observation and under sequences drawn from the composed prior. A coordinate increases relative to the others when its expert has a larger posterior-minus-prior energy gap. We call this difference the evidence correction ; Section 5.4 compares it with local heuristics that omit the prior term. Expert-specific additive offsets cancel in the subtraction, but relative scales do not, so the correction alone does not calibrate the experts. At a masked position the local likelihood is flat, so in a factorized model the evidence gradient vanishes there (Proposition 3, proved in Appendix A.2); evidence then reaches the position only through contextual dependence in the sequence model or through smoothing from neighbors, the two mechanisms our single-observation real-data experiments rely on. 
+
+4.2 Denoising losses as local expert energies 
+
+The exact gradient requires local expert energies. Recall from Eq. (2) that the local expert energy 
+
+ϕi,ℓ (x) ∈ R is the contribution of position ℓ to the log score expert i assigns to the whole sequence x,so that expert i’s total log score is P 
+
+> ℓ
+
+ϕi,ℓ (x) up to the normalizer; a higher ϕi,ℓ (x) means expert i
+
+finds the token at position ℓ more compatible with its context. Flow-matching models do not expose normalized sequence densities directly, but their denoising losses provide a tractable surrogate. Let 
+
+pt(· | x) denote the mask-source path that reveals each position of candidate sequence x independently with probability κ(t) at time t and masks it otherwise, where κ is an increasing schedule with κ(0) = 0 
+
+and κ(1) = 1 . The schedule-weighted population denoising loss is a variational upper bound on 6sequence negative log likelihood [16, 17, 19, 20]. For an unrestricted Bayes-optimal denoiser, it recovers clean-data conditionals on contexts with positive qi-probability. Their order-averaged negative log scores are E⋆i,ℓ (x) = Eσ[− log qi(xℓ | xPσ (ℓ))] , where σ is a uniformly random order and Pσ(ℓ) contains the positions preceding ℓ [27–29]. By the chain rule these scores sum to − log qi(x). For a factorized expert, E⋆i,ℓ is the token negative log density, while ϕi,ℓ (x) = −E ⋆i,ℓ (x) is the token log density. In practice, we approximate this energy using K sampled times: 
+
+\DScore i,ℓ (x) = 1
+
+> K
+
+PKk=1 − log softmax v=xℓ hi(xtk , t k)ℓ,v ,
+
+ˆsi,ℓ (x) = −αi \DScore i,ℓ (x), (6) where tk ∼ U[0 , 1] and xtk ∼ ptk (· | x). Because \DScore i,ℓ omits the schedule weight, we call it a denoising score rather than a Negative ELBO (NELBO). We use ˆsi,ℓ as a surrogate for ϕi,ℓ ; in the factorized case, it plays the role of the token log density log πi,ℓ . The negative sign maps a lower denoising loss to greater compatibility. Additive expert-specific offsets cancel from the evidence correction, whereas the scales αi do not. We set αi = 1 throughout. The specialization check measures whether each expert favors its intended domain, but it does not calibrate these relative scales. To estimate the two expectations, we compose the logits as hλ(z, t )ℓ,v = P 
+
+> i
+
+λℓ,i hi(z, t )ℓ,v . Given 
+
+hλ and observation y, the sampler S(hλ, y ) returns an unclamped particle set Xpr = {x(b)pr }Pb=1 and an observation-clamped set Xpo = {x(b)po }Pb=1 . We use their empirical averages for Eprior and Epost ,respectively. Averaging the surrogate over these two particle sets gives the implemented gradient estimate for ∂L (λ; y)/∂λ ℓ,i ,
+
+gℓ,i = − αi Epost 
+
+ \DScore i,ℓ (x)
+
++ αi Eprior 
+
+ \DScore i,ℓ (x). (7) 
+
+Relation to the exact objective. Equation (5) is exact for the normalized model (2), whereas (7) replaces its energies with finite-sample denoising scores, omits the schedule weight, scores revealed positions, and uses a composed-logit sampler not known to target Qλ. Thus the deployed score is not asserted to be a likelihood bound. We therefore call the method evidence-aligned rather than evidence-maximizing and compare it with the exact objective in Section 5.1. 
+
+4.3 Optimization, smoothing and decoding 
+
+The two terms of (3) call for different treatment: L is smooth in λ but not concave, while Ω is convex but nonsmooth. We therefore take a gradient step on L and a proximal step on Ω. Throughout, 
+
+g(s) denotes the estimate (7) of ∇λL at the current iterate λ(s); the derivation is stated for the exact gradient, and g(s) substitutes for it in the deployed algorithm. 
+
+The evidence is a difference of convex functions. Write c(x) = pc(y | x) and recall Φλ(x) = 
+
+P 
+
+> ℓ,i
+
+λℓ,i ϕi,ℓ (x), which is affine in λ. Splitting the evidence into its two normalizers, 
+
+L(λ; y) = log P 
+
+> x
+
+c(x)eΦλ(x) − log P 
+
+> x
+
+eΦλ(x), (8) 7exhibits it as a difference of two log-sum-exp functions of affine arguments, both convex. Since VL is finite and every summand is positive, L is smooth; it is not concave, and (3) is not a concave program. 
+
+A concave surrogate, tight at the current iterate. Lemma 1 (Minorant) . Fix λ(s) in the relative interior of ∆Lm and set M (λ | λ(s)) = Ex∼Qλ(s) (·| y)
+
+Φλ(x)−
+
+log Z(λ). Then (i) L(λ; y) ≥ M (λ | λ(s)) + κ for a constant κ independent of λ, with equality at 
+
+λ = λ(s); (ii) M (· | λ(s)) is concave; and (iii) its gradient at λ(s) is the evidence gradient (5) .Proof. For (i) , apply Jensen to the first term of (8) using the weights Qλ(s) (x | y) ∝ c(x)eΦλ(s) (x), which are positive and sum to one; κ collects their entropy and E[log c]. Jensen is tight when the weights are proportional to the summand, that is at λ = λ(s). For (ii) , E[Φ λ(x)] is affine in λ and log Z is convex, so the difference is concave. For (iii) , the first term is affine in λ with its expectation taken under the 
+
+fixed law Qλ(s) (· | y), so it differentiates to Ex∼Qλ(s) (·| y)[ϕi,ℓ (x)] , while ∂ log Z(λ)/∂λ ℓ,i = Ex∼Qλ [ϕi,ℓ (x)] 
+
+by the exponential-family identity used in Proposition 1. Setting λ = λ(s) turns the second expectation into one under Qλ(s) and recovers (5). Proposition 1 is thus the gradient of a concave surrogate that touches L at the current iterate. Since −τ Ω is concave, M − τ Ω minorizes F , and maximizing it exactly would give monotone ascent, 
+
+F (λ(s+1) ) ≥ M (λ(s+1) | λ(s)) − τ Ω( λ(s+1) ) + κ ≥ F (λ(s)). That maximization is intractable, as M
+
+contains log Z. We therefore take one composite mirror ascent step on its linearization, with the entropic mirror map on each row: 
+
+λ(s+1) = arg max 
+
+> λ∈∆Lm
+
+n
+
+⟨g(s), λ ⟩ − τ Ω( λ) − 1
+
+> η
+
+P 
+
+> ℓ
+
+DKL 
+
+ λℓ ∥ λ(s)
+
+> ℓ
+
+o
+
+. (9) The entropic map is the natural geometry on a product of simplices: it keeps every iterate in the relative interior without an explicit projection, and its Bregman divergence is the KL divergence. 
+
+Splitting (9) into two exactly solved steps. Equation (9) has no closed form, because Ω couples adjacent rows. Dropping Ω leaves a problem that does: each row of the τ = 0 case of (9) is solved exactly by 
+
+˜λ(s+1)  
+
+> ℓ,i
+
+= λ(s) 
+
+> ℓ,i
+
+exp  η g (s)
+
+> ℓ,i
+
+P 
+
+> j
+
+λ(s) 
+
+> ℓ,j
+
+exp  η g (s)
+
+> ℓ,j
+
+ . (10) The normalization in (10) is the Bregman projection onto the simplex: dividing by the row sum is the exact solution of arg min λℓ∈∆m DKL 
+
+ λℓ ∥ λ(s) 
+
+> ℓ
+
+eηg (s)
+
+> ℓ
+
+. Equation (10) is therefore a single mirror ascent step, not a gradient step followed by a separate renormalization. The penalty is then applied as a proximal step from that point, 
+
+λ(s+1) = arg min 
+
+> λ1: L∈∆Lm
+
+n 12
+
+X
+
+> ℓ
+
+λℓ − ˜λ(s+1)  
+
+> ℓ
+> 22
+
++ τ Ω( λ)
+
+o
+
+, (11) 8the step Smooth τ of Algorithm 1, which returns a piecewise-constant field. The simplex constraint sits inside the argmin, so (11) is the proximal map of τ Ω together with the constraint indicator, not of τ Ω
+
+alone. The order of the two steps is determined by scale. The quadratic term in (11) is not scale invariant, and the unnormalized vector λ(s) 
+
+> ℓ
+
+eηg (s) 
+
+> ℓ
+
+has total mass varying with g(s). Applying (11) before (10) would therefore let the effective strength of τ drift with the gradient magnitude across iterations. Normalizing first fixes the scale, and it makes Ω measure variation in composition rather than in magnitude. For two experts, λℓ = ( aℓ, 1 − aℓ) reduces (11) to min a 12
+
+P
+
+> ℓ
+
+(aℓ − ˜aℓ)2 + τ P 
+
+> ℓ≥2
+
+|aℓ − aℓ−1| up to an overall factor of two, the scalar fused lasso [34], which Condat’s algorithm solves exactly in linear time [35]. Its solution cannot leave the range of its input, so it stays in [0 , 1] , the constraint is slack, and (11) is solved exactly; this covers every two-expert study in the paper. For three or more experts we apply the same map per column and renormalize, which does not maximize (11), since the proximal map of a sum is not the composition of the proximal maps. 
+
+Scope of the derivation. Each step solves a stated problem exactly: (10) is the τ = 0 case of (9), and (11) is solved exactly for two experts. Their composition, however, is not (9): the forward step is taken in the KL geometry and the backward step in the Euclidean one, and a composition of proximal maps is not in general the proximal map of the sum. With the nonconcavity of (8), this places the procedure as a splitting with a structural prior, for which we claim no convergence. The experiments on naturally mixed documents instead use a low-pass filter, convolving each column with a uniform kernel and blending with the unsmoothed field; it attenuates variation uniformly rather than preserving edges, and its τ is a blend weight, not comparable with (11). The constructed studies use the proximal step at every scale, the naturally mixed document studies use the filter, and the simulator uses neither; Appendix B.4 gives each experiment’s form and τ .Once the field has been inferred, we restore each masked token by selecting the per-position mode of the composed logits, 
+
+ˆxℓ = arg max 
+
+> v∈V
+
+P 
+
+> i
+
+ˆλℓ,i hi(z, t dec )ℓ,v , ℓ ∈ M, (12) where M is the masked set, z contains the visible tokens, and all visible positions are copied unchanged. The decoder fills masked positions independently and therefore returns per-position modes rather than the joint posterior mode of Qλ. At byte scale, decoding is deterministic given the field. The pretrained decoder also samples a uniform-source initialization, fixed once per document and shared across methods to pair decoding randomness; the iterative-decoder ablation preserves the ordering. Algorithm 1 summarizes the procedure using the score ˆs of (6). 
+
+# 5 Experiments 
+
+Our experiments address two questions: can the evidence-aligned update recover a known composition field, and does the recovered field improve restoration? We begin with an exact categorical simulator, 9Algorithm 1 Evidence-aligned local composition 
+
+Require: masked y with masked set M , experts {hi}mi=1 , sampler S
+
+Require: particles P , score samples K, iterations R, step η
+
+Require: smoother Smooth τ , decoder time tdec  
+
+> 1:
+
+λ(0)  
+
+> ℓ,i
+
+← 1/m for all ℓ, i  
+
+> 2:
+
+for s = 0 , . . . , R − 1 do  
+
+> 3:
+
+(Xpr , Xpo ) ← S (hλ(s) , y ) 
+
+> 4:
+
+g(s) ← gradient estimate (7) from Xpr , Xpo  
+
+> 5:
+
+˜λ(s+1)  
+
+> ℓ,i
+
+∝ λ(s) 
+
+> ℓ,i
+
+exp( ηg (s) 
+
+> ℓ,i
+
+), renormalize over i 
+
+> 6:
+
+λ(s+1) ← Smooth τ
+
+ ˜λ(s+1)  
+
+> 7:
+
+end for  
+
+> 8:
+
+ˆλ1: L ← λ(R)1: L ; initialize decoder state z from y 
+
+> 9:
+
+ˆxℓ ← decode (12) for ℓ ∈ M ; ˆxℓ ← yℓ otherwise  
+
+> 10:
+
+return ˆλ1: L, ˆx
+
+where field recovery can be measured directly, then turn to learned byte-level experts and to experts adapted from a 1.3B discrete flow-matching model, and close with naturally mixed documents, whose regions are not constructed for the experiment. 
+
+Protocol. Within an experiment all methods share the frozen experts, corrupted input, channel, decoder, and source initialization; only the composition weights vary. Comparisons are paired over the stated unit, aggregating by source document when a document contributes several windows, and we report 95% bootstrap intervals, two-sided sign-flip permutation p-values, and Cohen’s dz . Unless noted, the channel is masking. 
+
+Metrics. We report restoration quality and field quality separately. Restoration accuracy is the fraction of corrupted positions recovered exactly. For the field we use two measures, according to what is known. When the true field λ⋆ is available, as in the simulator of Section 5.1, we report the 
+
+field mean absolute error 1
+
+> Lm
+
+P 
+
+> ℓ,i
+
+|ˆλℓ,i − λ⋆ℓ,i |. When only region labels are available, which is every learned-expert setting, we report field accuracy , the fraction of positions at which arg max i ˆλℓ,i equals the region label. Field accuracy is meaningful only for a position-varying field: a constant field has the same argmax everywhere, and we mark those entries ·. Region labels enter the metric only, never the method, the hard label router excepted, which is privileged for that reason. 
+
+Baselines. We compare local evidence with each individual expert, equal weights, an independently optimized global weight that enforces λℓ = λ under the same optimization, reported at the byte, 
+
+1.3B and arXiv scales, a best-single-expert selector given by the vertex with the lowest own-posterior denoising score, shuffled-field controls, and a hard router that receives the true region labels. The router is privileged but not an upper bound, since a soft composition can mix experts near region boundaries. Section 5.4 adds three local routers that omit the evidence correction, and we adapt three published test-time fusion methods to corrupted windows: PackLLM in its softmax and greedy variants 10 Table 2: Field recovery and reconstruction in the categorical simulator (exact posterior decoder). Recon.: masked-token accuracy.                      
+
+> Weights MAE ↓Recon. ↑
+> Ground-truth λ⋆0.000 0.652
+> Exact evidence 0.013 0.652
+> Flow-matching surrogate 0.031 0.652
+> Equal weights 0.333 0.634
+> Single expert (either) 0.500 0.382 010 20 30 40
+> Position
+> 0.0 0.5 1.0
+> λℓ, 1
+> Ground truth Exact evidence Flow-matching surrogate
+
+Figure 1: Recovering a known field from corrupted observations alone: two routed segments (positions 
+
+0 to 31 ) and a fused segment ( 32 to 47 ). [4], a DEMix-style per-position posterior router [9], and a marginal-evidence selector [8]. Each scores the visible tokens with the experts’ own denoising losses and feeds the same decoder. Appendices B.6 and C.10 detail every baseline and the full statistical protocol. 
+
+5.1 Recovering a known composition field 
+
+We begin where the composition field is known exactly. The categorical simulator uses vocabulary size 
+
+12 , length 48 , and two experts, with three segments (two routed, one mixed); we draw a clean sequence from the composed prior and corrupt it with the replacement channel at rate 0.4. Optimizing the exact evidence (4) recovers the field at mean absolute error 0.013 , versus 0.333 for equal weights and 0.500 for a single expert (Figure 1); replacing the exact densities with two trained flow-matching experts and the denoising surrogate (6) raises the error only to 0.031 , and the surrogate energy correlates 0.974 /0.971 
+
+with the exact log likelihood. Under the exact posterior decoder the recovered and ground-truth fields both reach accuracy 0.652 , above equal weights ( 0.634 ) and either expert ( 0.382 ; Table 2). A broader sweep shows recovery improving with more observations and greater separation and degrading with corruption. 
+
+5.2 Byte-level experts 
+
+Now we consider learned byte-level experts, first pairing prose and code on masked software-documentation windows. On a single corruption seed, local evidence reaches 0.534 , above the hard label router ( 0.514 ), best single expert ( 0.507 ), global weight ( 0.478 ), and equal weights ( 0.440 ); the adapted fusion baselines 11 Table 3: Three byte-level experts, 256 windows from 160 documents, mask channel, one-step decoder, equal-document estimand. Hard label router uses true labels (privileged, not an upper bound). Method Accuracy ↑ ∆ vs ours 95% CI p dz
+
+Local evidence (ours) 0.660 · · · ·
+
+Hard label router 0.658 +0 .001 [−0.003 , +0 .006] 0.50 0.05 
+
+PackLLM-sim fusion [4] 0.622 +0 .038 [+0 .032 , +0 .044] < 10 −3 0.99 
+
+PackLLM-opt fusion [4] 0.619 +0 .041 [+0 .035 , +0 .046] < 10 −3 1.13 
+
+Independent global weight 0.618 +0 .042 [+0 .037 , +0 .048] < 10 −3 1.18 
+
+Best single expert (marginal evidence) [8] 0.613 +0 .047 [+0 .041 , +0 .053] < 10 −3 1.20 
+
+Best single expert (own posterior) 0.613 +0 .047 [+0 .041 , +0 .053] < 10 −3 1.21 
+
+DEMix router [9] 0.612 +0 .047 [+0 .041 , +0 .054] < 10 −3 1.09 
+
+Equal weights 0.564 +0 .096 [+0 .088 , +0 .104] < 10 −3 1.82 
+
+Shuffled field (within doc) 0.541 +0 .119 [+0 .110 , +0 .128] < 10 −3 2.02 
+
+fall in the same band ( 0.508 PackLLM-sim, 0.504 PackLLM-opt, 0.507 marginal, 0.492 DEMix). Averaged over three corruption seeds the same ordering holds within 0.003 per method (Table S5). The largest gain is in code regions, where accuracy rises from 0.410 (equal) to 0.577 , likely because the soft field composes experts near a boundary rather than committing to one region. We then add a configuration expert for the main three-expert setting; each window spans at least two regimes with a minimum length so no region dominates. Across 256 windows from 160 documents, local evidence reaches document-weighted accuracy 0.660 (Table 3), indistinguishable from the hard label router (p = 0 .50 ) and above the best single expert, the independently optimized global weight, equal weights, every individual expert, and the adapted literature baselines (all p < 10 −3). Shuffling the field within a document costs 0.119 and across documents 0.181 , so restoration depends on where the weights are placed, not only their average; the field recovers the three regimes at macro one-versus-rest AUROC 
+
+0.993 , and an iterative decoder preserves the ordering. Figure 2 shows representative windows and a failure case chosen by prespecified rules: in the two median windows the field approaches each region’s expert in the interior and turns within a few positions of the boundary, while in the lowest-performing window for the harder pair it identifies the prose and code interiors but briefly weights the absent configuration expert near their transition. Errors thus concentrate at region boundaries. 
+
+5.3 Pretrained experts at scale 
+
+We then ask whether the same behavior persists when the experts are adapted from a large pretrained model. We fine-tune prose and code experts with rank-16 LoRA from a shared 1.3B discrete flow-matching model. The evaluation uses constructed windows sampled with replacement. The statistical unit here is the window rather than the source document, since source-document identities are not tracked in this setting; possible reuse of source material across windows is therefore a limitation. 12 01          
+
+> λℓ
+> true Typical prose and code window (field accuracy 0.99)
+> 01
+> λℓ
+> true Typical prose and configuration window (field accuracy 0.99)
+> 050 100 150 200 250
+> Position in document
+> 01
+> λℓ
+> true Hardest prose and code window (field accuracy 0.93)
+> prose code config
+
+Figure 2: Recovered fields for constructed windows. Ribbon: true regions; curves: weights λℓ inferred from the masked window alone. 
+
+These results fall outside Proposition 1’s assumptions. The denoising-loss argument of Section 4 is stated for the mask-source path, but this 1.3B base model has a uniform source, so at intermediate times a corrupted position holds a random token rather than a mask symbol. We have no analogue of the identity for that path, so here the per-position denoising score is a heuristic energy rather than an order-averaged conditional log score, and the mismatch is uncontrolled. This applies to every result in this subsection and to both natural-document settings, which is to say to the results we lead with. Their high field accuracy shows the surrogate stays informative; it does not validate the identity for a uniform source. The supplement discusses the uniform-source mismatch in full. Local evidence reaches 0.653 , above the independently optimized global weight ( 0.611 ; +0 .042 , 95% 
+
+CI [+0 .039 , +0 .046] , p < 10 −3, dz = 1 .47 ), the best single expert ( 0.599 ), and equal weights ( 0.599 ;Table 4); the adapted PackLLM and marginal-evidence baselines track the global family, all below local ( p < 10 −3), and the field agrees with the true regions at 0.995 . A single expert fine-tuned on the union of both domains, the “train one model on everything” alternative, needs pooled data our setting does not assume yet reaches only 0.636 (above the global weight, below local; +0 .017 , p < 10 −3)and falls to 0.649 on the README documents of Section 5.5, below both the global weight and the best single expert. This union expert receives the same 6000 fine-tuning steps as each specialist while covering twice the domain diversity, so it is undertrained relative to a specialist by construction and the comparison is not compute-matched; it bounds what one model trained on the pooled domains achieves at a matched step count, not at a matched budget. The independent global is not detectably different from the field-average reference ( 0.611 versus 0.610 , p = 0 .72 ), the privileged hard label router is 0.002 higher than local evidence ( 0.655 , p = 0 .01 ), and the ordering is stable across mask rates. 13 Table 4: Fine-tuned 1.3B experts, 256 windows, mask rate 0.3. Paired differences vs local evidence. 
+
+> ∗
+
+p < 0.05 , ∗∗∗ p < 10 −3.                          
+
+> Method Acc. ∆vs ours
+> Local evidence 0.653 ·
+> Hard label router 0.655 −0.002 ∗
+> Single generalist (union) 0.636 +0 .017 ∗∗∗
+> PackLLM-opt 0.616 +0 .037 ∗∗∗
+> Independent global 0.611 +0 .042 ∗∗∗
+> PackLLM-sim 0.605 +0 .048 ∗∗∗
+> Best single (own post.) 0.599 +0 .054 ∗∗∗
+> Best single (marginal) 0.599 +0 .055 ∗∗∗
+> Equal weights 0.599 +0 .054 ∗∗∗
+> Shuffled field 0.570 +0 .083 ∗∗∗
+> Prose expert 0.511 +0 .142 ∗∗∗
+> Field accuracy 0.995
+
+5.4 Local routers without the evidence correction 
+
+The preceding comparisons show that position-dependent weights can help, but they do not establish that the posterior-minus-prior correction is responsible. We therefore compare against three routers that replace the evidence update with a local heuristic: normalized per-expert scores (a DEMix-style responsibility router [9]), raw denoising loss without the prior term, and a two-state HMM over the per-expert scores. In the two pretrained settings, the responsibility, raw-loss and HMM routers perform at or below equal weights and trail local evidence ( p < 10 −3; Table 5); at 1.3B the first two land on equal weights to within 0.001 . They also trail on the arXiv documents of Section 5.5 ( 0.653 , 0.650 and 0.644 against 
+
+0.691 ; Table 6). Their field accuracy is far lower throughout ( 0.80 , 0.81 and 0.72 against 0.995 at 1.3B; 
+
+0.56 , 0.56 and 0.51 against 0.765 on README). Local evidence is thus the only router that combines strong restoration with high field accuracy across settings. We caution that this section does not isolate the posterior-minus-prior correction on its own. Each comparison router differs from local evidence in more than one way at once; the raw local-loss router, for instance, drops both the prior expectation and the imputed-particle posterior estimate, since the adapted baselines score only visible tokens. Attributing the gap to the prior term alone would need an ablation that keeps the deployed posterior term and removes only the prior expectation, which we have not run. 
+
+5.5 Naturally mixed documents 
+
+Constructed mixtures have known boundaries; we now test whether local composition helps on documents whose regions arise naturally. Scientific articles interleave natural-language prose with LATEX mathematics, two lexically distant regimes that co-occur in every paper. We fine-tune prose and mathematics experts from the 1.3B model on collected arXiv sources and label each token by its math environment; the two experts separate strongly, with margins of 0.47 and 0.46 nats. Across 14 Table 5: Local routers that omit the posterior-minus-prior correction, across the three settings; each router cell is masked-token accuracy / field accuracy. References are constant fields (accuracy only); the global weight is the independent one at byte and 1.3B and the jointly optimized one on README, which are indistinguishable where both were run. The byte and README columns are document-weighted; the 1.3B column takes the window as the unit, as declared in Section 5.3. The HMM router was not run at byte scale.                         
+
+> Method Byte 1.3BREADME
+> Local evidence .66 /. 97 .65 /. 99 .71 /. 77
+> DEMix resp. .61 /. 96 .60 /. 80 .69 /. 56
+> Raw local-loss .55 /. 57 .60 /. 81 .69 /. 56
+> HMM n/a .57 /. 72 .68 /. 51
+> Equal (ref.) .56 .60 .71
+> Global weight .62 .61 .71
+> PackLLM-opt .62 .62 .71
+
+Table 6: Distinct natural experts: arXiv prose and L ATEX mathematics, 256 windows from 71 documents, mask rate 0.3, document-clustered. Field: field accuracy ( · = constant field). Best in each column is bold, the oracle label router excepted. ∗∗∗ p < 10 −3.                                    
+
+> Method Acc. Field ∆
+> Oracle labels 0.702 ·−0.011 ∗∗∗
+> Local evidence 0.691 0.852 ·
+> Global weight (independent) 0.682 ·+0 .010 ∗∗∗
+> PackLLM-opt 0.679 ·+0 .012 ∗∗∗
+> PackLLM-sim 0.676 ·+0 .015 ∗∗∗
+> Equal weights 0.673 ·+0 .018 ∗∗∗
+> Best single 0.669 ·+0 .022 ∗∗∗
+> Best single (marg.) 0.666 ·+0 .024 ∗∗∗
+> DEMix router 0.653 0.621 +0 .038 ∗∗∗
+> Raw local-loss 0.650 0.623 +0 .041 ∗∗∗
+> HMM router 0.644 0.555 +0 .049 ∗∗∗
+
+256 windows from 71 documents with document-clustered statistics, local evidence reaches accuracy 
+
+0.691 and outperforms an independently optimized global weight by 0.010 (p < 10 −3, dz = 0 .56 ), equal weights by 0.018 , and the best single expert by 0.022 (Table 6), while recovering the regions at field accuracy 0.852 . The adapted global-fusion baselines match the global weight (PackLLM-opt +0 .012 ,PackLLM-sim +0 .015 , marginal-evidence +0 .024 ; all p < 10 −3), and the local routers of Section 5.4 trail it further. Local evidence is therefore the only method here that both improves restoration over the global family and attributes the regions faithfully. Whether local composition improves on a global weight in natural documents appears to depend on how distinct the experts are. When they converge on the evaluation text, as with prose and code experts fine-tuned on matched README corpora, we detect no restoration gain over a global weight (0.709 versus 0.708 ), and the field instead contributes regional attribution (field accuracy 0.765 ). This is consistent with the constructed-mixture trend in which greater separation yields a larger gain, but it 15 rests on two natural settings, so we report it as an observation rather than as a rule that predicts the regime in advance. 
+
+# 6 Conclusion 
+
+We introduced evidence-aligned local composition, a test-time method for restoring corrupted discrete sequences with frozen experts and no region supervision or trained router: instead of one expert per sequence, it infers a simplex-valued field from the corrupted observation, whose evidence gradient, for a normalized sequence energy model, is exactly a posterior-minus-prior difference of expert energies estimated from the experts’ denoising losses (the deployed algorithm only approximates this, so we call it evidence-aligned). The most consistent result is recovery of position-wise expert preference: on constructed windows the field tracks the known regions and outperforms an independently optimized global weight, and on natural documents the gain tracks expert separation, improving over the global family on distinct prose and L ATEX mathematics and reducing to attribution on converged README prose and code. Three limitations. First, the schedule-weighted likelihood identity requires a Bayes-optimal mask-source denoiser on supported contexts, whereas the deployed unweighted score remains a surrogate, the composed-logit sampler is not known to draw from Qλ, and the 1.3B experts have a uniform source for which we have no analogue of the identity at all. Second, composition helps when the experts are specialized and distinct, its advantage over a global weight vanishing when they converge. Third, our comparisons do not isolate the posterior-minus-prior correction on its own, since every local router we compare against differs from local evidence in more than one way at once; an ablation that keeps the deployed posterior term and removes only the prior expectation remains open. 
+
+# Acknowledgments 
+
+Shuchin Aeron would like to acknowledge support by NSF under Cooperative Agreement PHY-2019786 and NSF DMS 2309519. 16 References 
+
+[1] G. E. Hinton. Training products of experts by minimizing contrastive divergence. Neural Computation , 14(8), 2002. [2] N. Liu, S. Li, Y. Du, A. Torralba, and J. B. Tenenbaum. Compositional visual generation with composable diffusion models. In ECCV , 2022. [3] Y. Du, C. Durkan, R. Strudel, J. B. Tenenbaum, S. Dieleman, R. Fergus, J. Sohl-Dickstein, A. Doucet, and W. Grathwohl. Reduce, reuse, recycle: Compositional generation with energy-based diffusion models and MCMC. In ICML , 2023. [4] C. Mavromatis, P. Karypis, and G. Karypis. Pack of LLMs: Model fusion at test-time via perplexity optimization, 2024. [5] Q. Zhang, M. Li, Z. Wang, R. Liao, and L. Wang. Test-time steering for lossless text compression via weighted product of experts. In Findings of the Association for Computational Linguistics: EMNLP , pages 2076–2088, 2025. arXiv:2511.10660. [6] D. J. C. MacKay. Bayesian interpolation. Neural Computation , 4(3), 1992. [7] F. Wang and K. L. Bouman. Optimizing diffusion priors in image reconstruction from a single observation, 2026. [8] F. Wang and K. L. Bouman. Sample-efficient evidence estimation of score-based priors for model se-lection. In International Conference on Learning Representations (ICLR) , 2026. arXiv:2602.20549. [9] S. Gururangan, M. Lewis, A. Holtzman, N. A. Smith, and L. Zettlemoyer. DEMix layers: Disentangling domains for modular language modeling. In NAACL , 2022. [10] H. Huang, Y. Xu, A. Mandal, and A. Aspuru-Guzik. From global to factor-wise expert composition in discrete diffusion models, 2026. [11] T. Garipov, S. De Peuter, G. Yang, V. Garg, S. Kaski, and T. Jaakkola. Compositional sculpting of iterative generative processes. In NeurIPS , 2023. [12] M. Skreta, L. Atanackovic, A. J. Bose, A. Tong, and K. Neklyudov. The superposition of diffusion models using the Itô density estimator. In ICLR , 2025. [13] F. Wan, X. Huang, D. Cai, X. Quan, W. Bi, and S. Shi. Knowledge fusion of large language models. In ICLR , 2024. [14] D. Jiang, X. Ren, and B. Y. Lin. LLM-Blender: Ensembling large language models with pairwise ranking and generative fusion. In ACL , 2023. [15] S. Sukhbaatar, O. Golovneva, V. Sharma, H. Xu, X. V. Lin, B. Rozière, J. Kahn, D. Li, W.-t. Yih, J. Weston, and X. Li. Branch-train-MiX: Mixing expert LLMs into a mixture-of-experts LLM, 2024. 17 [16] J. Austin, D. D. Johnson, J. Ho, D. Tarlow, and R. van den Berg. Structured denoising diffusion models in discrete state-spaces. In NeurIPS , 2021. [17] A. Campbell, J. Benton, V. De Bortoli, T. Rainforth, G. Deligiannidis, and A. Doucet. Acontinuous time framework for discrete denoising models. In NeurIPS , 2022. [18] A. Lou, C. Meng, and S. Ermon. Discrete diffusion modeling by estimating the ratios of the data distribution. In ICML , 2024. [19] S. S. Sahoo, M. Arriola, Y. Schiff, A. Gokaslan, E. Marroquin, J. T. Chiu, A. Rush, and V. Kuleshov. Simple and effective masked diffusion language models. In NeurIPS , 2024. [20] J. Shi, K. Han, Z. Wang, A. Doucet, and M. K. Titsias. Simplified and generalized masked diffusion for discrete data. In NeurIPS , 2024. [21] I. Gat, T. Remez, N. Shaul, F. Kreuk, R. T. Q. Chen, G. Synnaeve, Y. Adi, and Y. Lipman. Discrete flow matching. In NeurIPS , 2024. [22] Y. Lipman, R. T. Q. Chen, H. Ben-Hamu, M. Nickel, and M. Le. Flow matching for generative modeling. In ICLR , 2023. [23] S. Nie, F. Zhu, C. Du, T. Pang, Q. Liu, G. Zeng, M. Lin, and C. Li. Scaling up masked diffusion models on text. In ICLR , 2025. [24] S. Gong, S. Agarwal, Y. Zhang, J. Ye, L. Zheng, M. Li, C. An, P. Zhao, W. Bi, H. Peng, J. Han, and L. Kong. Scaling diffusion language models via adaptation from autoregressive models. In 
+
+ICLR , 2025. [25] S. Nie, F. Zhu, Z. You, X. Zhang, J. Ou, J. Hu, J. Zhou, Y. Lin, J.-R. Wen, and C. Li. Large language diffusion models, 2025. [26] J. Ye, Z. Xie, L. Zheng, J. Gao, Z. Wu, X. Jiang, Z. Li, and L. Kong. Dream 7B: Diffusion large language models, 2025. [27] J. Ou, S. Nie, K. Xue, F. Zhu, J. Sun, Z. Li, and C. Li. Your absorbing discrete diffusion secretly models the conditional distributions of clean data. In ICLR , 2025. arXiv:2406.03736. [28] B. Uria, I. Murray, and H. Larochelle. A deep and tractable density estimator. In ICML , 2014. [29] E. Hoogeboom, A. A. Gritsenko, J. Bastings, B. Poole, R. van den Berg, and T. Salimans. Autoregressive diffusion models. In ICLR , 2022. [30] H. Chung, J. Kim, M. T. McCann, M. L. Klasky, and J. C. Ye. Diffusion posterior sampling for general noisy inverse problems. In ICLR , 2023. [31] B. Kawar, M. Elad, S. Ermon, and J. Song. Denoising diffusion restoration models. In NeurIPS ,2022. 18 [32] H. Nisonoff, J. Xiong, S. Allenspach, and J. Listgarten. Unlocking guidance for discrete state-space diffusion and flow models. In ICLR , 2025. [33] Y. Schiff, S. S. Sahoo, H. Phung, G. Wang, S. Boshar, H. Dalla-Torre, B. P. Almeida, A. M. Rush, T. Pierrot, and V. Kuleshov. Simple guidance mechanisms for discrete diffusion models. In ICLR ,2025. [34] Robert Tibshirani, Michael Saunders, Saharon Rosset, Ji Zhu, and Keith Knight. Sparsity and smoothness via the fused lasso. Journal of the Royal Statistical Society: Series B , 67(1):91–108, 2005. [35] Laurent Condat. A direct algorithm for 1-D total variation denoising. IEEE Signal Processing Letters , 20(11):1054–1057, 2013. [36] Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer sentinel mixture models. In International Conference on Learning Representations , 2017. [37] Hamel Husain, Ho-Hsiang Wu, Tiferet Gazit, Miltiadis Allamanis, and Marc Brockschmidt. Code-searchnet challenge: Evaluating the state of semantic code search. arXiv preprint arXiv:1909.09436 ,2019. [38] Substratus AI. the-stack-yaml-k8s: Kubernetes yaml manifests from the stack. Hugging Face dataset, https://huggingface.co/datasets/substratusai/the-stack-yaml-k8s , 2023. [39] CodeParrot. codeparrot-clean: a deduplicated python subset of github code. Hugging Face dataset, 
+
+https://huggingface.co/datasets/codeparrot/codeparrot-clean , 2022. [40] Riabov, Maksim. github-top1000-repos-markdown: Readme and markdown files from the 1000 most-starred github repositories. Hugging Face dataset, https://huggingface.co/datasets/ MRiabov/github-top1000-repos-markdown , 2024. [41] Hoskinson Center for Formal Mathematics. proof-pile: a corpus of mathematical text. Hugging Face dataset, https://huggingface.co/datasets/hoskinson-center/proof-pile , 2022. 19 Appendices 
+
+Equations, tables and figures introduced in this appendix carry an S prefix and appendix sections are lettered; plain numbers refer to the main text. Proposition numbering continues from the main text, whose Proposition 1 is proved below. 
+
+# A Proofs 
+
+Appendix A.1 proves Proposition 1 of the main text, the sequence-level evidence gradient that the method rests on. Appendix A.2 proves the position-factorized special case, which is the form used in the controlled simulator. 
+
+A.1 The sequence-level evidence gradient 
+
+We first fix notation and state the standing assumptions, then prove the identity in full. 
+
+Setting. The vocabulary V is finite and the length L is fixed, so the state space VL is finite. Each energy ϕi,ℓ : VL → R is finite valued. For λ ∈ RL×m write 
+
+Φλ(x) = PLℓ=1 
+
+Pmi=1 λℓ,i ϕi,ℓ (x),Z(λ) = P 
+
+> x′∈V L
+
+exp Φ λ(x′), (S1) so that the composed prior of (2) is Qλ(x) = exp Φ λ(x)/Z (λ). The channel pc(y | x) is arbitrary subject to pλ(y) = P 
+
+> x
+
+pc(y | x)Qλ(x) > 0, and the posterior is Qλ(x | y) = pc(y | x)Qλ(x)/p λ(y). No structure on the channel is needed: it need not be memoryless, and ϕi,ℓ may depend on the whole sequence. 
+
+Proof of Proposition 1. Step 1: the composed prior is positive and smooth in λ. Each Φλ(x′) is linear in λ with finite coefficients ϕi,ℓ (x′), so exp Φ λ(x′) is positive and infinitely differentiable in λ on all of 
+
+RL×m. As VL is finite, Z(λ) is a finite sum of such terms, hence Z(λ) > 0 and Z is smooth. Therefore 
+
+Qλ(x) > 0 and λ 7 → Qλ(x) is smooth for every x.
+
+Step 2: the evidence is smooth, so the derivative exists. pλ(y) = P 
+
+> x
+
+pc(y | x)Qλ(x) is a finite sum of smooth functions of λ and is therefore smooth. It is positive by assumption, so log pλ(y) is smooth, in particular differentiable on the relative interior of ∆Lm, and the posterior Qλ(· | y) is a well defined distribution on VL. Every interchange of differentiation and summation below is over a finite index set and so needs no further justification. 
+
+Step 3: the score of the composed prior. Since ∂Φλ(x)/∂λ ℓ,i = ϕi,ℓ (x), differentiating Z term by term gives 
+
+∂ log Z(λ)
+
+∂λ ℓ,i 
+
+= 1
+
+Z(λ)
+
+P 
+
+> x′
+
+exp  Φλ(x′) ϕi,ℓ (x′)= Ex′∼Qλ
+
+ϕi,ℓ (x′).
+
+20 Because log Qλ(x) = Φ λ(x) − log Z(λ), subtracting yields 
+
+∂ log Qλ(x)
+
+∂λ ℓ,i 
+
+= ϕi,ℓ (x) − Ex′∼Qλ
+
+ϕi,ℓ (x′). (S2) This is the exponential-family identity: the derivative of the log normalizer is the mean of the sufficient statistic, here the energy ϕi,ℓ .
+
+Step 4: differentiate the evidence. Differentiating pλ(y) term by term and using ∂Q λ = Qλ ∂ log Qλ,which is legitimate because Qλ(x) > 0 by Step 1, 
+
+∂ log pλ(y)
+
+∂λ ℓ,i 
+
+= 1
+
+pλ(y)
+
+P 
+
+> x
+
+pc(y | x) ∂Q λ(x)
+
+> ∂λ ℓ,i
+
+= P
+
+> x
+
+pc(y | x) Qλ(x)
+
+pλ(y)
+
+| {z } 
+
+> =Qλ(x|y)
+
+× ∂ log Qλ(x)
+
+∂λ ℓ,i 
+
+= Ex∼Qλ(·| y)
+
+h ∂ log Qλ(x)
+
+∂λ ℓ,i 
+
+i
+
+.
+
+The bracketed weight is nonnegative and sums to one over x, so the last line is an expectation under the posterior. 
+
+Step 5: conclude. Substitute (S2). The prior expectation Ex′∼Qλ [ϕi,ℓ (x′)] does not depend on x, so it passes through the posterior expectation unchanged, leaving 
+
+∂ log pλ(y)
+
+∂λ ℓ,i 
+
+= Ex∼Qλ(·| y)
+
+ϕi,ℓ (x)
+
+− Ex∼Qλ
+
+ϕi,ℓ (x),
+
+which is (5) and proves the proposition. 
+
+A.2 The factorized special case 
+
+Throughout this subsection we fix a position ℓ and suppress it when no ambiguity arises. Expert 
+
+i supplies the categorical distribution πi,ℓ at position ℓ, and ai(v) = log πi,ℓ (v). For λℓ ∈ ∆m, the composed local prior is the normalized log-linear pool from (1): 
+
+πλℓ,ℓ (v) = exp Aλℓ (v)
+
+Zλℓ
+
+,Aλℓ (v) = Pmj=1 λℓ,j aj (v), Zλℓ = P 
+
+> u∈V
+
+exp Aλℓ (u).
+
+(S3) We assume every expert assigns positive probability to every token, so that ai(v) is finite for all i and 
+
+v. This is the only regularity condition required for the local derivative arguments below, and it holds for the softmax parameterization of the experts we use. 21 We call the corruption channel memoryless when it acts on each position independently, so that it factorizes as pc(y | x) = QLℓ=1 pc(yℓ | xℓ). Both channels of Section 3 are memoryless: the mask channel replaces each token by [MASK ] independently with probability r, and the replacement channel replaces each token by an independent uniform draw from V.For position-factorized experts the composed prior factorizes in the same way, Qλ(x) = Q 
+
+> ℓ
+
+πλℓ,ℓ (xℓ).Substituting both factorizations into the marginal likelihood and exchanging the sum over sequences for a product of per-position sums, 
+
+pλ(y) = X
+
+> x∈V L
+> L
+
+Y
+
+> ℓ=1
+
+pc(yℓ | xℓ) πλℓ,ℓ (xℓ)=
+
+> L
+
+Y
+
+> ℓ=1
+
+X
+
+> v∈V
+
+pc(yℓ | v) πλℓ,ℓ (v),
+
+where the second equality is the distributive law: a sum over all sequences of a product of per-position factors equals the product of the per-position sums. Taking logarithms, log pλ(y) = P 
+
+> ℓ
+
+log P 
+
+> v∈V
+
+pc(yℓ |
+
+v) πλℓ,ℓ (v) is a sum of per-position terms, the ℓ-th of which depends on λ only through λℓ. Averaging over 
+
+N shared observations y(1) , . . . , y (N ) and writing cn,ℓ (v) = pc(y(n) 
+
+> ℓ
+
+| xℓ = v) recovers the per-position objective Lℓ(λℓ) of (4), whose maximization decouples across positions. Its gradient can therefore be read at a single position. Fix ℓ and, for observation n, define the channel posterior over the clean token as 
+
+γn,ℓ (v) = cn,ℓ (v) πλℓ,ℓ (v)
+
+P 
+
+> u
+
+cn,ℓ (u) πλℓ,ℓ (u) . (S4) 
+
+Proposition 2 (Local evidence gradient) . For λℓ in the relative interior of ∆m, the objective (4) is differentiable and 
+
+∂L ℓ(λℓ)
+
+∂λ ℓ,i 
+
+= 1
+
+> N
+
+PNn=1 Ev∼γn,ℓ 
+
+ai(v)
+
+− Ev∼πλℓ,ℓ 
+
+ai(v).
+
+(S5) We first isolate the derivative of the composed prior, which is where the normalizer of (S3) enters and which is the source of the prior term in the final expression. 
+
+Lemma 2 (Score of the log-linear pool) . For every λℓ in the relative interior of ∆m and every v ∈ V ,
+
+∂∂λ ℓ,i 
+
+log πλℓ,ℓ (v)= ai(v) − Eu∼πλℓ,ℓ 
+
+ai(u).
+
+(S6) 
+
+Proof. By (S3), log πλℓ,ℓ (v) = Aλℓ (v)−log Zλℓ . The first term is linear in λℓ with ∂A λℓ (v)/∂λ ℓ,i = ai(v).For the second, the sum defining Zλℓ is finite and each summand is a positive, smooth function of λℓ,22 so we may differentiate term by term: 
+
+∂∂λ ℓ,i 
+
+log Zλℓ = 1
+
+Zλℓ
+
+P 
+
+> u∈V
+
+exp  Aλℓ (u)ai(u)= P 
+
+> u∈V
+
+πλℓ,ℓ (u) ai(u) = Eu∼πλℓ,ℓ 
+
+ai(u).
+
+Subtracting gives (S6). Equation (S6) is the standard exponential-family identity: the derivative of the log-normalizer is the mean sufficient statistic under the current pool. The score is invariant to expert-specific additive constants in ai; this invariance does not remove scale differences or state-dependent surrogate errors. It also has zero mean under the current pool, Ev∼πλℓ,ℓ [∂λℓ,i log πλℓ,ℓ (v)] = 0 , which is the standard score-function identity. 
+
+Proof of Proposition 2. Fix an observation index n and write 
+
+En,ℓ (λℓ) = P 
+
+> v∈V
+
+cn,ℓ (v) πλℓ,ℓ (v), Jn,ℓ = log En,ℓ ,
+
+so that Lℓ(λℓ) = N −1 PNn=1 Jn,ℓ (λℓ) by (4). Since V is finite and every πλℓ,ℓ (v) is positive and smooth in the relative interior of the simplex, En,ℓ is a finite sum of smooth functions. Although cn,ℓ need not have a positive uniform lower bound, at least one token satisfies cn,ℓ (v) > 0. Full support gives 
+
+πλℓ,ℓ (v) > 0 for that token, so En,ℓ > 0 and log En,ℓ is differentiable. Using ∂π = π ∂ log π,
+
+∂Jn,ℓ 
+
+∂λ ℓ,i 
+
+= 1
+
+En,ℓ (λℓ)
+
+P 
+
+> v∈V
+
+cn,ℓ (v) ∂λℓ,i πλℓ,ℓ (v)= P
+
+> v∈V
+
+cn,ℓ (v) πλℓ,ℓ (v)
+
+En,ℓ (λℓ)
+
+| {z } 
+
+> =γn,ℓ (v)
+
+× ∂λℓ,i log πλℓ,ℓ (v),
+
+where γn,ℓ is precisely the channel posterior (S4). The bracketed factor is a probability distribution on 
+
+V by construction, so the sum is an expectation under γn,ℓ . Substituting Lemma 2, 
+
+∂Jn,ℓ 
+
+∂λ ℓ,i 
+
+= Ev∼γn,ℓ 
+
+h
+
+ai(v) − Eu∼πλℓ,ℓ [ai(u)] 
+
+i
+
+= Ev∼γn,ℓ 
+
+ai(v) − Eu∼πλℓ,ℓ 
+
+ai(u),
+
+the last step because the inner expectation does not depend on v. Averaging over n = 1 , . . . , N gives (S5). 
+
+Remark 1 (Reading the two terms) . The gradient compares the same statistic ai under the channel posterior γn,ℓ and the current composed prior πλℓ,ℓ . An expert gains relative weight when it scores 
+
+23 observation-compatible tokens above tokens from the current composition. This centering removes expert-specific additive offsets but does not remove relative scale or general calibration differences. 
+
+Proposition 3 (Degeneracy of the factorized objective under masking) . Suppose position ℓ is masked in observation n, so that the channel likelihood is fixed, cn,ℓ (v) = r for all v ∈ V . Then observation n
+
+contributes nothing to the gradient (S5) at position ℓ.Proof. If cn,ℓ ≡ r then En,ℓ (λℓ) = r P 
+
+> v
+
+πλℓ,ℓ (v) = r, which is constant in λℓ, and the channel posterior reduces to the prior, γn,ℓ (v) = r π λℓ,ℓ (v)/r = πλℓ,ℓ (v). The two expectations in (S5) are then taken under the same distribution and cancel. This formalizes the masking difficulty noted in Section 4: in the factorized model, a masked observation contributes no local information about its position-specific weight. Another observation in which the position is visible may contribute information. For contextual experts, λℓ can affect the marginal distribution of visible tokens through cross-position dependence, so the sequence-level evidence can remain informative. The practical estimator also scores imputed posterior particles and smooths weights across positions. 
+
+A.3 Contextual 2 × 2 validation 
+
+To examine the energy and sampling approximations separately, we use a contextual model small enough to enumerate. It is a normalized bigram-energy prior with two experts whose local energies depend on both xℓ−1 and xℓ; unlike a factorized model, it therefore exposes a genuine difference between the surrogate and exact energies. The short sequence and small vocabulary allow us to compute Qλ,its posterior, and its gradient exactly, as well as a mean-field law that samples positions independently from the composed local conditionals. Table S2 crosses exact or surrogate energies with exact or mean-field expectations. The exact sequence-level gradient agrees with a finite-difference gradient at cosine 1.000 , a numerical implementation check for Proposition 1 (Table S2). Replacing the exact energies with the denoising surrogate, or the exact expectations with mean-field sampling, perturbs the gradient direction, the energy surrogate more (cosine 0.65 ) than the sampler ( 0.92 ); the deployed combination of both reaches cosine 0.62 . This enumerable model isolates the two approximations but does not by itself establish tolerance to them at scale. The reported spreads are standard deviations across the 20 seeds; the two surrogate-energy configurations vary widely, so their means should be read as averages over seeds whose alignment ranges from weak to near exact. 
+
+Field recovery in the contextual model. The comparison above is taken at the uniform ini-tialization and measures agreement of the gradient, not whether the objective identifies the field. We therefore run the recovery update to convergence in the same enumerable model, with the exact gradient, varying the number of corrupted observations N that share one field. The true field routes the first half of the positions to one expert and the second half to the other, softened off the vertices, so a uniform field sits at mean absolute error 0.455 . Recovery improves monotonically with N and 24 Table S1: Field recovery in the enumerable contextual model               
+
+> Observations N1416 64 256 1024
+> Field MAE ↓.362 .316 .181 .136 .120 .099
+
+Table S2: Enumerable diagnostic on a contextual bigram-energy model (4 tokens, length 4, 256 sequences, 20 seeds): an implementation check, not evidence that the large-scale approximation is controlled. The mean-field law differs from the exact prior and posterior at total variation 0.38 and 
+
+0.34 .                        
+
+> Configuration Gradient cosine ↑Gradient RMSE ↓
+> (1) exact energy, exact sampler 1.000 0.000
+> (2) surrogate energy, exact sampler 0.646 ±0.359 0.259 ±0.161
+> (3) exact energy, approx. sampler 0.923 ±0.090 0.129 ±0.071
+> (4) surrogate energy, approx. sampler (deployed) 0.618 ±0.352 0.304 ±0.170
+
+closes about three quarters of that distance (Table S1). A single observation of length four carries too little information to separate the four configurations of Table S2, which is why we report gradient agreement rather than field error there. This is the contextual counterpart of the factorized recovery result of Section 5.1 and of its dependence on the number of observations. 
+
+# B Experimental details 
+
+This section contains the data construction, expert configurations, optimization settings, decoders, and statistical procedures used in the main experiments. The implementation, the evaluation-set con-struction scripts and the analysis code are at https://github.com/panahazari/evidence-aligned-local-composition . No corpus is redistributed there; the evaluation sets are rebuilt from the public sources listed below. 
+
+B.1 Data and corruption 
+
+Exact simulator (Section 5.1). Vocabulary |V| = 12 , length L = 48 , m = 2 experts. Each expert is a position-factorized categorical model with per-position logits drawn so that the two experts are separated by a logit-gap parameter, whose default value 2.5 corresponds to a measured Kullback-Leibler divergence of 4.56 nats between the experts. The separation parameter is not itself a divergence; figures report the measured KL. The ground-truth field routes positions 0 to 15 to the first expert, positions 16 to 31 to the second, and fuses both on positions 32 to 47 . Clean sequences are drawn from the composed prior and corrupted by the replacement channel at rate 0.4. We use 3000 corrupted sequences for recovery. 
+
+Byte-level experts (Section 5.2). We use three corpora, each truncated to 5M characters: prose from WikiText-103 (raw) [36], Python code from CodeSearchNet [37] with comments and docstrings 25 removed by a tokenizer-based filter, and Kubernetes YAML [38] with full-line comments removed. These filters reduce trivial overlap between domains. Evaluation windows concatenate segments from the evaluation split of each corpus without artificial fences or boundary markers, so region labels are known by construction. The three-expert study uses 256 windows of L = 256 bytes, each containing at least two regimes with a minimum length for each. The two-expert study uses 128 prose and code windows. 
+
+Pretrained experts (Section 5.3). For the 1.3B study, evaluation windows of L = 512 tokens are built the same way from WikiText-103 prose [36] and CodeParrot Python code [39] held apart from the fine-tuning data, giving 256 windows. For the 7B study we use 64 windows in the shared tokenizer of the two models. 
+
+Real documents (Section 5.5). The natural evaluation contains 256 windows from 75 developer-written README documents drawn from the most-starred GitHub repositories [40]. We tokenize each document as a whole and retain its original prose and code regions and boundaries. Because a source document may contribute several windows, every statistic in this study resamples documents rather than individual windows. 
+
+Scientific documents (Section 5.5). The distinct-expert natural setting uses arXiv L ATEX sources (the proof-pile corpus, 41). We split each document into a prose stream and a mathematics stream by its math environments (inline $. . . $, display $$. . . $$ and \[...\] , and equation /align -type environments) and fine-tune one expert on each stream, holding documents out for evaluation. Each held-out document is tokenized whole with the GPT-2 tokenizer, and each token is labeled prose or mathematics by whether its characters fall inside a math environment; a token straddling a boundary takes the majority label and is excluded from region-conditional metrics. We keep windows in which both regions clear a 0.25 share, giving 256 windows from 71 documents at mask rate 0.3, with a 0.50 
+
+mathematics share and a token-level region-switch rate about seven times higher than the README documents. 
+
+Channels. The mask channel replaces each token independently with probability r by [MASK ]. The default is r = 0 .3 for the pretrained studies and r = 0 .2 for the byte studies, and Appendix C.1 sweeps it. The replacement channel replaces each token independently with probability r by a uniform draw from the vocabulary; we use it in the exact simulator, where the posterior decoder is exact. 
+
+B.2 Experts 
+
+Byte-level experts. Each expert is a discrete flow-matching model over the byte vocabulary, 
+
+|V| = 256 plus a mask symbol, so 257 classes. All experts in a composition here share an identical architecture, which is convenient but not required (see the expert interface in Section 3); what the logit composition needs is a shared vocabulary and output interpretation, not a shared network. The architecture is a transformer with 8 layers, model width 384 , 12 attention heads, dropout 0.1, and 26 context L = 256 , about 14 M parameters. Training uses the mask-source path with a polynomial schedule ( κ exponent 1.0, tϵ = 10 −4), batch size 48 , 20 ,000 steps, AdamW with learning rate 3 × 10 −4,weight decay 0.01 , and 400 warmup steps. Each expert sees only its own domain. Final training cross-entropies are 2.40 (prose), 1.97 (code) and 1.83 (configuration) nats per byte. 
+
+Fine-tuned 1.3B experts. Both experts are fine-tuned from the same 1.3B discrete flow-matching model with a GPT-2 vocabulary ( 50 ,257 tokens). We use LoRA with rank 16 and α = 32 , learning rate 
+
+10 −4, batch size 16 , 6000 steps, mixed precision, and gradient checkpointing on 12 ,000 blocks of 512 
+
+tokens per domain. Sharing the base model and fine-tuning recipe reduces architectural confounding and makes the domain data the intended source of specialization. Section 5.5 also uses a pair fine-tuned on matched corpora and the unmodified base model as a generalist. 
+
+arXiv prose and mathematics experts. The scientific-document experts of Section 5.5 are fine-tuned from the same 1.3B model with the identical LoRA recipe ( 6000 steps), one on the extracted prose stream and one on the mathematics stream. On the arXiv evaluation regions they pass the specialization check with balanced margins of 0.47 (prose) and 0.46 (mathematics) nats, the strongest two-sided separation among the natural-document pairs. The README-matched pair, by contrast, separates only weakly on its evaluation text, which is why local composition beats a global weight in the scientific setting and ties in the README setting. 
+
+Off-the-shelf 7B experts. We use Dream-org/Dream-v0-Base-7B as the general expert and 
+
+Dream-org/Dream-Coder-v0-Base-7B as the code expert at mask rate 0.6. These public masked-diffusion language models share a tokenizer and compatible source and output conventions. Strictly speaking, they are trained as masked diffusion models rather than under the discrete flow-matching parameterization used elsewhere in the paper. The distinction does not affect the method. Both frameworks expose the same two operations required by the expert interface of Section 3: clean-token logits given a partially masked context and a denoising loss on a candidate sequence. Moreover, the denoising-loss identity of Section 4 is stated for the mask-source path and its conclusion does not depend on the schedule, so it covers mask-source masked diffusion and mask-source discrete flow matching alike (Appendix C.9). We therefore refer to all experts as discrete flow-matching models in the main text and note the training-objective difference only here. We do not train or adapt them, and each runs on a separate GPU. The pair fails the specialization diagnostic in Appendix B.3. The composed fill is deterministic, so the eight nominal particles are identical and the estimator is a plug-in rather than a particle average. 
+
+B.3 The specialization check 
+
+The inferred field depends on per-expert scale, so we use a specialization diagnostic before composition. We evaluate every expert’s denoising energy on every domain and accept the diagnostic when each expert assigns its lowest energy to its own domain. For the three byte-level experts of Section 5.2, the energies in nats per byte are 27 Energy under expert Data domain Prose Code Configuration Prose 1.27 2.46 2.30 
+
+Code 1.55 1.02 1.42 
+
+Configuration 1.55 1.32 0.81 
+
+with diagonal margins of 1.03 , 0.40 and 0.51 nats. The byte-level experts and both 1.3B pairs pass this check. 
+
+The 7B pair fails the diagnostic. For the two off-the-shelf models, the measured energies are 
+
+0.888 nats per token for Dream on prose and 0.514 on code, compared with 1.078 for Dream-Coder on prose and 0.337 on code. Dream-Coder assigns lower energy to code by 0.74 nats, but Dream also assigns lower energy to code by 0.37 nats. The matrix is therefore not diagonally dominant and the diagnostic fails. Column-wise domain discrimination still holds: Dream has lower energy than Dream-Coder on prose, while Dream-Coder has lower energy than Dream on code. Row-wise own-domain preference fails because Dream assigns lower energy to code than to prose. The field nevertheless reaches field accuracy 0.95 . We therefore report the experiment as a stress test outside the diagnostic’s accepted regime. Appendix C.2 shows the complementary case: a byte-level pair that fails to specialize also fails to produce a usable field, which is what the check is for. 
+
+B.4 Composition hyperparameters 
+
+Hyperparameters differ across experiments. Table S3 reports the settings used in each run. The byte-level studies use R = 30 , 48 particles, K = 4 , η = 1 , and τ = 0 .6. The 1.3B studies use R = 12 , 24 
+
+particles, K = 2 , η = 0 .5, and τ = 0 .4 under the proximal map, or τ = 0 .3 under the moving average on naturally mixed documents; the 7B study uses R = 6 , eight nominal particles, and τ = 0 .2. The field is initialized uniformly on the simplex and the seed is 0.Only two settings were searched. The smoothing strength τ was swept over {0, 0.2, 0.6} at byte scale, over {0, 0.1, 0.2, 0.4, 0.6, 1, 2} at 1.3B and {0, 0.2, 0.6, 1} at 7B under the proximal map (Appendix C.5), and the corruption rate over {0.1, 0.2, 0.3} at byte scale and {0.3, 0.5, 0.7} at 1.3B (Appendix C.1); the rate grid is reported as an ablation rather than used to pick a winner. The deployed τ at byte scale was chosen once from the byte sweep, which was run on the same windows we report. Read literally, that means the byte τ was selected on the reported evaluation data, with no calibration subset kept apart, and the byte numbers should be read with that in mind. The 1.3B and 7B protocol below does not have this problem. At 1.3B and 7B it was chosen by a rule fixed before the sweep was run, namely the highest restoration accuracy on a small calibration set held apart from the reported windows, with field accuracy as the tie-break. At 1.3B this selects τ = 0 .4 from a plateau that is flat to 0.0003 
+
+between 0.2 and 0.6. At 7B the rule as written selects τ = 0 , by 0.0007 over 16 windows, but that setting leaves field accuracy at 0.745 against 0.967 at τ = 0 .2; we treat the restoration difference as a 28 Table S3: Settings used by each experiment; they are not shared across scales. R: recovery iterations; 
+
+P : particles; K: time samples; η: step size; τ : smoothing strength. 
+
+Experiment Rate L R P K η τ Windows Docs Byte, 2 experts 0.2 256 30 48 4 1.0 0.6 128 64 Byte, 3 experts 0.2 256 30 48 4 1.0 0.6 256 160 Fine-tuned 1.3B 0.3 512 12 24 2 0.5 0.4 256 n/a Off-the-shelf 7B 0.6 512 6 8† 2 0.5 0.2 64 64 Natural, README 0.3 512 12 24 2 0.5 0.3 256 75 Natural, arXiv 0.3 512 12 24 2 0.5 0.3 256 71        
+
+> †The 7B composed fill is deterministic, so its 8particles are identical; that estimator is a plug-in, not a particle average. The first four rows use the proximal map of (S7), where τis a penalty; the two natural-document rows use the moving-average blend, where τis a mixing weight. The two are not comparable.
+
+tie and deploy τ = 0 .2, which is a deviation from the rule and is the only such deviation in the paper. The remaining settings ( R, P , K, η, sampler steps) were fixed in advance by the compute budget and were not tuned: one value was used per scale throughout, as listed in Table S3. No held-out selection was performed for any hyperparameter. The smoothing operator is experiment-specific. The reference total-variation operator is the simplex-constrained proximal map 
+
+λ(s+1) = arg min 
+
+> λ1: L∈∆Lm
+
+n 12
+
+P 
+
+> ℓ
+
+∥λℓ − ˜λ(s+1)  
+
+> ℓ
+
+∥22
+
++ τ P 
+
+> ℓ≥2
+
+∥λℓ − λℓ−1∥1
+
+o
+
+.
+
+(S7) For the two-expert byte-level study, we apply the exact one-dimensional fused-lasso map to the first weight, clip it to [0 , 1] , and set the second weight to its complement; this implements (S7). For the three-expert study, we apply the same map independently to each weight column, clip negative values, and renormalize each row to the simplex. The constructed 1.3B and 7B studies use the same two-expert fused-lasso map as the byte-level study, so (S7) is the operator behind every constructed result in the paper. For the studies on naturally mixed documents, we instead smooth each weight column with a moving average, using a centered rectangular kernel of width five whose five taps are all fixed to 
+
+1/5, with zero padding at the two ends. The new field is (1 − τ ) times the current field plus τ times its moving average, and each row is then renormalized to the simplex. Thus, τ is a total-variation penalty in the constructed studies and the weight given to the moving average in the naturally mixed document studies. The two operators do not share one proximal objective, and we make no common convergence claim; within each study the same operator is applied to the evidence field and to every baseline field it is compared against. 
+
+B.5 Decoders 
+
+The default decoder is the one-step reconstruction (12) at tdec = 0 .9: visible tokens are copied and each masked token is filled independently by the argmax of the composed logits. The iterative decoder 29 revisits positions over several denoising times, using 12 steps in the byte studies and 6 rounds at 
+
+1.3B. All methods use the same decoder and matched source initialization. This controls decoding variation but does not make the decoder cancel, because decoding is nonlinear in the composition field. Appendix C.4 shows that the method ordering is unchanged. 
+
+B.6 Protocol and statistics 
+
+Every method uses the same experts, corrupted input, channel, decoder, and matched source initializa-tion; only the composition weights differ. Comparisons are paired over the declared statistical unit. Byte-level and natural-document analyses aggregate and resample by source document. The 1.3Banalysis uses constructed windows and takes the window as the statistical unit, as noted in Section 5.3. We report the mean paired difference from local evidence, its 95% bootstrap confidence interval, a two-sided sign-flip permutation p-value, and Cohen’s dz , each with 10 ,000 resamples and a fixed seed. Restoration accuracy and field accuracy are as defined in Section 5. 
+
+B.7 Compute 
+
+All experiments run on NVIDIA A100 40GB GPUs. Training one byte-level expert takes under an hour on a single GPU. Fine-tuning one 1.3B expert takes a few hours on a single GPU. Composition is the dominant cost at inference: with the settings above, the three-expert byte-level run takes about 65 
+
+seconds per document, dominated by the particle draws and the per-expert energy evaluations, and the full 256 -window run takes about 4.6 GPU-hours. The 7B study places one expert per GPU. Costs scale linearly in the number of experts, since each expert is scored independently at each iteration. 
+
+# C Additional results 
+
+The following experiments test sensitivity to corruption, expert training, decoder choice, and domain granularity, and provide more detailed measurements of the recovered field. 
+
+C.1 Corruption rate and seeds 
+
+Table S4 reports a corruption-rate sweep. The byte-level study averages three corruption seeds; the spread is below 0.007 accuracy for every method. Its method ordering is unchanged across rates, while the advantage over equal weights narrows from +0 .101 at r = 0 .1 to +0 .078 at r = 0 .3. The 1.3B sweep also preserves the ordering through r = 0 .7, with a margin near 0.05 over equal weights. However, the 
+
+1.3B rates use different evaluation subsets and sample sizes, so this sweep provides descriptive evidence of stable ordering rather than a controlled estimate of the effect of corruption rate. 
+
+C.2 Independently trained expert pairs 
+
+We retrained the byte-level expert pair twice with different seeds and repeated the full evaluation (Table S5). The first pair reproduces the main result. For the second, field accuracy is 0.51 , near 30 0 2000 4000 6000 8000 10000 12000       
+
+> Observations N
+> 0.0 0.1 0.2 0.3
+> Field error
+> More observations
+> 012345
+> KL between experts (nats)
+> More separated experts Corruption rate
+> 0.1 0.3 0.5 0.7 0.85 0.95
+
+Figure S1: Recoverability of the field in the categorical simulator: error falls with more observations and greater expert separation, and rises with corruption. Table S4: Corruption-rate sweep. Byte numbers average three corruption seeds ( 128 windows each, two experts); 1.3B uses 256 windows at r = 0 .3 and 128 at the higher rates. Experts Rate Local (ours) Hard label router Best single Global Equal Byte-level r = 0 .1 0.586 0.563 0.553 0.523 0.485 
+
+r = 0 .2 0.533 0.515 0.505 0.476 0.442 
+
+r = 0 .3 0.479 0.463 0.456 0.430 0.401 1.3B r = 0 .3 0.653 0.655 0.599 0.612 0.599 
+
+r = 0 .5 0.527 0.534 0.475 0.489 0.471 
+
+r = 0 .7 0.369 0.381 0.332 0.344 0.322 
+
+chance for two experts, and local evidence ( 0.449 ) is close to the best single expert ( 0.447 ). This failed composition coincides with a failed specialization diagnostic. The result supports treating expert specialization as an empirical prerequisite, although it does not isolate specialization as the sole cause. Two retrainings are also too few to characterize seed stability, and one of the two failing is better read as a warning than as a rate. The second pair also puts the hard label router ( 0.326 ) well below equal weights ( 0.410 ). This is what the diagnostic predicts rather than an anomaly: the router commits each position to the expert trained on that region’s domain, so it is only privileged when the label tracks competence. When the pair does not specialize, the label no longer identifies the better expert at that position, and hard routing discards the averaging that equal weights still enjoys. The same mechanism makes the router an imperfect reference in general, which is why we describe it as privileged but not an upper bound. 
+
+C.3 A second real domain 
+
+We also evaluate a finer-grained domain pair: Python code versus its comments and docstrings. These regimes interleave at the line level within a file rather than appearing as long blocks. Across 128 
+
+windows, local evidence reaches 0.227 . We detect no difference from the hard label router ( 0.227 ), while local evidence exceeds the code expert ( 0.222 ), the global weight ( 0.212 ), and equal weights (0.188 ). Absolute accuracy and margins are lower than in the main study, consistent with the greater 31 Table S5: Two independently retrained byte-level expert pairs. The second pair does not specialize and loses the advantage over the best single expert. Read each row against its own baselines, not across rows. Both pairs use the same 128 documents, decoder and protocol, but they are different models with different absolute skill: Pair 2’s code expert alone reaches 0.447 where Pair 1’s reaches 0.339 , so Pair 2’s higher local-evidence number reflects stronger experts, not better composition. The within-pair margins are the comparable quantity.                   
+
+> Expert pair Field acc. Local (ours) Hard label router Best single Global Equal Pair 1 (specialized) 0.92 0.362 0.361 0.339 0.306 0.290
+> Pair 2 (not specialized) 0.51 0.449 0.326 0.447 0.446 0.410
+
+Table S6: One-step versus iterative decoding (window-weighted). The method ordering is identical under both decoders; the best single expert is the own-posterior selector (the code expert at 1.3B). Experts Decoder Local (ours) Hard label router Best single Equal Byte-level, 3 experts one-step 0.658 0.657 0.612 0.563 
+
+iterative 0.662 0.660 0.618 0.556 1.3B, 2 experts one-step 0.653 0.655 0.599 0.599 
+
+iterative 0.656 0.656 0.602 0.602 
+
+vocabulary overlap between code and comments. 
+
+C.4 Decoder choice 
+
+Table S6 repeats the two main studies with an iterative decoder that revisits positions across several denoising times. The saved iterative outputs support only window-weighted aggregation, so this is a secondary descriptive analysis rather than the primary document-weighted byte analysis. The method ordering is unchanged, although individual accuracies can increase or decrease; at 1.3B the iterative decoder brings local evidence level with the privileged label router, which the one-step decoder leaves 
+
+0.002 ahead. All methods use the same decoder and matched source initialization, which controls decoding variation but does not remove decoder effects because decoding is nonlinear in the field. 
+
+C.5 The smoothing prior 
+
+We isolate the role of the smoothing prior (Table S7, Figure S2). Its effect differs markedly across the two ablations. At byte scale, removing smoothing lowers local-evidence accuracy to 0.348 , below the best single expert at 0.413 ; setting τ = 0 .2 raises accuracy to 0.430 , above the reported single-expert and global baselines. On the 32 -window calibration subset of the 1.3B study, by contrast, the unsmoothed field already reaches 0.659 , compared with 0.636 for the field-average global reference. Raising τ to 0.4
+
+lifts restoration accuracy to 0.679 and field accuracy from 0.912 to 0.993 . The response is a plateau rather than a peak: accuracy varies by 0.0003 across τ ∈ { 0.2, 0.4, 0.6} and decays slowly outside it, to 0.676 at τ = 2 , so the deployed value is not a sharp choice. This contrast with the byte scale is consistent with reduced reliance on smoothing when the expert signal is stronger, but two ablations 32 Table S7: Effect of smoothing strength τ . Byte numbers use this ablation’s decoder (not comparable with Table 3); the 1.3B numbers use one 32 -window calibration subset, disjoint from the reported windows. Both scales use the proximal update (S7), so τ means the same thing in every column. Note that the deployed byte setting is τ = 0 .6, which this sweep does not cover: the byte columns bracket it at 0 and 0.2 but do not contain it, so the deployed configuration does not appear in its own ablation.                                
+
+> Byte-level experts Fine-tuned 1.3B experts
+> τ= 0 τ= 0 .2τ= 0 τ= 0 .4τ= 2
+> Local evidence (accuracy) 0.348 0.430 0.659 0.679 0.676
+> Best single expert 0.413 0.413 0.623 0.623 0.623
+> Global weight 0.337 0.357 0.636 0.636 0.635
+> Local evidence (field acc.) ··0.912 0.993 0.993
+
+## = 0 = 0.2 
+
+## 0.0 0.2 0.4 Masked-token accuracy 
+
+# Byte-level experts 
+
+## Local evidence (ours) Best single expert Global weight 0.0 0.5 1.0 1.5 2.0 Smoothing strength 
+
+## 0.6 0.8 1.0 
+
+# Fine-tuned experts (1.3B) 
+
+## Field accuracy Masked-token accuracy 
+
+Figure S2: Effect of smoothing. Without it, byte-level local evidence falls below the best single expert; at 1.3B smoothing mainly improves field accuracy (Table S7). are not sufficient to establish a general scaling law. 
+
+C.6 Quality of the recovered field 
+
+Restoration accuracy does not measure the quality of the inferred composition, and overall field accuracy can hide boundary errors because region interiors contain many more positions than transitions. We therefore evaluate the three-expert byte-level field against the true regions using several metrics, with clustering by source document as in the main byte-level analysis (Table S8). Macro one-versus-rest AUROC is 0.993 (prose 0.985 , code 0.996 , configuration 0.996 ), and class-wise argmax recall is 0.924 
+
+for prose, 0.995 for code, and 0.998 for configuration. The field is highly accurate away from transitions: interior accuracy is 0.987 , macro F1 is 0.972 ,IoU is 0.948 , and segment F1 is 0.979 . Performance is lower near transitions. Accuracy within four positions of a true change is 0.687 , and one-to-one boundary F1 at the same tolerance is 0.720 . Thus, the field identifies region interiors more reliably than exact transition locations, consistent with the qualitative examples in Figure 2. This suggests boundary-aware smoothing or decoding as a useful direction. The global and equal-weight references are constant fields and therefore contain no predicted 33 Table S8: Attribution metrics for the recovered field, three byte-level experts, 256 windows from 160 
+
+documents. Boundaries are within four positions of a regime change; segment F1 uses same-label IoU 
+
+≥ 0.5. The constant references predict no boundaries.                        
+
+> Field Acc. Masked Boundary Interior Macro F1 Segment F1 Boundary F1
+> Local evidence (ours) 0.976 0.972 0.687 0.987 0.972 0.979 0.720
+> Field-average global 0.669 0.662 0.502 0.675 0.399 0.645 0.000
+> Equal weights 0.334 0.340 0.498 0.327 0.246 0.008 0.000
+
+boundaries. Their boundary F1 is zero, and their field accuracies ( 0.669 and 0.334 ) reflect the prevalence of the region favored by each constant field. These rows provide context but cannot test boundary recovery. 
+
+C.7 Off-the-shelf 7B stress test 
+
+We include one experiment with models that we did not train, treating it as an out-of-assumption stress test rather than evidence for the method. The pair consists of Dream-v0-Base-7B as the general expert and Dream-Coder-v0-Base-7B as the code expert, evaluated at mask rate 0.6 (Appendix B.2). Three properties limit the study. First, the pair fails our specialization diagnostic: the general expert scores code 0.37 nats better than prose (Appendix B.3), so using the uncalibrated choice αi = 1 is not well supported. Second, the composed fill is deterministic, making the eight nominal particles identical and reducing the estimator to a single plug-in evaluation. Third, the study contains only 64 windows. Under these conditions, local evidence reaches 0.605 and is not detectably different from the hard label router ( 0.606 , p = 0 .90 ). It exceeds the general model alone by 0.024 , the best single expert by 0.011 , equal weights by 0.006 , and the field-average global reference by 0.006 , each at 
+
+p < 0.01 (Table S9). The adapted baselines fit the same picture: the DEMix router is indistinguishable from local evidence ( 0.605 , p = 0 .83 ), while PackLLM-opt ( 0.597 ), PackLLM-sim ( 0.593 ), and the marginal-evidence selector ( 0.592 ) trail slightly, consistent with a pair whose specialization is too weak for any weighting scheme to separate strongly. The margin over a shuffled field is the thinnest in the paper ( +0 .004 , p = 0 .04 ), so on this pair the positional arrangement of the field carries little of the gain. The field agrees with the regions at 0.954 . These numbers apply only to this model pair and do not establish robustness to arbitrary off-the-shelf experts; they show that, for two closely related but imperfectly specialized models, the inferred field produces a small gain without reducing restoration accuracy. 
+
+C.8 A setting where the composition does not matter 
+
+We also evaluate the byte-level study under the replacement channel. At corruption rates from 0.1 to 
+
+0.3, every method, including a single expert, achieves accuracy within 0.015 of 1 − r. The one-step decoder usually copies the observed token because it provides strong evidence about the clean token, so changing the composition weights rarely changes the mode. This setting therefore does not test the field. In contrast, the exact simulator in Section 5.1 uses an exact posterior decoder under the same 34 Table S9: Off-the-shelf 7B stress test (Dream-v0-Base-7B, Dream-Coder-v0-Base-7B), 64 windows, mask rate 0.6. The pair fails the specialization check, so this is a stress test, not evidence for the method.                                
+
+> Method Acc. ∆vs ours
+> Local evidence 0.605 ·
+> Hard label router 0.606 −0.000
+> DEMix router [9] 0.605 +0 .001
+> Shuffled field 0.602 +0 .004 ∗
+> Equal weights 0.600 +0 .006 ∗∗
+> Field-avg. global 0.599 +0 .006 ∗∗∗
+> PackLLM-opt fusion [4] 0.597 +0 .009 ∗∗∗
+> Best single expert 0.594 +0 .011 ∗∗∗
+> PackLLM-sim fusion [4] 0.593 +0 .012 ∗∗∗
+> Best single (marginal) [8] 0.592 +0 .013 ∗∗∗
+> Dream (general) 0.581 +0 .024 ∗∗∗
+> Field accuracy 0.954
+> ∗p < 0.05 ,∗∗ p < 0.01 ,∗∗∗ p < 10 −3; unmarked differences are not significant.
+
+channel, allowing the prior composition to affect the output. Evaluating replacement corruption at byte scale requires a decoder that can overturn the observed token. 
+
+C.9 The uniform-source mismatch 
+
+The denoising-loss identity of Section 4 is stated for the mask-source path: the intermediate state is the clean sequence with a random subset of positions replaced by [MASK ]. The byte-level experts and the 7B models are of this kind. The 1.3B experts are not: they are fine-tuned from a base model whose source distribution is uniform over the vocabulary, so at intermediate times a corrupted position holds a random token rather than a mask symbol. We do not have an analogue of that identity for the uniform-source path. The per-position denoising score is therefore a heuristic energy rather than an order-averaged conditional log score, and the resulting source mismatch is uncontrolled. The 1.3B and natural-document results are empirical evaluations outside the proposition’s assumptions. Their high field accuracy shows that the surrogate remains informative in these experiments, but it does not validate the mask-source identity for a uniform source. Deriving a uniform-source analogue or fine-tuning the experts with a mask-source path would address this gap. 
+
+C.10 Independent baseline implementations 
+
+We distinguish independently optimized baselines from references derived from the local field. 
+
+Global weight. The independent global baseline solves the same approximate optimization under the constraint λℓ = λ for all ℓ. It initializes uniformly and draws its own prior and posterior particles under its current global field at every iteration. At byte scale it reaches document-weighted accuracy 35 0.618 , compared with 0.660 for local evidence, a paired difference of +0 .042 (p < 10 −3, dz = 1 .18 ). At 1.3B it reaches 0.611 , compared with 0.653 for local evidence ( +0 .042 , 95% CI [+0 .039 , +0 .046] ,
+
+p < 10 −3, dz = 1 .47 , over the 256 shared windows), and is not detectably different from the field-average reference at 0.610 (difference +0 .0004 , p = 0 .72 ). On the arXiv documents it reaches document-weighted accuracy 0.682 over 256 windows from 71 documents, against 0.691 for local evidence ( +0 .010 , p < 10 −3,
+
+dz = 0 .56 ), and is not detectably different from the jointly optimized weight ( 0.682 ; difference −0.0006 ,
+
+95% CI [−0.0029 , +0 .0017] , p = 0 .61 ). The independently selected best single expert reaches 0.669 
+
+there, matching the reported selector. For the 7B and README studies we report the jointly optimized reference in place of this independent baseline, as their tables indicate. 
+
+Best single expert. At byte scale, each vertex draws its own posterior particles and is scored with its own denoising energy; the selected expert reaches 0.613 . The 1.3B independent selector uses the same own-posterior procedure and reaches 0.599 . These are posterior-score heuristics rather than marginal-evidence estimates because they omit the free-energy and posterior-entropy terms. For the 
+
+7B and natural-document studies we use the posterior-score reference based on particles from the local field, as their tables indicate. 
+
+Adapted literature baselines. Three further baselines adapt published test-time fusion methods to the corrupted-window setting. All three score the corrupted window’s visible tokens under each expert with the same denoising surrogate used everywhere else in this paper; corrupted positions carry no target and are excluded. Every resulting weight field feeds the same decoder as the other methods. 
+
+PackLLM [4] chooses one global weight per window from the input’s own likelihood. The sim variant sets λi ∝ exp( − ¯Li/T ), where ¯Li is expert i’s mean visible-token score and T = 0 .1 nats. The opt variant orders experts by individual fit, then mixes in each next expert through a line search over mixing coefficients that minimizes the composed model’s visible-token cross-entropy; candidate mixtures are evaluated under the same weighted-logit composition the decoder uses, on the same sampled noisings, so the optimized objective matches the deployed operator. At the 7B scale the greedy variant optimizes the log-probability mixture used by that decoder. 
+
+DEMix routing [9] computes a parameter-free posterior over experts from the data itself. Our adaptation sets per-position weights proportional to exp( −β Li,ℓ ) with β = 1 on the visible-token scores; a corrupted position, which has no score of its own, inherits the mean score of the nearest visible positions within an expanding window. The field then receives the same smoothing as every other local field. 
+
+HMM routing is a third local router, reported in Section 5.4 and in the arXiv table. It fits a two-state hidden Markov model over the per-position per-expert visible-token scores, with a symmetric transition prior, and takes the posterior state marginal as the field. It is the segmentation-aware member of the router family, and it trails local evidence at every scale we ran it ( 0.568 at 1.3B, 0.644 
+
+on arXiv, 0.684 on README). It was not run at byte scale. 
+
+Marginal-evidence selection picks the expert with the lowest mean visible-token score. Under the mask channel, the evidence of the corrupted window factorizes into a weight-independent channel term 36 and the marginal likelihood of the visible tokens, so this selector estimates the single-expert marginal evidence, in the spirit of evidence-based model selection for score-based priors [8]. It differs from the own-posterior selector above, which scores each expert on its own reconstructions; the two selectors are reported side by side. 37

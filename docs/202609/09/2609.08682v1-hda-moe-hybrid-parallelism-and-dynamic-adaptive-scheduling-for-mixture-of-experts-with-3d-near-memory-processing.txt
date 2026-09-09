@@ -1,0 +1,1451 @@
+Title: HDA-MoE: Hybrid Parallelism and Dynamic, Adaptive Scheduling for Mixture-of-Experts with 3D Near-Memory Processing
+
+URL Source: https://arxiv.org/pdf/2609.08682v1
+
+Published Time: Wed, 09 Sep 2026 03:40:26 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+> 1
+
+# HDA-MoE: Hybrid Parallelism and Dynamic, Adaptive Scheduling for Mixture-of-Experts with 3D Near-Memory Processing 
+
+Haochen Huang 1,2, Shuzhang Zhong 1,2,4,5, Shengxuan Qiu 1,2,3, Zhe Zhang 4,5, Shuangchen Li 4,5, Cong Li 2,Dimin Niu 4,5, Hongzhong Zheng 4,5, Guangyu Sun 2, Runsheng Wang 2,6,7, Meng Li 1,2,7∗
+
+Abstract —Mixture-of-Experts (MoE) architectures have be-come a key technique for scaling Large Language Models (LLMs), enabling high model capacity with reduced computa-tional cost. However, this efficiency comes at the expense of increased memory capacity and bandwidth demands. Recent 3D Near-Memory Processing (NMP) architectures, which vertically integrate memory and compute through hybrid bonding, provide high internal bandwidth and energy efficiency, making them attractive for accelerating MoE inference. Nevertheless, the distributed memory and compute organization of NMP systems introduces new challenges for mapping MoE workloads. Existing parallelization strategies, such as Tensor Parallelism (TP) and Expert Parallelism (EP), suffer from either high communication costs or unbalanced computation utilization, leading to inferior efficiency. In addition, the dynamic routing behavior of MoE models further complicates efficient deployment. To address these challenges, we present HDA-MoE, a framework that optimizes MoE execution on NMP architectures through hybrid parallel deployment and runtime scheduling. HDA-MoE integrates an offline hybrid parallel mapping algorithm with an online dynamic and adaptive scheduling mechanism to reduce communication overhead while improving computation utilization. Experimental results show that HDA-MoE achieves a speedup of 1.1 ×–3.4 ×
+
+over TP, 1.1 ×–1.5 × over EP, 1.1 ×–3.7 × over the Hybrid TP-EP compute-balanced baseline, and 1.1 ×–1.3 × over HD-MoE. Source code is available at https://github.com/PKU-SEC-Lab/ HDA-MoE-TCAD26. 
+
+Index Terms —Automated Deployment, Mixture-of-Experts, 3D Near-Memory Processing, Hardware-Aware Routing, NoC Sim-ulation 
+
+I. I NTRODUCTION 
+
+# RECENT advances in Mixture-of-Experts (MoE) have made it a widely used architecture for scaling Large Language Models (LLMs) [1], [2]. By activating only a small subset of experts for each token, MoE reduces computational cost while maintaining large model capacity. However, the sparse activation pattern introduces irregular memory accesses and often aggravates memory bottlenecks, especially on edge devices with limited bandwidth and small batch sizes. Recent emerging 3D Near-Memory Processing (NMP) ar-chitectures provide a promising platform for such bandwidth-intensive workloads [3], [4]. By vertically stacking DRAM  
+
+> ∗
+
+Corresponding author: meng.li@pku.edu.cn  
+
+> 1
+
+Institute for Artificial Intelligence, Peking University, Beijing, China.  
+
+> 2
+
+School of Integrated Circuits, Peking University, Beijing, China.  
+
+> 3
+
+School of Electronics Engineering and Computer Science, Peking Uni-versity, Beijing, China.  
+
+> 4
+
+Alibaba DAMO Academy, Beijing, China.  
+
+> 5
+
+DAMO Academy, Alibaba Group, Beijing Hupan Lab, Hangzhou.  
+
+> 6
+
+Institute of Electronic Design Automation, Peking University, Wuxi, China.  
+
+> 7
+
+Beijing Advanced Innovation Center for Integrated Circuits, Beijing, China. Expert 1 Expert 2     
+
+> (a) Tensor Parallel
+> Bank 0 Bank 1
+> E1 E2 E3 E4 Expert 3
+> Bank 0 Bank 1
+> E1E2E3E4E1 E1 E2 E3 E2 E3
+> (b) Expert Parallel Bank 0 Bank 1
+> E1 E2 E3E4Expert 1 Expert 2 Expert 3 Expert 4 Expert 3 Expert 4 Expert 4 E4 E4
+> (c) Hybrid Parallel Communication High-Workload Expert
+
+Time 
+
+> Low-Workload Expert
+
+Fig. 1. Comparison of expert placement and execution timelines under (a) tensor parallelism, (b) expert parallelism, and (c) hybrid parallelism. 
+
+on logic dies through high-bandwidth interconnects, NMP enables fine-grained parallel memory access and high internal bandwidth, making it well-suited for MoE inference. However, deploying MoE models on NMP systems intro-duces new challenges. Unlike GPUs with large shared mem-ory, NMP architectures consist of distributed memory banks connected by an on-chip network (NoC), requiring careful coordination between expert placement and communication. As shown in Fig. 1, Tensor Parallelism (TP) [5] partitions each expert across banks, improving load balance but incurring heavy all-reduce communication, whereas Expert Parallelism (EP) [6] places complete experts on different banks, reducing communication but suffering from workload imbalance. Large GPU clusters can combine EP with expert replication to mitigate imbalance, as in DeepSeek-R1 deployment [1]. However, replication is less practical for memory-constrained 3D NMP, and dynamic expert activation further makes static deployment insufficient. Recent offloading works study dynamic expert scheduling [7]–[9], where experts are loaded on demand and transfer latency dominates. They also observe temporal locality across adjacent layers, which can guide prefetching. In addition, the contribution of different experts to the final output is often uneven. While a small subset of experts receives high routing scores and dominates the computation, many others have relatively low influence on the output [7], [9]– [11]. This suggests that certain experts may be interchange-able without significantly affecting model accuracy, providing opportunities to guide expert selection toward more balanced and communication-efficient execution. Motivated by these challenges, we propose HDA-MoE , a hybrid parallelism and dynamic, adaptive scheduling frame-work for MoE inference on 3D NMP. As shown in Fig. 1(c), HDA-MoE uses EP for low-activation experts to reduce com-arXiv:2609.08682v1 [cs.AR] 8 Sep 2026 2E1 E2 E3 EN                 
+
+> …
+> Router K=2
+> E1[2]
+> E2[2]
+> E3[2]
+> E4[2]
+> E1[3]
+> E2[3]
+> E3[3]
+> E4[3]
+> E1[1]
+> E2[1]
+> E3[1]
+> E4[1]
+> E1[0]
+> E2[0]
+> E3[0]
+> E4[0] RR
+> RR
+> Bank 1 Bank 2
+> Bank 3 Bank 4
+> All -Reduce
+> E3 E4
+> E2 E1
+> RR
+> RR
+> Bank 1 Bank 2
+> Bank 3 Bank 4
+> All -To -All Token 1
+> T1
+> T2
+> T3
+> T4
+> T1
+> T2
+> T3
+> T4
+> T1
+> T2
+> T3
+> T4
+> T1
+> T2
+> T3
+> T4
+> T2
+> T1
+> T3
+> T3
+> T4
+> (a) MoE Structure (b) Tensor Parallel (c) Expert Parallel
+> Token 2 Token 3 Token 4
+> T2
+> T4
+> T1
+> Fig. 2. Overview of the MoE architecture and two parallelization strategies.
+
+munication and TP-style partitioning for frequent experts to improve utilization. It further introduces online dynamic place-ment and hardware-aware adaptive gating to handle dynamic activation patterns. Building upon HD-MoE [12], this journal version adds hardware-aware gating, analyzes low-impact expert substi-tutability, expands system modeling, and extends evaluation with conference-baseline comparison, latency breakdown, ac-curacy, scalability, and sensitivity studies. Code and evaluation artifacts are available at https://github.com/PKU-SEC-Lab/ HDA-MoE-TCAD26. Our key contributions are summarized as follows:  
+
+> •
+
+We build a unified performance model to estimate MoE computation and communication cost and guide deployment optimization.  
+
+> •
+
+Automated Hybrid Parallelism. We develop a place-ment framework that combines TP and EP to jointly optimize workload balance and communication overhead.  
+
+> •
+
+Dynamic Scheduling. We introduce runtime scheduling to reduce latency caused by short-term expert-activation fluctuations under a given routing pattern.  
+
+> •
+
+Hardware-aware Gating. We introduce hardware-aware gating to reduce routing-induced computation and com-munication bottlenecks with limited model perturbation.  
+
+> •
+
+Extensive experiments demonstrate clear improvements in TBT and speedup over strong baseline methods. II. B ACKGROUND 
+
+A. Mixture-of-Experts Models 
+
+MoE scales model capacity through sparse execution: a gating network activates only a few experts for each token, reducing per-token computation relative to dense models. Representative MoE models include Mixtral [2], DeepSeek [1], [13], and Qwen [14]–[16]. Recent large-scale MoEs typically contain shared and routed experts. Shared experts are activated for every token, yield-ing deterministic computation that can be assigned statically. Routed experts are selected dynamically according to token features; their irregular activation patterns create the main scheduling and deployment challenges considered in this work. MoE optimization has been studied across several scenarios. Offloading approaches distribute work across hybrid CPU– GPU platforms [7], [8], [17]–[19]. Serving systems improve expert scheduling, load balancing, and placement [20]–[24], while training systems optimize combinations of data, tensor, and expert parallelism [6], [25]–[28]. These studies highlight memory capacity, computation balance, and communication overhead as central deployment constraints. 
+
+B. Near-Memory Processing Architectures 
+
+Sparse, bandwidth-intensive MoEs remain limited by the memory wall. Processing-in-Memory colocates computation with data [29], but its low compute density limits large-model scalability. In contrast, 3D NMP stacks DRAM and logic dies, providing high bandwidth with moderate compute density. 
+
+Hybrid Bonding DRAM [30]–[32] is a representative 3D NMP design whose fine-pitch vertical interconnects provide low-latency, high-bandwidth memory–logic communication. Recent studies further demonstrate 3D NMP for memory-intensive LLM workloads [12], [33]–[36]. 
+
+C. Distributed Inference Strategies 
+
+Distributed 3D-NMP inference commonly uses Tensor Par-allelism (TP) or Expert Parallelism (EP). TP (Fig. 2b) splits each expert across processing elements, balancing computation but requiring bandwidth-intensive all-reduce communication that grows with batch size. This communication is difficult to quantize because partial sums use high precision. EP (Fig. 2c) assigns complete experts to PE groups and dispatches tokens to their routed experts. A lightweight meta-data all-to-all precedes the dominant hidden-state transfer [37], after which outputs are gathered. EP reduces synchronization and enables output quantization, but dynamic routing causes compute imbalance and irregular communication. Fig. 2 sum-marizes the trade-off; our design combines TP and EP to balance computation and communication. III. M OTIVATION 
+
+The TP/EP trade-off above is ultimately driven by sparse and dynamic expert routing. We therefore examine three routing-induced characteristics that directly affect MoE de-ployment on 3D NMP: long-term activation skew, short-term runtime fluctuation, and instantaneous mismatch between model-side routing scores and hardware cost. 
+
+Long-term routing skew and expert affinity. Fig. 3(a) shows that, on Qwen2-57B-A14B-Instruct, a small subset of experts receives many tokens while most experts are rarely ac-tivated, complicating expert placement. Fig. 3(c) further shows strong co-activation affinity. These observations motivate hy-brid placement: high-demand experts should be partitioned to avoid hotspots, while low-demand or frequently co-activated experts should be localized to reduce communication. 
+
+Short-term runtime fluctuation and predictability. 
+
+Fig. 3(b) shows that expert usage changes noticeably across iterations, which is not captured by a purely static place-ment. The same figure also shows high next-layer prediction accuracy: due to residual connections, the hidden states of adjacent layers remain similar, so applying the next layer’s gating function to the previous layer’s hidden states can predict next-layer expert activation accurately. This enables runtime scheduling to proactively allocate resources according to the upcoming routing pattern. 
+
+Instantaneous hardware-oblivious routing-cost mis-match. Standard top-k gating performs token-level expert se-lection solely according to model-side scores, without consid-ering expert placement, node load, or NoC cost. On Qwen3.5-35B-A3B, Fig. 3(d) shows that experts with similar boundary 30 6 12 18 24 30 Expert Index 04812 16 20 24 Layer Index 0 10 20 Layer Index 0.0 0.5 1.0                    
+
+> Reuse Probability Accuracy of Prediction
+> 0612 18 24 30 Expert Index 0612 18 24 30 Expert Index 0.01 0.02 0.03 0.04 0.05 0.06 0.07 Expert Score Range 0816 24 32 Batch Load Ratio 123456789 10 Top-n Experts 0.00 0.02 0.04 Expert Scores  Activated Experts Inactive Experts
+> 1357Top-k Expert Rank +1 +2 +3 +4 +5 +6 +7 +8 After-top-k Expert Rank
+> 0.0 0.5
+> Frequency
+> 0.0 0.5 1.0
+> 0.00 0.25 0.50
+> Frequency
+> 0.0 0.2 0.4 0.6 0.8
+> Cosine Similarity
+> (a) (b) (c) (d) (e) (f)
+
+Fig. 3. (a) Expert activation frequency, (b) activation overlap between adjacent layers (blue) and next-layer prediction accuracy (green), (c) expert routing affinity, where entry (i, j ) denotes the conditional probability that expert j is activated given expert i, (d) batch-level load variation among near-boundary expert choices with similar gating scores, where Batch Load Ratio is each expert’s number of tokens to process normalized by the batch-average value; 1.0 indicates average load and larger values indicate heavier load, (e) expert score distribution, and (f) output similarity under boundary expert replacement, where entry (i, j ) reports the cosine similarity between the original score-weighted top-k MoE output and the output obtained by replacing the i-th selected expert with the expert at overall rank k+j (the j-th after-top-k candidate), while keeping the candidate’s original gating weight. 
+
+scores can have very different batch-level loads, creating a mismatch between model preference and execution cost. To avoid excessive model perturbation, however, hardware-aware routing should avoid changing high-importance expert choices. Fig. 3(e) shows that only a few activated experts receive dominant gating scores, while lower-ranked selected experts contribute much less to the score-weighted MoE output. Fig. 3(f) further shows high similarity when lower-ranked selected experts are replaced by near-boundary unselected can-didates. These observations motivate hardware-aware gating, which focuses on low-impact boundary choices and limits perturbation to the original routing result. IV. P ERFORMANCE MODELING 
+
+Before presenting our design, we first developed a perfor-mance model to estimate the computation and communication cost of MoE inference on NMP architectures. 
+
+A. Computation Overhead Modeling 
+
+The computation latency tcomp is determined by the most heavily loaded node, and thus reflects the imbalance of expert utilization across the system. For node c, its workload depends on the placement matrix Pic , where Pic denotes the fraction of expert i assigned to node c (see Table II for other notations). The computation time is modeled as 
+
+tcomp = max 
+
+> c
+
+( PE−1 
+
+> i=0
+
+Pic fiB · 3h · IS 
+
+comp 
+
+)
+
+. (1) Here, 3h · IS represents the computation volume per token (including the up, gate, and down projection layer), while 
+
+fiB is the number of tokens activating expert i. Consequently, 
+
+Pic fiB denotes the effective token count processed by node 
+
+c.Note that Pic is modeled as a continuous variable rather than a binary indicator in prior works [21], [38]–[40], allowing experts to be partially distributed across multiple nodes, simi-lar to tensor parallelism. This improves deployment flexibility and alleviates computation hotspots. However, splitting experts also introduces additional communication, creating a trade-off between computation balance and communication cost. 
+
+B. Communication Overhead Modeling 
+
+We model irregular MoE all-to-all communication using a custom discrete-event NoC simulator inspired by the method-ology of Ns3 [41] and BookSim [42]. The simulator generates communication tasks from token–expert mappings, schedules them on directed NoC links, and extracts the total schedule time as communication latency. For clarity, schematic figures in this paper mainly use 2D Mesh as the running example, since mesh is the most widely adopted interconnect in prior 3D NMP systems [12], [33]–[36]. The simulator itself is topology-agnostic: the same abstraction also supports Torus [43] and Fat-tree [44] by replacing the path-construction rule and link-bandwidth model. To support different physical interconnects, we abstract the NoC as a topology object that provides endpoint lists, candidate paths, path selection, and link bandwidths. For each communication task generated from token–expert routing, the simulator constructs a topology-specific path and schedules the transfer on the directed links along that path. Each directed link maintains an independent occupancy list, and the transfer time is computed using the bandwidth of that specific link. Under this abstraction, Mesh uses deterministic dimension-order XY routing with uniform link bandwidth. Torus extends Mesh with wrap-around links and selects the minimum-hop direction in each dimension. Fat-tree uses explicit up-down routes through leaf, aggregation, and core switches, and as-signs endpoint–leaf, leaf–aggregation, and aggregation–core bandwidths independently for each directed link. By tracking occupancy and bandwidth for each directed link, the simulator can capture both uniform topologies such as Mesh/Torus and hierarchical topologies such as Fat-tree. 
+
+Discrete-Event Simulation for Accurate Latency Esti-mation. Our simulator generates communication tasks based on token–expert mappings, builds topology-specific paths, and schedules transmissions using a priority queue while tracking link occupancy to avoid conflicts. Alg. 1 summarizes the scheduling procedure. 4
+
+Algorithm 1 Discrete-Event Simulation for Communication Scheduling  
+
+> 1:
+
+procedure SIMULATE COMM 2: link schedule ← defaultdict(list)  
+
+> 3:
+
+event queue ← []  
+
+> 4:
+
+for each activated expert e of each token t do  
+
+> 5:
+
+Find source and destination nodes  
+
+> 6:
+
+path ← BuildPath(src, dst)  
+
+> 7:
+
+Add comm tasks to event queue  
+
+> 8:
+
+end for  
+
+> 9:
+
+max finish time ← 0 
+
+> 10:
+
+while event queue do  
+
+> 11:
+
+current task ← heappop(event queue)  
+
+> 12:
+
+Find available time on links in path  
+
+> 13:
+
+if link is occupied then  
+
+> 14:
+
+Reschedule task with updated start time  
+
+> 15:
+
+else  
+
+> 16:
+
+Remove first link from path  
+
+> 17:
+
+Update current time and link schedule  
+
+> 18:
+
+if path is not empty then  
+
+> 19:
+
+Add task back to event queue with updated path  
+
+> 20:
+
+else  
+
+> 21:
+
+max finish time ← max (max finish time, current time)  
+
+> 22:
+
+end if  
+
+> 23:
+
+end if  
+
+> 24:
+
+end while  
+
+> 25:
+
+return max finish time  
+
+> 26:
+
+end procedure 
+
+In Alg. 1, link_schedule stores occupied intervals for each directed link. The simulator has three main steps: (1) task generation identifies source nodes holding each token’s acti-vated experts and chooses one aggregation destination (lines 4–8); (2) path construction builds the directed-link sequence according to the selected topology (lines 5–6); and (3) task scheduling uses a time-priority heap as the discrete-event queue, always processing the earliest-ready hop first. If the current link is occupied, the event is delayed and reinserted; otherwise, the transfer time is computed from the message size and the current link bandwidth, the occupied interval is appended to link_schedule , and the task proceeds to the next hop or finishes (lines 10–21). 
+
+Linear Approximation for Optimization. To enable ef-ficient deployment optimization, we further approximate the communication latency using a node-traffic model: 
+
+ˆtcomm = 4Bh 
+
+BW max 
+
+> c
+
+X
+
+> g∈G
+
+fg I
+
+X
+
+> i∈g
+
+I(Pic > 0) > 0
+
+ (2) The nested indicator I
+
+P 
+
+> i∈g
+
+I(Pic > 0) > 0
+
+
+
+equals 1 if and only if node c hosts at least one expert from co-activated group 
+
+g. Once this condition holds, the tokens associated with group 
+
+g must communicate with node c, producing a communication volume of 4fg Bh assuming FP32 representation. BW in Eq. (2) denotes endpoint-side link bandwidth for the selected topology.                               
+
+> Fig. 4. Linear correlation between schedule-based communication latency and node-level communication patterns ( R2= 0 .96 ). TABLE I Performance-model validation against ASTRA-sim.
+> Latency Bandwidth Predicted Latency ASTRA-sim Latency Error
+> 0.1 us 25 Gb/s 673 us 668 us 0.7% 5 us 25 Gb/s 851 us 879 us 3.2% 020 Gb/s 671 us 692 us 3.0% 0.1 us 20 Gb/s 705.6 us 691.5 us 2.0% 0.1 us 50 Gb/s 285.6 us 281.3 us 1.5% 0.1 us 10 Gb/s 1405.6 us 1375.1 us 2.2%
+
+We validate the approximation by comparing the estimated latency ˆtcomm with simulation results tcomm . As shown in Fig. 4, the two exhibit a strong linear correlation: 
+
+tcomm = γˆtcomm (3) where γ is obtained via linear regression. Across various eval-uated scenarios, the coefficient of determination ( R2) exceeds 0.9, indicating that the model provides reliable estimates. For structured communication patterns such as ring all-reduce [45], the communication schedule is deterministic and balanced, making the total latency close to the per-node communication time. 
+
+tcomm ≈ ˆtcomm ≈ 4Bh 
+
+BW (4) This implies that γ = 1, showing that the model is also applicable to structured communication such as TP all-reduce. Accordingly, ˆtcomm uses this endpoint-side bandwidth for all topologies, while the discrete-event simulator uses the bandwidth of each traversed directed link directly. Differences in routing paths and link contention under each topology are reflected by refitting γ from simulated latency samples when the topology or bandwidth setting changes. Finally, we compare the performance model with results from the widely used distributed deep learning simulator ASTRA-sim [46]. As shown in Table I, the predicted latency aligns with the simulation results within 3.2% relative error across the evaluated ring all-reduce settings, confirming the accuracy of the proposed model. V. HDA-M OE D ESIGN 
+
+A. Overview 
+
+Fig. 5 illustrates HDA-MoE, which includes offline place-ment and online inference. Offline placement determines hy-brid expert placement through Node Balance (Sec. V-B1) and Link Balance (Sec. V-B2). The pipeline follows the bottleneck-latency objective in Sec. IV and applies it at three decision granularities. At placement granularity, Node Balance reduces the maximum node compute load and the node-level communication proxy. At physical-mapping granular-ity, Link Balance maps the logical placement to physical endpoints to reduce link congestion. At runtime granularity, 5
+
+> TABLE II Main notations.
+
+Notation Definition 
+
+tcomp Computation latency 
+
+tcomm Communication latency 
+
+ˆtcomm Approximated communication latency 
+
+c Node index 
+
+E Total number of experts 
+
+e Number of activated experts per token 
+
+Pic Fraction of expert i assigned to node cfi Activation frequency of expert iB Batch size 
+
+h Hidden dimension 
+
+IS MoE intermediate size 
+
+D Number of nodes comp Per-node compute throughput BW Endpoint-side link bandwidth 
+
+Mi Expert-i weight size 
+
+ρmem DRAM capacity cap factor 
+
+G Set of co-activated expert groups 
+
+g Expert-group index 
+
+fg Co-activation frequency of expert group g
+
+I(·) Indicator function 
+
+Ygc Group-node indicator in LP 
+
+G(x) Adjusted gating score vector 
+
+Wg Gating weight matrix 
+
+bg Gating bias vector 
+
+rcomp Computation penalty coefficient 
+
+rcomm Communication penalty coefficient 
+
+Tcomp Computation penalty vector 
+
+Tcomm Communication penalty vector 
+
+the online stage applies latency-model-derived local decisions from two complementary sides. Dynamic scheduling operates on the hardware supply side: it changes how already-routed tokens use available expert replicas by adjusting pre-broadcast and dispatch decisions, without modifying routing scores. Hardware-aware gating operates on the software demand side: it slightly adjusts low-impact expert choices so that token routing itself requests less congested computation and commu-nication resources. Together, they optimize online execution from two different angles under the same latency model, with their effects validated in Sec. VI. 
+
+B. Automated Hybrid Parallelism via Node-Link Balance 
+
+Automated hybrid parallelism jointly decides how experts are split across D logical clusters and how these clusters map to physical NoC endpoints, using the model configuration, workload profile, and hardware setting as inputs. We adopt a two-stage Node-Link Balance Co-optimization strategy for MoE deployment on 3D NMP architectures. The first stage optimizes logical expert placement to balance computation and reduce communication volume, while the second stage maps logical clusters onto physical nodes to alleviate link conges-tion. This decomposition simplifies the placement and enables efficient co-optimization of computation and communication. Alg. 2 summarizes the overall search procedure. 
+
+Algorithm 2 Automated Hybrid Parallelism Search                              
+
+> Require: modelConfig, workloadProfile, hardwareConfig
+> Ensure: hybrid placement {P(ℓ)}, mapping {M(ℓ)}
+> 1: (G, {fi},{fg})←EXTRACT STATS (workloadProfile)
+> 2: γ←CALIBRATE PROXY (hardwareConfig)
+> 3: for each MoE layer ℓdo
+> 4: P(ℓ)←NODE BALANCE LP( ℓ)
+> 5: M(ℓ)←LINK BALANCE BO( P(ℓ))
+> 6: end for
+
+1) Node Balance Optimization via Linear Programming: 
+
+In the first stage, we optimize expert placement across logical compute clusters, abstracting away physical routing and using the configured bandwidth in the communication proxy. Since the placement space is highly combinatorial, manual tuning becomes infeasible. Therefore, we formulate the problem as a linear program (LP). The LP jointly models computation bottlenecks and approximated communication cost using the estimator ˆtcomm derived earlier. The notations are defined in Table II. The continuous variable Pic ∈ [0 , 1] denotes the fraction of expert i assigned to cluster c, the binary variable Zic ∈ { 0, 1} indicates whether expert i is placed on cluster c, and Ygc = I
+
+P 
+
+> i∈g
+
+Zic > 0
+
+
+
+indicates whether cluster c stores at least one expert from co-activated group g. Because Pic is continuous, an expert can either stay on one cluster (EP-style) or be partitioned across clusters (TP-style). Thus, HDA-MoE automatically decides the per-expert parallelism mode through the optimized Pic and 
+
+Zic , instead of manually labeling experts as TP or EP. Then we define some constraints to guarantee the legal mapping and efficiently search for the optimal allocation strategy. 
+
+Zic ≥ Pic , ∀(i, c ) (5) 
+
+Ygc ≥ Zic , ∀g, i ∈ g, c (6) 
+
+X
+
+> c
+
+Pic = 1 , ∀i (7) 
+
+tcomm ≥ γ 4Bh 
+
+BW 
+
+X
+
+> g∈G
+
+fg Ygc , ∀c (8) 
+
+tcomp ≥
+
+PE−1 
+
+> i=0
+
+Pic fiB · 3h · IS 
+
+comp , ∀c (9) 
+
+> E−1
+
+X
+
+> i=0
+
+Pic Mi ≤ ρmem 
+
+PE−1 
+
+> i=0
+
+Mi
+
+D , ∀c (10) 
+
+0 <
+
+> E−1
+
+X
+
+> i=0
+
+Pic fi ≤
+
+ 1
+
+RCC 
+
++ 1 
+
+ eD , ∀c (11) 
+
+RCC = tcomp 
+
+tTP,comm 
+
+= BW · IS · e
+
+2D · comp (12) Constraints 5–7 define legal expert assignment and group-node indicators. Constraints 8 and 9 upper-bound the com-munication and computation bottlenecks, respectively. In par-ticular, Constraint 8 models communication at the granularity of co-activated expert groups, where each g ∈ G denotes a group of experts activated together, and fg represents its co-activation frequency. It is the LP linearization of Eq. (2): the nonlinear nested indicator in Eq. (2) is replaced by the auxil-iary binary variable Ygc through Constraint 6, while the factor 
+
+γ applies the calibrated linear approximation from Eq. (3). By 6Logic Die       
+
+> Memory Die
+> Deployment
+> Offline Mapping
+> Bank 0
+> Bank 1
+> E1
+> E2
+> E
+> 3
+> E
+> 4
+> Bank 0
+> Bank 1
+> E1
+> E2
+> E
+> 3
+> E
+> 4
+> E1
+> Node Balancing:
+> Linear Programming
+> (Sec.V-C-(1))
+> Link Balancing:
+> Bayesian Optimization
+> (Sec.V-C-(2))
+> Computation
+> Load
+> Prediction
+> (Sec.V-D-(1)) Priority
+> Detection
+> Communication-Efficient
+> Dispatch
+> (Sec.V-D-(3))
+> Online Scheduling
+> Optimal
+> Broadcast
+> (Sec.V-D-(2))
+> Bank 0
+> Bank 1
+> E1
+> E2
+> E
+> 3
+> E
+> 4
+> Online Inferencing
+> with Adaptive Gating
+> (Sec.V-E)
+> Expert1 Expert2 Expert3
+> Dispatch
+> Gather
+> Token5
+> Token4
+> Token1
+> Token3
+> Token2
+> Token6
+> Token1 Token2
+> Token4 Token5
+> Token3
+> Token6
+> Pre-broadcast
+> R
+> R
+> R
+> R
+> Logic Bank (Node)
+> DRAM Bank
+
+Fig. 5. Overview of HDA-MoE 
+
+co-locating frequently co-activated experts, the optimization reduces the number of nodes involved in each active group and thus lowers the communication term P
+
+g∈G fg Ygc .Expert placement is also limited by each 3D NMP node’s local memory capacity. Constraint 10 captures this requirement by bounding the expert-weight storage assigned to each node. Here Mi is the weight size of expert i, and ρmem controls how much the maximum per-node memory load may exceed the uniform average. A smaller ρmem enforces more balanced stor-age, while a larger value gives the latency-oriented objective more placement freedom. This prevents the LP from concen-trating too many expert weights on a few nodes, improving memory-capacity utilization while preserving the latency ob-jective. Constraints 11 and 12 restrict node workload using the theoretical TP compute–communication ratio, which prunes suboptimal placements and improves solver convergence. Finally, we minimize the node-level inference overhead as 
+
+min tnode overhead (13) 
+
+tnode overhead = tcomp + 2 tcomm = tcomp + 2 γˆtcomm (14) Here, γ is the scaling factor obtained from the commu-nication model (Sec. IV-B), and the factor 2 accounts for the symmetric all-to-all dispatch and gather. This LP yields a glob-ally coordinated logical placement that balances computation and communication, providing the basis for the subsequent physical mapping stage. 
+
+2) Link Balancing via Bayesian Optimization: In the sec-ond stage, the optimized logical clusters are mapped onto physical nodes in the 2D mesh. The goal is to reduce link congestion and communication tail latency. We use Bayesian Optimization to search for low-congestion mappings, as the objective is expensive to evaluate but changes smoothly un-der local mapping variations (e.g., swapping nearby clusters causes only minor changes in communication cost). The same Link Balance procedure extends to Torus and Fat-tree with the topology-specific routing and bandwidth defined in Sec. IV-B. For Mesh and Torus, the goal is to reduce Time                           
+
+> R
+> Node 4 Node 3
+> Node 1
+> R
+> RNode 2 R
+> E3 E4
+> E1 E2
+> E3 E4
+> E1 E2
+> E3 E4
+> E1 E2
+> E3 E4
+> E1 E2
+> E1 E2
+> 1<->2
+> E3 E4
+> 1<->2
+> Node 1
+> Node 2
+> Node 3
+> Node 4
+> 1<->2 1<->2
+> E1 E2
+> 2<->3
+> E3 E4
+> 2<->3 2<->3 2<->3
+> E1 E2
+> 3<->4
+> E3 E4
+> 3<->4 3<->4 3<->4
+> E1 E2
+> 4<->1
+> E3 E4
+> 4<->1 4<->1 4<->1
+> R
+> Node 4 Node 3
+> Node 1
+> R
+> RNode 2 R
+> E3
+> E1
+> E4
+> E2
+> E1 Node 1
+> Node 2
+> Node 3
+> Node 4
+> E3
+> 1<->3
+> E4
+> 1<->4
+> E2
+> 2<->3
+> R
+> Node 4 Node 3
+> Node 1
+> R
+> RNode 2 R
+> E3
+> E1
+> E4
+> E2
+> E1 Node 1
+> Node 2
+> Node 3
+> Node 4
+> E3
+> 3<->4
+> E4
+> 1<->4
+> E2
+> 2<->3
+> E3
+> E3
+> R
+> Node 4 Node 2
+> Node 1
+> R
+> RNode 3 R
+> E3 E1
+> E4 E2
+> E1 Node 1
+> Node 3
+> Node 2
+> Node 4
+> E3
+> 3<->4
+> E4
+> 1<->4
+> E2
+> E3
+> E3
+> 3<->4 2<->3
+> 3<->4
+> 3<->4
+> Intra-Expert Communication
+> High-Workload
+> Expert
+> Low-Workload
+> Expert
+> Moderate -Workload
+> Expert
+> Expected speedup
+> Expected speedup
+
+(a) 
+
+(b) 
+
+(c) 
+
+(d) 
+
+> Inter-Expert Communication
+> 1<->3
+> 1<->3
+> 1<->3
+> 1<->3
+
+T1  E2  E3  T2  E2  E3  T3  E1  E3  T4  E1  E4 Expert Routing: 
+
+Fig. 6. (a) TP: balanced computation but communication-intensive; (b) EP: communication-efficient but computation-imbalanced, (c) Hybrid parallel with node balance: balanced computation with irregular traffic; (d) Hybrid parallel with node-link balance: balanced computation with regular and less congested traffic. 
+
+communication congestion. For Fat-tree, it aims to reduce cross-leaf, cross-pod, and core-level communication. Fig. 6 illustrates the placement trade-off. TP balances com-putation but introduces heavy intra-expert synchronization; EP avoids such synchronization but can overload hot experts. Node Balance splits overloaded experts to reduce compute hotspots, but the induced synchronization may congest specific paths. Node-Link Balance further remaps logical clusters onto physical nodes, spreading synchronization traffic over less congested links and achieving both computation and commu-nication balance. In the example, tokens T1–T3 all activate E3, so EP overloads Node 3. Node Balance splits E3 across Nodes 3 and 4 to remove the compute hotspot, while Node-Link Balance further remaps physical nodes so the induced synchronization avoids a single congested link. 
+
+C. Dynamic Scheduling 
+
+We design a runtime scheduling strategy for dynamic ex-pert routing in MoE inference, including three components: expert priority prediction, cost-aware pre-broadcasting, and communication-efficient token dispatch. 
+
+1) Priority Detection and Computation Prediction: Moti-vated by the similarity of adjacent-layer hidden states induced by residual connections, we predict next-layer computation hotspots by applying the next layer’s gate to the previous 7
+
+layer’s hidden states. For expert i on node c, its priority score is defined as 
+
+prio ic = 3Pic ˆfi · IS comp (15) This score ranks experts by their predicted marginal contribu-tion to the maximum node compute load in Eq. (1), i.e., the expected latency benefit of pre-broadcasting them under the current hotspot. Here, ˆfi denotes the predicted activation frequency of expert 
+
+i. The highest-priority expert on the most congested node is pre-broadcast repeatedly within the runtime budget of the previous layer. The required metadata, such as priority scores and dispatch tables, are batch-local and can be piggybacked on the lightweight metadata exchange before token dispatch (Sec. II-C), so the overhead is negligible. 
+
+2) Optimal Broadcast Chunk Size: Pre-broadcasting an expert splits its parameters into chunks of size c. Larger chunks reduce the number of hops and thus latency, while smaller chunks reduce per-hop traffic but increase transmission delay. This trade-off can be modeled by the traditional α–β
+
+communication model: latency = α(2 √D + h · IS c ) (16) bandwidth = β(h · IS + 2 c√D) (17) 
+
+tpre b = latency + bandwidth (18) Let k denote the number of pre-broadcast iterations allowed within the runtime window. Then the lower bound of tpre b is 
+
+tpre b ≥ h · IS · βk + 2 α√D + 2 
+
+q
+
+2√Dβkαh · IS (19) which is tight when the chunk size is chosen as 
+
+c =
+
+s
+
+αh · IS 
+
+2βk √D (20) This gives the optimal chunk size for efficient pre-broadcast under the runtime constraint. 
+
+3) Communication-Efficient Dispatch: After broadcasting, a token can be routed to any node that already holds its activated experts. To avoid extra communication, we restrict the candidate nodes to those containing the routed experts and select the one with the lowest current compute load. This reduces workload imbalance without introducing additional data movement. Fig. 7 illustrates dynamic scheduling: when E1 becomes a runtime hotspot, it is pre-broadcast to all nodes, allowing tokens such as T2 and T4 to execute on nodes already holding E1 and thus improving load balance without extra inter-expert communication. Specifically, Fig. 7(b) identifies E1 as the predicted hotspot, and Fig. 7(c) dispatches the routed tokens to existing E1 copies instead of moving expert outputs across nodes. This online scheduling rule is greedy: finding the globally optimal broadcast and dispatch plan would require solving a discrete scheduling problem under the current link and compute queues during every runtime window. Such optimization would exceed the available online budget, so we rank candidate broadcasts and dispatches using the priority score derived from the validated latency model in Sec. IV-B. Expert Routing at  Average :   
+
+> Expert Routing at Runtime :
+> Time
+> R
+> Node 4 Node 2
+> Node 1
+> R
+> RNode 3
+> R
+> E3 E1
+> E4 E2
+> Node 1
+> Node 3
+> Node 2
+> Node 4
+> E3
+> High-Workload
+> Expert
+> Low-Workload
+> Expert
+> Moderate -Workload
+> Expert
+
+(a) 
+
+(b) 
+
+(c)                            
+
+> R
+> Node 4 Node 2
+> Node 1
+> R
+> RNode 3
+> R
+> E3 E1
+> E4 E2
+> E1 Node 1
+> Node 3
+> Node 2
+> Node 4
+> E3
+> 3<->1
+> E2
+> E3
+> E3
+> 2<->1
+> 4<->1 2<->1
+> R
+> Node 4 Node 2
+> Node 1
+> R
+> RNode 3
+> E3
+> E1
+> E4
+> E2
+> Node 1
+> Node 3
+> Node 2
+> Node 4
+> E3
+> 3<->1
+> E2 E3
+> E3
+> 4<->1
+> E1
+> E1
+> E1
+> E1 E1
+> R
+> Predict to overload
+> Pre-broadcast to all nodes
+> Expected speedup
+> Intra-Expert Communication
+> Inter-Expert Communication
+> T1 E2 E3 T2 E2 E3 T3 E1 E3 T4 E1 E4
+> T1 E1 E3 T2 E1 E2 T3 E1 E3 T4 E1 E4
+> E4
+> 4<->1
+> E1
+> E4
+> E1
+> E3
+> 3<->4
+> E4
+> 1<->4
+> E2
+> E3
+> 3<->4 2<->3
+> 3<->4
+> 3<->4
+> 1<->3
+
+Fig. 7. (a) Static placement, (b) hotspot identification, (c) pre-broadcast of the hottest expert and token dispatch without extra communication. 
+
+D. Hardware-aware Gating 
+
+While dynamic scheduling reduces latency by pre-broadcasting hot experts, runtime bandwidth and pre-broadcast budget may remain insufficient when multiple hotspots coexist, especially at small batch sizes. Hardware-aware gating there-fore complements dynamic scheduling on the software de-mand side. Dynamic scheduling increases the usable hardware supply for already-selected experts, whereas hardware-aware gating incorporates marginal computation and communication penalties into expert routing to reduce the resources requested by token routing. These penalties are derived from the latency model in Sec. IV. 
+
+1) Objective: Hardware-aware gating implements routing with latency regularization: the softmax term preserves model utility, while Tcomp and Tcomm represent the marginal system cost of selecting each expert under the current placement and scheduling state. Specifically, we redefine the gating function as follows: 
+
+G(x) = Softmax (Wg x + bg ) + rcomp Tcomp + rcomm Tcomm 
+
+(21) where Tcomp and Tcomm denote the computational and com-munication overhead, respectively, associated with selecting each expert. The hyperparameters rcomp and rcomm are typically negative-valued and act as penalty terms, controlling the trade-off between system efficiency and model fidelity. The runtime overhead of hardware-aware gating is small, since the penalty terms are computed through lightweight matrix operations and reductions over routing metadata. Com-pared with expert computation and token communication, this cost is negligible in practice. We do not attempt to solve 8
+
+the globally optimal hardware-aware routing problem online, since that would couple token-level expert selection with transient node loads, link occupancy, and future routing results. Instead, hardware-aware gating incorporates the marginal-cost terms into the expert-routing scores, making online selection deployable while keeping perturbation concentrated on low-impact routing changes. 
+
+2) Computation Penalty: The computation penalty esti-mates the marginal increase in the maximum node compute load after selecting each candidate expert. Let cE×1, init denote the base compute cost vector: 
+
+cE×1, init = ( c0, init , c 1, init , ..., c E−1, init )T , (22) where 
+
+ci, init = 3 h · IS · X
+
+g∈G
+
+IE (i ∈ g) (23) uses the same per-token cost as Eq. (1). The initial per-node compute load is 
+
+C1×D, init =
+
+PE−1
+
+i=0 Pi · ci, init 
+
+comp (24) where comp is the compute throughput. If candidate expert j
+
+is additionally selected, the updated expert-cost matrix is 
+
+cE×E, incr = 1E cTE×1,init + 3 h · IS · IE . (25) and the corresponding per-node load matrix is 
+
+CE×D, incr = cE×E, incr · PE×D
+
+comp (26) Thus, 
+
+Tcomp = max 
+
+0≤c≤D−1{Cc, incr } − max {Cinit } · 1E (27) penalizes experts that would increase the maximum node load. 
+
+3) Communication Penalty: The communication penalty uses deployment dispersion as a lightweight proxy for dispatch and aggregation cost: 
+
+Ti =
+
+D−1X
+
+c=0 
+
+I(Pic ̸ = 0) (28) and 
+
+Tcomm = ( T0, T 1, ..., T E−1) (29) Fig. 8 illustrates hardware-aware gating. When scheduling can only pre-broadcast E1, conventional routing may shift the bottleneck from Node 1 to Nodes 3 and 4 through heavily loaded E3. Hardware-aware gating penalizes this high-cost boundary choice and redirects low-impact tokens toward available experts on less loaded nodes, reducing pressure on the hotspot path. VI. E XPERIMENTAL RESULTS 
+
+A. Experimental Setup 1) Models: We evaluate HDA-MoE on Mixtral-8x7B-Instruct-v0.1 [2] (Mixtral), DeepSeek-V2-Lite-Chat [13] (DeepSeek), Qwen2-57B-A14B-Instruct [15] (Qwen2), and Qwen3.5-35B-A3B [47] (Qwen3.5), whose 256 routed experts test larger expert spaces. Table III lists their key parameters. Expert Routing at  Average : 
+
+> Expert Routing at Runtime :
+> Time
+> High-Workload
+> Expert
+> Low-Workload
+> Expert
+> Moderate-Workload
+> Expert
+
+(a) 
+
+(b)                                      
+
+> R
+> Node 4 Node 2
+> Node 1
+> R
+> RNode 3
+> R
+> E3 E1
+> E4 E2
+> E1 Node 1
+> Node 3
+> Node 2
+> Node 4
+> E3
+> E2
+> E3
+> E3
+> 2<->4
+> 4<->1
+> R
+> Node 4 Node 2
+> Node 1
+> R
+> RNode 3
+> E3
+> E1
+> E4
+> E2
+> Node 1
+> Node 3
+> Node 2
+> Node 4
+> E3
+> 3<->1
+> E2 E3
+> E3
+> 4<->1
+> E1
+> E1
+> E1
+> E1 E1
+> R
+> Predict to overload
+> Pre-broadcast to all nodes
+> Intra-Expert Communication
+> Inter-Expert Communication
+> T1 E2 E3 T2 E2 E3 T3 E1 E3 T4 E1 E4
+> T1 E1 E3 T2 T3 E1 E3 T4 E1 E4
+> E4
+> 4<->1
+> E1
+> E4
+> E2 E3
+> 3<->1
+> 3<->2
+> 4<->2
+> Adaptive Expert Routing: T1 E1 E3 T2 T3 E1 E2 T4 E1 E4 E2 E3
+
+(c)   
+
+> R
+> Node 4 Node 2
+> Node 1
+> R
+> RNode 3
+> E3
+> E1
+> E4
+> E2
+> Node 1
+> Node 3
+> Node 2
+> Node 4
+> E3
+> E2 E3
+> E3
+> E1
+> E1
+> E1
+> E1 E1
+> R
+> E4
+> 4<->1
+> 3<->1
+> 3<->2
+> 4<->2
+> 2<->1
+> 2<->1
+> Expected speedup
+> 2<->4
+> 3<->2
+> 4<->2
+
+Fig. 8. (a) Computation load detection, (b) Pre-broadcast without hardware-aware gating, (c) Pre-broadcast with hardware-aware gating. TABLE III Key configurations of the evaluated MoE models. Configuration Mixtral DeepSeek Qwen2 Qwen3.5 Number of Experts 8 64 64 256 Activated Experts per Token 2 6 8 8Number of Layers 32 27 28 40 Hidden Size 4096 2048 3584 2048 Intermediate Size 14336 1408 2560 512 
+
+2) Baselines: Our baselines are TP, EP, a compute-balanced hybrid TP-EP scheme, and HD-MoE [12], the conference version of this work. The hybrid baseline partitions the mesh into regions—8 for DeepSeek and Qwen2, and 2 for Mixtral— uses EP across regions, TP within each region, and assigns each expert to one region for load balance. HD-MoE includes hybrid placement and dynamic scheduling but not hardware-aware gating, isolating the benefit of adaptive routing. 
+
+3) Evaluation Metrics: We report normalized TBT (Time-Between-Token, inter-token latency normalized to TP) and MoE latency breakdown, separating node-local computation from inter-node communication. 
+
+4) Dataset: We use MT-Bench [48] for latency under conversational workloads, and GSM8K [49], HumanEval [50], ARC-E, and ARC-C [51] for model quality. 
+
+5) Hardware-aware Gating Parameters: Hardware-aware gating uses computation and communication penalties rcomp 
+
+and rcomm . We tune them per model and compute/bandwidth setting for the quality–speed trade-off, and reuse them across topologies with the same hardware setting because topology 9
+
+TABLE IV Selected hyperparameters for hardware-aware gating. Each entry is 
+
+(rcomp , r comm ).Model 2.5 TFLOPS / 75 GB/s 5 TFLOPS / 50 GB/s 10 TFLOPS / 25 GB/s Mixtral (−3.2×10 4, −2.5×10 −2) (−6.5×10 4, −2.0×10 −2) (−1.16 ×10 5, −3.0×10 −2)                  
+
+> DeepSeek (−3.5×10 4,−5.0×10 −3)(−6.8×10 4,−2.2×10 −2)(−1.05 ×10 5,−3.5×10 −2)
+> Qwen2 (−1.2×10 4,−5.0×10 −5)(−1.8×10 4,−1.0×10 −4)(−7.0×10 4,−4.0×10 −4)
+> Qwen3.5 (−1.0×10 5,−2.0×10 −4)(−2.0×10 5,−1.0×10 −3)(−2.0×10 5,−1.0×10 −3)
+
+TABLE V Discrete-event NoC simulator configuration used in evaluation. Parameter Setting Endpoint Configurable number of NMP endpoints, each with local DRAM and compute Topology Configurable Mesh/Torus/Fat-tree; evaluated with 4 × 4, 4 × 8, 8 × 8 Mesh, 4 × 8 Torus, and 32-endpoint Fat-tree Bandwidth Configurable per-link bandwidth; evaluated with 25/50/75 GB/s and 50 GB/s Fat-tree tiers Routing XY for Mesh, minimum-hop wrap-around for Torus, up-down for Fat-tree Traffic source Token–expert routing traces; each event transfers expert-output bytes Contention model Hop-by-hop scheduling with per-directed-link FIFO serialization 
+
+does not change the gating-score scale. Table IV lists the final settings. The two magnitudes are not comparable because 
+
+Tcomp and Tcomm have different model-dependent scales. 
+
+6) Implementation and Offline Optimization: We use an in-house end-to-end simulator that integrates expert computation, memory access, and inter-node communication; the latter uses the discrete-event NoC simulator in Sec. IV-B. Table V summarizes the NoC and hardware settings. The offline search (Sec. V-B) typically finishes within several hours. Table VI reports its cost across expert scales. Qwen2 takes longer than Qwen3.5 because its co-activations span more distinct expert groups, increasing group-placement variables; BO uses the same 70-iteration Link Balance setting as the topology experiments. Fig. 9 further shows convergence: LP finishes within min-utes for Mixtral, DeepSeek, and Qwen3.5, while Qwen2 needs a longer search; BO becomes stable within about 45 iterations under the 70-iteration budget. 
+
+B. End-to-End Performance 
+
+We evaluate end-to-end performance under three com-pute/bandwidth settings: 2.5 TFLOPS/75 GB/s, 5 TFLOPS/50 GB/s, and 10 TFLOPS/25 GB/s. We also evaluate 4 × 4, 4 × 8, and 8 × 8 meshes at 5 TFLOPS/50 GB/s. Under the same 32-endpoint, 50 GB/s setting, we compare Mesh ( 4 × 8), Torus with wrap-around routing, and a 4-pod full-bisection Fat-tree with up-down routing and BW el = BW la = BW ac = 50 GB/s. Each node has 625 GB/s memory bandwidth. Table VII lists total and per-node DRAM capacity limits. 
+
+Better TBT latency through different hardware con-figurations: Fig. 10 compares compute/bandwidth settings. EP suffers from load imbalance at 2.5 TFLOPS/75 GB/s, while TP suffers from all-reduce overhead at 10 TFLOPS/25 GB/s, especially on the highly imbalanced Qwen2 routing in Fig. 3(a). The compute-balanced hybrid improves load balance but ignores topology; HD-MoE adds joint placement 
+
+TABLE VI Offline optimization cost and LP characteristics under 5 TFLOPS / 50 GB/s, (4,8). X vars.= 2ED expert-placement variables; G is the average number of co-activated expert groups; Y vars.= ¯GD ; Top-100 denotes the frequency mass covered by the 100 most frequent groups; HG denotes normalized group-frequency entropy; LP reports average solving time. Model Exp. MoE Lay. X vars. G Y vars. Top-100 HG LP (s) BO (min) Mixtral 8 32 512 27.9 0.9K 100.0% 0.908 1.95 49.61 DeepSeek 64 26 4.1K 2030.7 65.0K 23.46% 0.929 160.22 43.69 Qwen2 64 28 4.1K 4987.0 159.6K 13.27% 0.961 5205.78 58.23 Qwen3.5 256 40 16.4K 4886.9 156.4K 37.75% 0.811 550.36 50.29 0 500 1000 1500      
+
+> LP wall-clock time (s)
+> 025 50 75
+> MIP gap (%)
+> 5%
+> (a) LP convergence
+> 20 40 60
+> BO iteration
+> 0.0 0.5 1.0
+> Norm. residual  (b) BO convergence
+> Mixtral DeepSeek Qwen2 Qwen3.5
+
+Fig. 9. Offline-optimization convergence. (a) LP optimality gap over time. (b) Link Balance objective improvement during BO. TABLE VII DRAM capacity limits used in evaluation. Model ρmem Total limit Per-node limit 4×4 4×8 8×8Mixtral 1.10 99.2 GB 6.20 GB 3.10 GB 1.55 GB DeepSeek 1.25 37.4 GB 2.34 GB 1.17 GB 0.58 GB Qwen2 1.25 123.4 GB 7.71 GB 3.85 GB 1.93 GB Qwen3.5 1.25 80.5 GB 5.03 GB 2.52 GB 1.26 GB 
+
+and dynamic scheduling; HDA-MoE further improves results through adaptive routing. 
+
+Better TBT latency through different mesh size: Fig. 11 shows that HDA-MoE maintains low TBT across mesh sizes, indicating adaptability to topology scaling. 
+
+Better TBT latency through alternative topologies: 
+
+Fig. 12 shows that HDA-MoE outperforms all baselines on Torus and Fat-tree, indicating that Link Balance generalizes beyond XY-mesh routing. Overall, HDA-MoE achieves 1.1 ×–3.4 × over TP, 1.1 ×–1.5 × over EP, 1.1 ×–3.7 × over the Hybrid TP-EP compute-balanced baseline, and 1.1 ×–1.3 × over HD-MoE. 
+
+C. Latency Breakdown 
+
+Fig. 13 decomposes MoE-layer latency into computation, communication, and memory access under 5 TFLOPS com-pute, 50 GB/s communication, and 625 GB/s memory access. Compared with TP, HDA-MoE reduces all-reduce commu-nication through better placement and locality; compared with EP, it lowers compute tail latency by alleviating expert im-balance. It further improves over HD-MoE through hardware-aware gating. Memory access is a small latency component, so the remain-ing bottlenecks are computation and communication, which HDA-MoE targets through placement, scheduling, and routing. 
+
+D. Accuracy Evaluation 
+
+Since hardware-aware gating modifies expert selection, Ta-ble VIII compares original and HAG routing. HAG keeps 10 
+
+TP EP Compute Balance HD-MoE HDA-MoE 0.0 0.5 1.0 1.5 2.0 2.5                                     
+
+> Normalized TBT
+> 16 32 64 128
+> 2.5TFLOPS, 75.0GB/s
+> 16 32 64 128
+> 5.0TFLOPS, 50.0GB/s
+> 16 32 64 128
+> 10.0TFLOPS, 25.0GB/s
+> 16 32 64 128
+> 2.5TFLOPS, 75.0GB/s
+> 16 32 64 128
+> 5.0TFLOPS, 50.0GB/s
+> 16 32 64 128
+> 10.0TFLOPS, 25.0GB/s
+> 16 32 64 128
+> 2.5TFLOPS, 75.0GB/s
+> 16 32 64 128
+> 5.0TFLOPS, 50.0GB/s
+> 16 32 64 128
+> 10.0TFLOPS, 25.0GB/s
+> 16 32 64 128
+> 2.5TFLOPS, 75.0GB/s
+> 16 32 64 128
+> 5.0TFLOPS, 50.0GB/s
+> 16 32 64 128
+> 10.0TFLOPS, 25.0GB/s
+
+mixtral deepseek qwen qwen3.5 
+
+> 1234
+> Speedup
+
+Fig. 10. End-to-end performance under different hardware configurations 0.0 0.5 1.0 1.5 2.0 2.5                                     
+
+> Normalized TBT
+> 16 32 64 128
+> (4, 4)
+> 16 32 64 128
+> (4, 8)
+> 16 32 64 128
+> (8, 8)
+> 16 32 64 128
+> (4, 4)
+> 16 32 64 128
+> (4, 8)
+> 16 32 64 128
+> (8, 8)
+> 16 32 64 128
+> (4, 4)
+> 16 32 64 128
+> (4, 8)
+> 16 32 64 128
+> (8, 8)
+> 16 32 64 128
+> (4, 4)
+> 16 32 64 128
+> (4, 8)
+> 16 32 64 128
+> (8, 8)
+
+mixtral deepseek qwen qwen3.5 
+
+> 0.5 1.0 1.5 2.0 2.5 3.0 3.5
+> Speedup
+
+Fig. 11. End-to-end performance under different mesh sizes 0.0 0.5 1.0 1.5 2.0                                     
+
+> Normalized TBT
+> 16 32 64 128
+> Mesh
+> 16 32 64 128
+> Torus
+> 16 32 64 128
+> Fat-tree
+> 16 32 64 128
+> Mesh
+> 16 32 64 128
+> Torus
+> 16 32 64 128
+> Fat-tree
+> 16 32 64 128
+> Mesh
+> 16 32 64 128
+> Torus
+> 16 32 64 128
+> Fat-tree
+> 16 32 64 128
+> Mesh
+> 16 32 64 128
+> Torus
+> 16 32 64 128
+> Fat-tree
+
+mixtral deepseek qwen qwen3.5 
+
+> 0.5 1.0 1.5 2.0
+> Speedup
+
+Fig. 12. End-to-end performance under different topologies 
+
+MoE Compute Communication MoE Memory Access Attn Compute Attn Memory Access TP EP CB HD HDA 010 
+
+> Latency (ms)
+
+Mixtral    
+
+> TP EP CB HD HDA 024
+> Latency (ms)
+
+DeepSeek    
+
+> TP EP CB HD HDA 0510
+> Latency (ms)
+
+Qwen2    
+
+> TP EP CB HD HDA 05
+> Latency (ms)
+
+Qwen3.5 
+
+Fig. 13. End-to-end latency breakdown. CB denotes compute-balanced TP-EP; HD denotes HD-MoE; HDA denotes HDA-MoE. Attn includes attention layers and shared experts. TABLE VIII Accuracy on representative benchmarks. HAG entries are “a/b/c” for (10 TFLOPS, 25 GB/s), (5 TFLOPS, 50 GB/s), and (2.5 TFLOPS, 75 GB/s). Model Routing GSM8K HumanEval ARC-E ARC-C Mixtral Original 63.2 42.1 85.9 80.9 HAG 64.1/64.1/64.2 45.1/43.9/45.1 85.6/86.3/86.1 82.6/83.3/81.3 DeepSeek Original 70.1 43.3 68.2 56.5 HAG 70.6/70.7/70.1 42.7/44.5/43.3 69.5/68.9/68.9 57.5/57.5/58.5 Qwen2 Original 78.2 50.0 93.2 89.3 HAG 77.9/77.6/78.4 50.6/50.6/49.4 93.2/93.3/93.3 89.0/89.0/89.3 Qwen3.5 Original 74.8 65.9 93.3 90.0 HAG 74.5/74.7/74.5 65.2/64.0/65.2 93.3/93.5/94.0 89.3/90.3/91.0 
+
+comparable accuracy, so the efficiency gain does not come from model-quality degradation. 
+
+E. Routing Fidelity and Expert Substitutability Analysis 
+
+We next analyze boundary expert substitutability and end-to-end prediction perturbation under hardware-aware routing. 
+
+Boundary expert substitutability. For each token and layer, we replace the i-th selected top-k expert with the expert at overall rank k+j (the j-th after-top-k candidate), reuse the candidate’s original gating weight, and measure the cosine similarity between the original and substituted score-weighted +1 +2 
+
+After-top-k rank 
+
+12
+
+> Selected rank
+
+(a) Mixtral 
+
++1 +2 +3 +4 +5 +6 
+
+After-top-k rank 
+
+123456
+
+> Selected rank
+
+(b) DeepSeek 
+
++1 +2 +3 +4 +5 +6 +7 +8 
+
+After-top-k rank 
+
+12345678
+
+> Selected rank
+
+(c) Qwen2 
+
++1 +2 +3 +4 +5 +6 +7 +8 
+
+After-top-k rank 
+
+12345678
+
+> Selected rank
+
+(d) Qwen3.5 
+
+0.0 0.2 0.4 0.6 0.8 1.0 
+
+Weighted MoE-output cosine similarity 
+
+Fig. 14. Output similarity under boundary expert substitution. Entry (i, j ) is the cosine similarity after replacing the i-th selected expert with the (k+j)-th ranked expert. Rows index the selected rank i; columns index the after-top-k
+
+candidate rank j.
+
+top-k outputs. Fig. 14 reports the layer- and dataset-averaged similarity for each (i, j ) pair. Across the four models, non-Top-1 replacements achieve an average similarity of 0.949, showing that lower-ranked boundary experts are highly substitutable. In contrast, Top-1 replacements are more sensitive, so the practical perturbation 11 
+
+TABLE IX Routing impact under routing adjustment. HDA-MoE entries are “a/b/c” for (10 TFLOPS, 25 GB/s), (5 TFLOPS, 50 GB/s), and (2.5 TFLOPS, 75 GB/s). Model Routing KL ↓ PPL ratio ↓ Top-1 rout. ret. ↑ Top-1 pred. agr. ↑                                    
+
+> Mixtral Cache-prior 0.0526 1.0403 100.00% 91.32% HDA-MoE 0.0882/0.0935/0.0996 1.0769/1.0907/1.0923 85.00/85.00/83.75% 88.43/88.43/87.99% DeepSeek Cache-prior 0.1044 1.0333 99.38% 85.69% HDA-MoE 0.1820/0.1812/0.1504 1.0774/1.0841/1.0627 95.00/97.50/96.25% 81.76/82.01/84.09% Qwen2 Cache-prior 0.1010 1.0360 95.63% 85.86% HDA-MoE 0.1248/0.0593/0.0919 1.0771/1.0365/1.0391 76.88/82.50/81.25% 85.49/90.00/87.62% Qwen3.5 Cache-prior 0.4435 1.5721 100.00% 72.38% HDA-MoE 0.2423/0.4148/0.1159 1.2757/1.5611/1.1147 77.50/73.75/93.75% 79.56/73.04/86.74%
+
+TP EP Compute Balance Node-Link Balance (2.5,75) (5.0,50) (10.0,25) Hardware Config 24Latency (ms)  Speedup for Different Configs (4, 4) (4, 8) (8, 8) Mesh Size 123Latency (ms)  Speedup for Different Mesh Shapes 123Speedup 
+
+> 123Speedup
+
+Fig. 15. Speedup of Node Balance on DeepSeek. 
+
+of hardware-aware gating should be assessed together with Top-1 routing retention. 
+
+End-to-end routing impact and model perturbation. We report KL between the next-token probability distributions produced by original and hardware-aware routing, PPL ratio between the two routing modes, Top-1 prediction agreement between their predicted tokens, and Top-1 routing retention, i.e., the fraction of tokens whose original highest-scored expert remains in the adjusted top-k set. Metrics are computed on WikiText-103 [52]; Cache-prior [53] is included as a routing-adjustment reference. Table IX shows controlled perturbation across settings. Top-1 routing retention is generally high; together with Fig. 14, this indicates that routing changes have limited impact because lower-ranked boundary experts are more substitutable than the most important expert. Expert redundancy nevertheless varies across models: Mixtral is more sensitive to boundary replacements, whereas DeepSeek, Qwen2, and Qwen3.5 admit smaller or comparable distributional shifts. Together with Table VIII, these results show that HDA-MoE exploits model-dependent boundary substitutability while largely preserving the original model function. 
+
+F. Ablation Study 
+
+We conduct ablation studies on Node Balance , Link Bal-ance , Memory-Capacity Constraint , Dynamic Scheduling ,and Hardware-aware Gating using DeepSeek. 
+
+1) Node Balancing: Fig. 15 evaluates Node Balance. It achieves 1.0 ×–3.0 × speedup over TP/EP and 1.5 × over compute-balanced hybrid by improving compute balance and reducing communication volume. 
+
+Better computation latency: Fig. 16 further isolates Node Balance’s impact on compute latency. It reduces EP’s compute tail latency by 2.0 × on average, confirming its effectiveness in mitigating MoE load skew. 
+
+Better load balance: Fig. 17 visualizes per-node compute and communication load before and after Node Balance. Compared with EP, the optimized placement produces a more balanced distribution and removes severe hotspots. 
+
+2) Link Balancing: Fig. 18 evaluates the effect of Link Balance by comparing against TP, the hybrid baseline, and Node Balance without physical mapping optimization. EP Node-Link Balance (2.5,75) (5.0,50) (10.0,25) Hardware Config 123Latency (ms)  Speedup for Different Configs (4, 4) (4, 8) (8, 8) Mesh Size 123Latency (ms)  Speedup for Different Mesh Shapes 123Speedup 
+
+> 123Speedup
+
+Fig. 16. Computation-latency reduction from Node Balance in DeepSeek. 
+
+Fig. 17. Node-level resource utilization before and after Node Balance. 
+
+TP EP Compute Balance Node-Link Balance (2.5,75) (5.0,50) (10.0,25) Hardware Config 02Latency (ms)  Speedup for Different Configs (4, 4) (4, 8) (8, 8) Mesh Size 0.5 1.0 1.5 Latency (ms)  Speedup for Different Mesh Shapes 1.0 1.5 Speedup 
+
+> 1.0 1.5 Speedup
+
+Fig. 18. Communication benefit of Link Balance on DeepSeek. 
+
+Fig. 19. Link-level resource utilization before and after Link Balance. 0 7   
+
+> X
+> 03
+> Y
+> Comp.
+> 07
+> X
+> HDA-MoE w/o Mem Cap
+> 07
+> X
+> HDA-MoE
+> No cap 2.0x 1.5x 1.25x 0123
+> Max / mean load Mem-cap sensitivity
+> 0.800 0.825 0.850
+> Normalized TBT
+> (a) DRAM load heatmaps (b) Sensitivity
+
+Fig. 20. Memory-capacity analysis. (a) Expert-weight storage across DRAM nodes. (b) DRAM-load ratio and normalized TBT when varying ρmem .
+
+Better communication latency: Topology-aware Link Bal-ance reduces link congestion and communication latency com-pared with TP and the hybrid baseline. Compared with Node Balance alone, it achieves an average 1.2 × communication-latency reduction. 
+
+Less link congestion: Fig. 19 further shows that Link Balance distributes traffic more evenly across the mesh, visibly reducing congestion compared with Node Balance alone. 
+
+3) Memory-Capacity Constraint: Fig. 20 evaluates the memory-capacity constraint in Eq. (10) under 5 TFLOPS / 50 GB/s. Fig. 20(b) varies the cap factor ρmem and reports normalized TBT from placements re-optimized with the cor-responding constraint. 
+
+Better memory-capacity balance: Without the memory-capacity constraint, HDA-MoE may concentrate expert weights on a few nodes; adding the constraint balances DRAM load more evenly. As ρmem becomes tighter, the max/mean DRAM-load ratio decreases consistently, while normalized 12 
+
+Static Deployment Dynamic Deployment reasoning math coding writing roleplay Sample 46Latency (ms) 1.0 1.2 Speedup 
+
+> Dynamic Placement Strategy reasoning math coding writing roleplay Sample 7.5 10.0 12.5 Latency (ms) 1.00 1.25 Speedup
+> Dynamic Placement Strategy
+
+Fig. 21. Static vs. dynamic placement. (a) 2 experts pre-broadcast, (b) 5 experts pre-broadcast. 
+
+Static Pre Adap Pre+Adap 1 4 8 32 64 128 Batch Size 012Speedup 0.5 1.0 Accuracy 
+
+Fig. 22. Scalability of Hardware-aware Gating across batch sizes. 
+
+TBT remains close to the unconstrained case. Thus, HDA-MoE improves memory-capacity utilization without sacrific-ing its end-to-end advantage. 
+
+4) Dynamic Placement Strategy: We compare static and dy-namic expert placement using MT-Bench traces from different categories. Static placement is derived from reasoning traces, while dynamic placement adapts to runtime activation. Fig. 21 reports 5 TFLOPS/50 GB/s with 2 pre-broadcast experts and 2.5 TFLOPS/75 GB/s with 5. 
+
+Better performance in various scenarios: Dynamic place-ment reduces latency, especially for math and coding traces that differ from reasoning, and averages 1.15 × and 1.25 ×
+
+speedup with 2 and 5 pre-broadcast experts, respectively. 
+
+5) Hardware-aware Gating: We evaluate hardware-aware gating on GSM8K with DeepSeek across batch sizes under 2.5 TFLOPS/75 GB/s. 
+
+Better Scalability to Small Batch: Fig. 22 shows that pre-broadcasting weakens at small batches because fewer tokens reveal hot experts, whereas hardware-aware gating re-mains effective by adjusting low-impact choices with marginal compute/communication penalties. Combining them improves speedup by reducing both hotspot execution cost and the routing demand that creates hotspots. Accuracy stays around 70%, comparable to original gating. 
+
+G. Layer-wise Sensitivity of Gating Parameters 
+
+We examine whether hardware-aware gating coefficients should be tuned per layer. Fig. 23(a) shows that normalized gating entropy stays close to 1 across layers, suggesting that the routing-score scale is stable enough to share each model-and-hardware-specific coefficient pair across layers. Fig. 23(b) shows larger top-margin variation on Qwen3.5, where top margin is s(1) − s(k+1) . However, the top-margin-scaled variant in Table X provides no clear overall benefit: KL and PPL ratio improve slightly, Top-1 agreement is unchanged, and RMS shift increases. Given the added calibration cost, we retain one coefficient pair per model and hardware configura-tion for all layers. 0 10 20 30 40        
+
+> Layer id
+> 0.950 0.975 1.000 1.025 1.050
+> Normalized value
+> (a) Entropy
+> 010 20 30 40
+> Layer id
+> 0.5 1.0 1.5
+> (b) Top margin
+> Mixtral DeepSeek Qwen2 Qwen3.5
+
+Fig. 23. Layer-wise routing statistics normalized by the model-wise mean. Top margin is s(1) − s(k+1) .TABLE X Model-wise fixed vs. layer-wise scaled gating on Qwen3.5. 
+
+Setting KL ↓ PPL ratio ↓ Top-1 agree. ↑ RMS shift ↓
+
+Model-wise fixed (final) 0.0501 1.0441 91.00% 6.77% Layer-wise scale (diagnostic) 0.0441 1.0341 90.98% 7.06% 0.0 1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0          
+
+> reward of comp. (-1e4)
+> 1.0 1.5 2.0 2.5
+> Speedup
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> Accuracy
+> Speedup Accuracy 0.0 1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0
+> reward of comm. (-1e-2)
+> 1.4 1.5 1.6 1.7 1.8 1.9
+> Speedup
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> Accuracy
+> Speedup Accuracy
+
+Fig. 24. Impact of (a) compute penalty rcomp and (b) communication penalty 
+
+rcomm .
+
+H. Sensitivity to Gating Parameters 
+
+We analyze how rcomp and rcomm affect MoE-layer accuracy and speedup on DeepSeek under batch size 32. Fig. 24(a) shows that increasing |rcomp | favors lighter-compute experts and improves speedup; accuracy stays around 70% up to rcomp = −3 × 10 4 and then degrades. Fig. 24(b) shows that rcomm penalizes experts with higher deployment dispersion. Speedup is non-monotonic because communication reduction can conflict with compute balance; accuracy stays stable except when |rcomm | > 0.06 .VII. C ONCLUSION 
+
+This work presents HDA-MoE, a framework for MoE inference on 3D NMP that combines hybrid expert placement, runtime scheduling, and routing adaptation. Experiments show that HDA-MoE consistently outperforms existing paralleliza-tion strategies, achieving 1.1 ×–3.4 × over TP, 1.1 ×–1.5 × over EP, 1.1 ×–3.7 × over the Hybrid TP-EP baseline, and 1.1 ×–1.3 × over HD-MoE. ACKNOWLEDGMENTS 
+
+Generative AI Disclosure. The authors used ChatGPT to assist with language editing and clarity in the manuscript and response letter. No figures, images, technical contributions, experimental results, or theoretical developments were gen-erated by AI; all such content was independently developed and verified by the authors. REFERENCES [1] A. Liu et al. , “Deepseek-v3 technical report,” arXiv preprint arXiv:2412.19437 , 2024. 13 
+
+[2] A. Q. Jiang et al. , “Mixtral of experts,” arXiv preprint arXiv:2401.04088 ,2024. [3] M. Horowitz, “1.1 computing’s energy problem (and what we can do about it),” in 2014 IEEE international solid-state circuits conference digest of technical papers (ISSCC) . IEEE, 2014, pp. 10–14. [4] V. Iskandar, M. A. A. E. Ghany, and D. Goehringer, “Near-memory com-puting on fpgas with 3d-stacked memories: Applications, architectures, and optimizations,” ACM Transactions on Reconfigurable Technology and Systems , vol. 16, no. 1, pp. 1–32, 2022. [5] M. Shoeybi et al. , “Megatron-lm: Training multi-billion param-eter language models using model parallelism,” arXiv preprint arXiv:1909.08053 , 2019. [6] D. Lepikhin et al. , “Gshard: Scaling giant models with conditional computation and automatic sharding,” arXiv preprint arXiv:2006.16668 ,2020. [7] S. Zhong et al. , “Adapmoe: Adaptive sensitivity-based expert gating and management for efficient moe inference,” in Proceedings of the 43rd IEEE/ACM International Conference on Computer-Aided Design , 2024, pp. 1–9. [8] Y. Zhang, S. Aggarwal, and T. Mitra, “Daop: Data-aware offloading and predictive pre-calculation for efficient moe inference,” arXiv preprint arXiv:2501.10375 , 2024. [9] P. Tang et al. , “Hobbit: A mixed precision expert offloading system for fast moe inference,” arXiv preprint arXiv:2411.01433 , 2024. [10] Y. Wang et al. , “Buddymoe: Exploiting expert redundancy to accel-erate memory-constrained mixture-of-experts inference,” arXiv preprint arXiv:2511.10054 , 2025. [11] X. Lu et al. , “Not all experts are equal: Efficient expert pruning and skipping for mixture-of-experts large language models,” in Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , 2024, pp. 6159–6172. [12] H. Huang et al. , “Hd-moe: Hybrid and dynamic parallelism for mixture-of-expert llms with 3d near-memory processing,” in 2025 IEEE/ACM International Conference On Computer Aided Design (ICCAD) . IEEE, 2025, pp. 1–9. [13] A. Liu et al. , “Deepseek-v2: A strong, economical, and efficient mixture-of-experts language model,” arXiv preprint arXiv:2405.04434 , 2024. [14] A. Yang et al. , “Qwen2. 5 technical report,” arXiv preprint arXiv:2412.15115 , 2024. [15] ——, “Qwen2 technical report,” arXiv preprint arXiv:2407.10671 , 2024, version: 2024-07. [Online]. Available: https://arxiv.org/abs/2407.10671 [16] ——, “Qwen3 technical report,” arXiv preprint arXiv:2505.09388 , 2025. [17] S. Zhong et al. , “Hybrimoe: Hybrid cpu-gpu scheduling and cache man-agement for efficient moe inference,” arXiv preprint arXiv:2504.05897 ,2025. [18] G. Zhu et al. , “Enabling moe on the edge via importance-driven expert scheduling,” arXiv preprint arXiv:2508.18983 , 2025. [19] B. McDanel et al. , “Moe-spec: Expert budgeting for efficient speculative decoding,” arXiv preprint arXiv:2602.16052 , 2026. [20] Y. Qian et al. , “Eps-moe: Expert pipeline scheduler for cost-efficient moe inference,” 2025. [Online]. Available: https://arxiv.org/abs/2410.12247 [21] S. Go and D. Mahajan, “Moetuner: Optimized mixture of expert serving with balanced expert placement and token routing,” arXiv preprint arXiv:2502.06643 , 2025. [22] W. Cai et al. , “Shortcut-connected expert parallelism for accelerating mixture-of-experts,” 2024. [Online]. Available: https://arxiv.org/abs/ 2404.05019 [23] Y. Chen et al. , “Eac-moe: Expert-selection aware compressor for mixture-of-experts large language models,” in Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Vol-ume 1: Long Papers) , 2025, pp. 12 942–12 963. [24] Y. Li et al. , “Speculative moe: Communication efficient parallel moe inference with speculative token and expert pre-scheduling,” arXiv preprint arXiv:2503.04398 , 2025. [25] W. Fedus, B. Zoph, and N. Shazeer, “Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity,” Journal of Machine Learning Research , vol. 23, no. 120, pp. 1–39, 2022. [26] J. He et al. , “Fastermoe: modeling and optimizing training of large-scale dynamic pre-trained models,” in Proceedings of the 27th ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming , 2022, pp. 120–134. [27] X. Liu et al. , “Netmoe: Accelerating moe training through dynamic sample placement,” in The Thirteenth International Conference on Learning Representations , 2025. [28] W. Lin et al. , “Hiermoe: Accelerating moe training with hierarchical token deduplication and expert swap,” arXiv preprint arXiv:2508.09591 ,2025. [29] J. H. Kim et al. , “Samsung pim/pnm for transfmer based ai: Energy efficiency on pim/pnm cluster,” in 2023 IEEE Hot Chips 35 Symposium (HCS) . IEEE Computer Society, 2023, pp. 1–31. [30] B. Fujun et al. , “A stacked embedded dram array for lpddr4/4x us-ing hybrid bonding 3d integration with 34gb/s/1gb 0.88 pj/b logic-to-memory interface,” in 2020 IEEE International Electron Devices Meeting (IEDM) . IEEE, 2020, pp. 6–6. [31] D. Niu et al. , “184qps/w 64mb/mm 2 3d logic-to-dram hybrid bonding with process-near-memory engine for recommendation system,” in 2022 IEEE International Solid-State Circuits Conference (ISSCC) , vol. 65. IEEE, 2022, pp. 1–3. [32] Z. Yue et al. , “Exploiting similarity opportunities of emerging vision ai models on hybrid bonding architecture,” in 2024 ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA) . IEEE, 2024, pp. 396–409. [33] Z. Fu et al. , “H 2 eal: Hybrid-bonding architecture with hybrid sparse attention for efficient long-context llm inference,” in 2025 IEEE/ACM International Conference On Computer Aided Design (ICCAD) . IEEE, 2025, pp. 1–9. [34] C. Li et al. , “H2-llm: Hardware-dataflow co-exploration for heteroge-neous hybrid-bonding-based low-batch llm inference,” in Proceedings of the 52nd Annual International Symposium on Computer Architecture ,2025, pp. 194–210. [35] X. Qu et al. , “3d-moe: Accelerating multi-expert activated llms on 3d in/near-memory computing architecture via hybrid parallelism,” in 
+
+2025 IEEE/ACM International Conference On Computer Aided Design (ICCAD) . IEEE, 2025, pp. 1–9. [36] W.-H. Huang et al. , “A3d-moe: Acceleration of large language models with mixture of experts via 3d heterogeneous integration,” arXiv preprint arXiv:2507.19142 , 2025. [37] P. Zuo et al. , “Serving large language models on huawei cloudma-trix384,” arXiv preprint arXiv:2506.12708 , 2025. [38] A. Shah et al. , “ {TACCL }: Guiding collective algorithm synthesis using communication sketches,” in 20th USENIX Symposium on Networked Systems Design and Implementation (NSDI 23) , 2023, pp. 593–612. [39] Y. Mei et al. , “Helix: Serving large language models over heterogeneous gpus and network via max-flow,” in Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1 , 2025, pp. 586–602. [40] J. Zhao et al. , “Poster: Llm-pq: Serving llm on heterogeneous clusters with phase-aware partition and adaptive quantization,” in Proceedings of the 29th ACM SIGPLAN Annual Symposium on Principles and Practice of Parallel Programming , 2024, pp. 460–462. [41] G. F. Riley and T. R. Henderson, “The ns-3 network simulator,” in 
+
+Modeling and tools for network simulation . Springer, 2010, pp. 15–34. [42] N. Jiang et al. , “A detailed and flexible cycle-accurate network-on-chip simulator,” in 2013 IEEE international symposium on performance analysis of systems and software (ISPASS) . IEEE, 2013, pp. 86–96. [43] W. J. Dally and B. P. Towles, Principles and Practices of Interconnection Networks . Morgan Kaufmann, 2004. [44] C. E. Leiserson, “Fat-trees: Universal networks for hardware-efficient supercomputing,” IEEE Transactions on Computers , vol. C-34, no. 10, pp. 892–901, 1985. [45] E. Chan et al. , “Collective communication on architectures that support simultaneous communication over multiple links,” in Proceedings of the eleventh ACM SIGPLAN symposium on Principles and practice of parallel programming , 2006, pp. 2–11. [46] S. Rashidi et al. , “Astra-sim: Enabling sw/hw co-design exploration for distributed dl training platforms,” in 2020 IEEE International Sympo-sium on Performance Analysis of Systems and Software (ISPASS) . IEEE, 2020, pp. 81–92. [47] Qwen Team, “Qwen3.5-35b-a3b,” Hugging Face model repository, 2026, accessed: 2026-07-03. [Online]. Available: https://huggingface. co/Qwen/Qwen3.5-35B-A3B [48] L. Zheng et al. , “Judging llm-as-a-judge with mt-bench and chatbot arena,” Advances in Neural Information Processing Systems , vol. 36, pp. 46 595–46 623, 2023. [49] K. Cobbe et al. , “Training verifiers to solve math word problems,” arXiv preprint arXiv:2110.14168 , 2021. [50] M. Chen et al. , “Evaluating large language models trained on code,” 
+
+arXiv preprint arXiv:2107.03374 , 2021. [51] P. Clark et al. , “Think you have solved question answering? try arc, the ai2 reasoning challenge,” arXiv preprint arXiv:1803.05457 , 2018. [52] S. Merity et al. , “Pointer sentinel mixture models,” in International Conference on Learning Representations , 2017. 14 
+
+[53] A. Skliar et al. , “Mixture of cache-conditional experts for efficient mobile device inference,” Transactions on Machine Learning Research ,2025, arXiv:2412.00099. 
+
+Haochen Huang received the B.S. degree in applied physics from Peking University, Beijing, China, in 2026. He is pursuing the Ph.D. degree with the School of Integrated Circuits and the Institute for Artificial Intelligence, Peking University, Beijing, China. His current research interests include efficient AI systems and hardware–software co-design. 
+
+Shuzhang Zhong received the B.S. degree in com-puter science and technology from Beihang Univer-sity, Beijing, China, in 2023. He is currently pursu-ing the Ph.D. degree with the School of Integrated Circuits and the Institute for Artificial Intelligence, Peking University, Beijing, China. His current re-search interests include efficient LLM inference and agent system optimization. 
+
+Shengxuan Qiu is an undergraduate student at Peking University. His interests include efficient AI, large language model reasoning, and hardware-aware inference. 
+
+Zhe Zhang received the Ph.D. degree in microelec-tronics from Peking University, Beijing, China, in 2020. He is currently a research scientist with the Computing Technology Laboratory, Alibaba DAMO Academy. His current research interests include computer architecture, domain-specific architecture, 3D-IC, and hardware–software co-optimization. 
+
+Shuangchen Li received the B.S. and M.S. degrees from Tsinghua University, Beijing, China, in 2011 and 2014, respectively, and the Ph.D. degree in elec-trical and computer engineering from the University of California at Santa Barbara, Santa Barbara, CA, USA, in 2018. He is currently a research scientist with the Computing Technology Laboratory, Alibaba DAMO Academy, Sunnyvale, CA, USA. His inter-ests include memory-related computer architecture, processing-in-memory architectures, emerging non-volatile technologies, and deep learning accelerators. 
+
+Cong Li is a fourth-year Ph.D. candidate at Peking University, supervised by Prof. Guangyu Sun. His research interests include machine learning systems, domain-specific accelerators, and memory-centric computing architectures. Li received his bachelor’s degree in computer science from Peking University. Contact him at leesou@pku.edu.cn. 
+
+Dimin Niu (Senior Member, IEEE) received the Ph.D. degree in computer science from Pennsylvania State University, University Park, PA, USA, in 2012. He was a staff memory architect with Memory Solutions Laboratory, Samsung Semiconductor Inc., San Jose, CA, USA. He is currently a research scientist with Computing Technology Lab, Alibaba DAMO Academy. His interests include computer architecture, memory architectures, storage systems, processing-in-memory, and domain-specific archi-tectures. 
+
+Hongzhong Zheng (Member, IEEE) received the Ph.D. degree in computer engineering from the University of Illinois Chicago, Chicago, IL, USA. He was the director of Memory Solutions Lab, USA R&D Center of Samsung Semiconductor, San Jose, CA, USA. He is currently a technical leader and research scientist with Computing Technology Lab, Alibaba DAMO Academy, Hangzhou, China. His in-terests include memory-system architecture, emerg-ing memory technologies, processing-in-memory for machine learning, computer architecture, perfor-mance modeling, and energy-efficient computing. He is a member of ACM. 
+
+Guangyu Sun (Senior Member, IEEE) is currently a Full Professor in the School of Integrated Circuits at Peking University. He received his B.S. and M.S. degrees from Tsinghua University, Beijing, in 2003 and 2006, respectively, and his Ph.D. degree from the Pennsylvania State University in 2011. His re-search interests include design and automation for computer architecture, cross-layer co-optimization, emerging memory technologies, etc. He has pub-lished 150+ journals and refereed conference papers on ISCA, MICRO, HPCA, DAC, IEEE TCAD, etc. His work has been recognized with the DAC Under-40 Innovators Award, CCF-IEEE CS Young Computer Scientists Award, Microsoft Research Asia Collaborative Research Award, CCF-Intel Young Faculty Researcher Program, and six best paper awards. He is an associate editor of IEEE TCAD. 
+
+Runsheng Wang (Senior Member, IEEE) received the B.S. and Ph.D. (highest honors) degrees from Peking University, Beijing, China, in 2005 and 2010, respectively. From November 2008 to August 2009, he was a Visiting Scholar with Purdue University, West Lafayette, IN, USA. He joined Peking University in 2010, where he is currently a Professor at the School of Integrated Circuits and is serving as the Associate Dean of the School of EECS. He has authored/coauthored 1 book, 4 book chapters, and about 200 scientific papers, including more than 40 papers published in 
+
+International Electron Devices Meeting (IEDM) and Symposium on VLSI Technology (VLSI-T). He has been granted 19 US patents and 38 Chinese patents. His current research interests include nanoscale CMOS devices and reliability, design automation, and new-paradigm computing. Dr. Wang was awarded the IEEE EDS Early Career Award by the IEEE Electron Device Society (EDS), National Distinguished Young Scholars by the National Natural Science Foundation of China (NSFC), Natural Science Award (First Prize) by the Ministry of Education (MOE) of China, and many other awards. He serves on the Editorial Board of IEEE TRANSACTIONS ON ELECTRON DEVICES , and SCIENCE CHINA: Information Sciences , and has served on the Technical Program Committee of many IEEE conferences, including IEDM , IRPS , etc. 
+
+Meng Li (Member, IEEE) received his Ph.D. degree in Electrical and Computer Engineering from the University of Texas at Austin in 2018 and is cur-rently with the Institute for Artificial Intelligence and the School of Integrated Circuits, Peking University, Beijing, China. His research interests include effi-cient and secure multimodal AI acceleration hard-ware and algorithms. Before joining PKU, he was a staff research scientist and tech lead in the Facebook Reality Lab. He has published over 130 papers in premier conferences and journals with over 10,000 citations and several best paper awards/nominations. He is the recipient of the ACM SIGDA Outstanding New Faculty Award, CCF Integrated Circuit Early Career Award, Ant Group InTech Future Award, EDAA Outstanding Dissertation Award, and 1st Place in ACM Student Research Competition (Graduate Category), etc.
