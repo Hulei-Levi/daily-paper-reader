@@ -1,0 +1,1388 @@
+Title: Distribution-Consistent Inference for Dynamic Sparse Mixture-of-Experts
+
+URL Source: https://arxiv.org/pdf/2609.09241v1
+
+Published Time: Thu, 10 Sep 2026 00:07:53 GMT
+
+Number of Pages: 25
+
+Markdown Content:
+## Distribution-Consistent Inference for Dynamic Sparse Mixture-of-Experts 
+
+Dohyeon Kim 1∗ Bedionita Soro 1∗ Sung Ju Hwang 1,21 KAIST 2 DeepAuto.ai 
+
+{dhkim011030, sorobedio, sjhwang82}@kaist.ac.kr 
+
+Abstract 
+
+Mixture-of-Experts (MoE) architectures have emerged as a powerful paradigm for scaling model capacity while preserving efficient in-ference in large foundation models. However, most MoE models use a fixed top-k expert se-lection policy, assigning the same expert budget to every token even when fewer experts may be sufficient. Inference-time dynamic top-k rout-ing can reduce computation without retraining, but existing methods often overlook the dis-tributional shift caused by deviating from the training-time routing configuration. We show that reducing the number of activated experts consistently increases the RMS scale and vari-ance of SMoE outputs, inducing a representa-tion mismatch that contributes to downstream performance degradation in addition to the loss of expert capacity. To address this correctable component, we propose Layer-wise Distribu-tion Alignment (LDA), a lightweight inference-time correction that uses layer-wise calibration statistics to align reduced-routing representa-tions with the default configuration. Across multiple SMoE LLMs, benchmarks, and rout-ing strategies, LDA recovers much of the per-formance lost induced by the distributional shift under reduced routing while preserving sparse-inference efficiency with negligible overhead. 
+
+1 Introduction 
+
+The rapid progress of large language models (LLMs) has been driven in large part by scaling model parameters (Wan et al., 2024), but this trend has also increased computational and memory costs during both training and inference. Sparse Mixture-of-Experts (SMoE) architectures mitigate this bot-tleneck by decoupling total model capacity from per-token computation (Shazeer et al., 2017; Cai et al., 2025), routing each token to only a small 
+
+*Equal contribution. top-k (k=8) top-k (k=4) top-p (p=0.3) top-p (p=p*) PESF ( =0.3)              
+
+> 60 65 70 75 80
+> Average Performance (%)
+> +5.68% +5.45% +0.52% +0.40%
+> Baseline ( k=8)
+> General Knowledge & Commonsense Reasoning Tasks
+> w/o LDA w/ LDA top-k(k=8) top-k(k=4) top-p(p=0.2) top-p(p=p*) PESF ( =0.3)
+> 50 60 70 80 90
+> Average Performance (%)
+> +19.97% +20.00% +1.36% +22.80%
+> Baseline ( k=8)
+> Mathematical Reasoning Tasks
+> w/o LDA w/ LDA
+
+Figure 1: Comparison of average performance with and without LDA across different routing strategies on Qwen3-30B-A3B. The dashed line indicates the baseline performance with the top-k routing strategy (k=8). p* denotes the best-performing top-p threshold for each task, reported in Table 9. 
+
+subset of experts to expand capacity while main-taining a manageable inference budget. In practice, most SMoE moels employ a fixed top-k routing strategy (Fedus et al., 2022), where a router scores all experts and selects the k highest-scoring experts for each token. While simple and predictable, this scheme assigns every token the same expert budget regardless of contextual complexity or informa-tion density, resulting in unnecessary computation for tokens that could be processed effectively with fewer experts (Huang et al., 2024). Recent work on dynamic expert routing ad-dresses this inefficiency by adapting the number of activated experts per token (Li et al., 2023; Zeng et al., 2024), with inference-time variants being particularly attractive because they can be applied directly to pretrained models without re-training (Huang et al., 2025; Chen et al., 2025). arXiv:2609.09241v1 [cs.LG] 8 Sep 2026 Figure 2: Overall framework of Layer-wise Distribution Alignment (LDA). (a): LDA estimates layer-wise reference and target statistics of SMoE outputs from a calibration dataset. (b): At inference time, LDA aligns reduced-routing SMoE outputs to the reference distribution according to k.
+
+However, existing approaches primarily focus on 
+
+when to reduce expert activation, while largely overlooking a critical consequence: the resulting intermediate representations may deviate from the distribution induced by the training-time routing configuration. In this work, we systematically analyze how SMoE representations change as a function of the number of activated experts and find that reduc-ing top-k consistently increases the RMS scale and variance of SMoE outputs. This induces a representation-level mismatch that propagates through layers and contributes to downstream per-formance degradation. These findings suggest that performance loss under reduced routing is not solely a consequence of diminished expert ca-pacity, but also arises from a correctable distribu-tional shift. Motivated by this observation, we pro-pose Layer-wise Distribution Alignment (LDA), a lightweight inference-time correction that aligns representations produced under reduced expert ac-tivation with the layer-wise reference distribution of the default top-k0 routing configuration. LDA applies a per-dimension moment correction after each SMoE layer, requires no retraining or archi-tectural modification, and naturally complements training-free dynamic routing strategies with negli-gible computational overhead. We summarize our contributions as follows: • We show that performance degradation under reduced expert activation is not only due to diminished expert capacity, but is also associ-ated with systematic amplification of the scale and variance of SMoE outputs, a phenomenon not explicitly studied in prior work. • We propose Layer-wise Distribution Align-ment (LDA), a training-free inference-time correction that mitigates this distributional shift using layer-wise calibration statistics. • We demonstrate that LDA consistently im-proves the performance–efficiency trade-off across diverse tasks, models, and routing strategies, including top-k routing, adaptive top-p routing, and dynamic expert pruning. 
+
+2 Related Works 
+
+Sparse Mixture-of-Experts (SMoE) has been pro-posed to control computational costs by selectively activating only a small set of experts for each token while greatly expanding the total number of pa-rameters. Shazeer et al. (2017) showed that sparse top-k routing is an effective mechanism for scaling model capacity, and this design has since become a standard component of SMoE architectures. Sub-sequent work extended SMoE to large-scale pre-training (Lepikhin et al., 2021; Fedus et al., 2022), and several recent LLMs have adopted SMoE ar-chitectures (Dai et al., 2024; Muennighoff et al., 2025). Most existing SMoE LLMs are pretrained with a fixed top-k routing configuration (Jiang et al., 2024), which implicitly shapes the representations learned during training. Prior work improves the performance–efficiency trade-off through dy-namic expert allocation based on routing confi-dence (Huang et al., 2024), null experts (Zeng et al., 2024), adaptive top-k selection (Li et al., 2023; Zhong et al., 2025), or training-free expert pruning using token importance (Huang et al., 2025) and −0.20 −0.15 −0.10 −0.05 0.00 0.05 0.10 0.15 0.20  
+
+> Value
+> 02468
+> Density
+> top-k ↓ → variance ↑
+> Δ var ( k=8 → 6) = +29.15% Δ var ( k=8 → 4) = +87.80% Δ var ( k=8 → 2) = +264.31%
+> Layer 24
+> top-kk=8 (var=0.0023)
+> k=6 (var=0.0030)
+> k=4 (var=0.0043)
+> k=2 (var=0.0084)
+
+(a) SMoE output distribution k=8 k=7 k=6 k=5 k=4 k=3 k=2 k=1   
+
+> top-k
+> 0.00 0.05 0.10 0.15 0.20 0.25 0.30 0.35 0.40
+> ‖SMoE output‖ / ‖Residual‖  top-k ↓ → ||SMoE output|| ↑
+> Layer 24
+
+(b) ∥SMoE output ∥ / ∥Residual ∥0 10 20 30 40  
+
+> Layer Index
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> Routing Match Rate
+> top-kk=4
+> k=2
+> k=1
+
+(c) Layer-wise Routing Match Rate 
+
+Figure 3: Observation and analysis of SMoE outputs on Qwen3-30B-A3B. We use 8 ×2,048 calibration tokens, and for (a), 100,000 values are randomly sampled. (a): SMoE output distributions become more dispersed as k
+
+decreases. (b): The SMoE output scale increases relative to the residual stream as k decreases. (c): The routing match rate (Eq. 7) decreases across layers as k becomes smaller, indicating that the routing trajectory increasingly deviates from the default configuration. 
+
+expert frequency (Chen et al., 2025). However, these methods primarily focus on rout-ing strategies, leaving underexplored how reducing the number of activated experts affects the distri-bution of SMoE outputs. In contrast, we address this representation-level mismatch and propose an efficient training-free correction that aligns repre-sentations under reduced expert activation. Our method is complementary to existing training-free dynamic routing strategies. 
+
+3 Observation and Analysis 
+
+3.1 Preliminaries 
+
+An SMoE layer consists of a router, a gating mech-anism, and a set of N experts {Eθi }Ni=1 . Given an input x ∈ RDin , the router Gθ produces logits 
+
+Gθ(x) ∈ RN , which are converted into routing scores w ∈ RN through a gating function, such as softmax (Lepikhin et al., 2021) or sigmoid (Lewis et al., 2021): 
+
+w =
+
+(
+
+softmax( Gθ(x)) , (softmax gating) ,σ(Gθ(x)) , (sigmoid gating) .
+
+Under top-k routing, only the k experts with the highest routing scores are selected: 
+
+Sk = TopK( w, k ),
+
+where Sk denotes the set of selected expert indices. Let {wi}i∈S k denote the routing scores of the se-lected experts. The selected routing scores can be re-normalized so that they sum to 1: 
+
+wi =
+
+
+
+wi
+
+P
+
+j∈S k wj
+
+, (re-normalization) ,wi, (otherwise) .
+
+(1) The output of the SMoE layer is then computed as the weighted sum of the selected expert outputs: 
+
+y = X
+
+i∈S k
+
+wiEθi (x), (2) where y ∈ RDout denotes the layer output. 
+
+3.2 Observation: Reduced top-k Amplifies Representation Variance and Scale 
+
+We focus on SMoE architectures with routing score re-normalization (Eq. 1), which is commonly used in recent SMoE LLMs. 
+
+Empirical Observation We empirically observe that reducing top-k monotonically increases the variance of SMoE outputs. As shown in Fig. 3a, the output distribution becomes more dispersed as fewer experts are activated. Alongside this variance increase, the RMS magnitude of the SMoE output also grows, making it larger relative to the residual stream, as shown in Fig. 3b. These observations suggest that reduced expert activation changes not only the routing sparsity, but also the scale of the resulting representation. 
+
+Theoretical Insight We provide a simple anal-ysis explaining why reducing top-k amplifies the RMS scale of the SMoE output (Eq. 2) under rout-ing score re-normalization, where P
+
+i∈S k wi = 1 .The RMS is defined as 
+
+RMS( y) = 
+
+vuut 1
+
+D
+
+DX
+
+i=1 
+
+y2
+
+i = ∥y∥2
+
+√D , (3) which is determined by the squared norm of y.Expanding this term gives, 
+
+∥y∥22 = X
+
+> i∈S k
+
+w2 
+
+> i
+
+∥Eθi (x)∥22
+
++ X
+
+> i,j ∈S k
+> i̸=j
+
+wiwj ⟨Eθi (x), E θj (x)⟩. (4) Under the mild assumptions that (1) activated ex-pert output scales exhibit limited variation and re-main comparable across top-k settings, allowing their squared norms to be approximated by a com-mon scale, and (2) pairwise correlations between expert outputs are weak such that the first diagonal term remains the dominant component, 
+
+∥y∥22 ≈ σ2 X
+
+> i∈S k
+
+w2 
+
+> i
+
+∝ X
+
+> i∈S k
+
+w2 
+
+> i
+
+,
+
+where σ2 denotes the average squared norm of the expert outputs and is treated as a constant. Thus, the RMS scale of the SMoE output is mainly gov-erned by the concentration of the normalized rout-ing scores. We empirically validate these assump-tions in Appendix A. When reducing top-k, the remaining routing scores are re-normalized after removing the lower-ranked scores: 
+
+˜wi = wi
+
+1 − wk
+
+, i = 1 , . . . , k − 1.
+
+Let A = Pk−1 
+
+> i=1
+
+w2 
+
+> i
+
+denote the sum of squared rout-ing scores over the remaining k − 1 scores, then 
+
+> k−1
+
+X
+
+> i=1
+
+˜w2 
+
+> i
+
+= A
+
+(1 − wk)2 > A + w2 
+
+> k
+
+=
+
+> k
+
+X
+
+> i=1
+
+w2 
+
+> i
+
+, (5) where the inequality follows from wi ≥ wk for 
+
+i < k . Therefore, reducing top-k increases the sum of squared normalized scores, which leads to a larger expected squared norm of the SMoE output and explains the RMS amplification. A detailed derivation is provided in Appendix A. 
+
+3.3 Structural Analysis Modern SMoE LLM Architectures Most mod-ern SMoE LLMs adopt residual connections (He et al., 2016) within Pre-LN Transformer architec-tures (Xiong et al., 2020). In this structure, the SMoE output is added to the residual stream, and the combined representation is normalized in the subsequent block. A commonly used normalization layer is RMSNorm (Zhang and Sennrich, 2019), which rescales a representation by its RMS (Eq. 3): 
+
+RMSNorm( x) = α ⊙ x
+
+RMS( x) , (6) where x ∈ RD denotes an input representation and α ∈ RD denotes a learnable scaling vector. Thus, changes in the scale of the SMoE output can directly affect the scale balance between the exist-ing residual stream and the newly added weighted expert output. 
+
+Scale Imbalance between SMoE Output and Residual In a residual block, the combined rep-resentation can be written as z = r + y, where 
+
+r ∈ RD denotes the residual stream and y ∈ RD
+
+denotes the SMoE output. The observation above suggests that reducing top-k increases the scale of the SMoE output rela-tive to the residual stream. When the RMS scale of the SMoE output y increases, the combined repre-sentation z becomes more strongly influenced by the weighted expert output. Since RMSNorm rescales the entire representa-tion by a single RMS value, an enlarged SMoE output increases the normalization denominator 
+
+RMS( z). As it grows, components carried by the residual stream r can be relatively suppressed after the normalization layer, even if they contain useful information. 
+
+Routing Trajectory Mismatch In SMoE mod-els, experts are often specialized to process tokens from different domains or tasks (Dong et al., 2025; Herbst et al., 2026), making it important for each token to be routed to appropriate experts. However, the scale imbalance discussed above can distort the representation passed to subsequent blocks, which may in turn affect the router’s expert selection. To quantify this effect, we define Routing Match Rate 
+
+as 
+
+Routing Match Rate = 
+
+Ek ∩ E (k)
+
+> k0
+
+E(k)
+
+> k0
+
+, (7) where Ek denotes the expert set selected under re-duced top-k routing, and E(k) 
+
+> k0
+
+denotes the top-k
+
+subset of experts selected under the default top-k0
+
+routing. A higher routing match rate indicates that reduced top-k routing follows a routing path more similar to the default training configuration. top-k Mean Variance Skewness Kurtosis (Fisher)                                     
+
+> Layer 12
+> k=8 0.0000 ±0.0051 0.0012 ±0.0003 −0.0040 ±0.1165 1.0793 ±0.4076
+> k=4 0.0000 ±0.0063 0.0022 ±0.0005 −0.0043 ±0.1140 1.1111 ±0.4467
+> k=2 0.0000 ±0.0073 0.0044 ±0.0009 −0.0060 ±0.1229 1.3246 ±0.5706
+> Layer 24
+> k=8 0.0002 ±0.0060 0.0022 ±0.0013 0.0010 ±0.1110 0.7520 ±0.6319
+> k=4 0.0002 ±0.0069 0.0042 ±0.0020 0.0004 ±0.1055 0.8080 ±0.6136
+> k=2 0.0002 ±0.0078 0.0083 ±0.0031 0.0007 ±0.1193 1.0866 ±0.9998
+> Layer 36
+> k=8 0.0002 ±0.0125 0.0063 ±0.0056 0.0012 ±0.1850 1.5756 ±1.3413
+> k=4 0.0003 ±0.0154 0.0121 ±0.0096 0.0001 ±0.1803 1.3168 ±1.0057
+> k=2 0.0005 ±0.0184 0.0243 ±0.0156 0.0005 ±0.2134 1.5302 ±1.2054
+
+Table 1: Per-dimension moment statistics of SMoE outputs across different top-k on Qwen3-30B-A3B. 
+
+We report mean ±std for each moment. Only the variance consistently shows a substantial increase as k decreases. 0.20 0.15 0.10 0.05 0.00 0.05 0.10 0.15 0.20   
+
+> Value
+> 012345678
+> Density
+> var ( k=8 2) =
+> +261.89% var ( k=8 2) =
+> +228.23%
+> Layer 24
+> Dimension dim 1 dim 2 top-kk=8
+> k=2
+
+Figure 4: Per-dimension distribution of SMoE out-puts on Qwen3-30B-A3B. Each dimension shows dif-ferent degrees of variance amplification under reduced top-k routing. 
+
+As shown in Fig. 3c, the routing match rate de-creases as the number of activated experts is re-duced. This degradation is especially pronounced for smaller k, where the routing path rapidly di-verges from the default top-k0 routing across lay-ers. Consequently, these results show that reduced top-k routing also alters the subsequent routing trajectory across layers. 
+
+4 Layer-wise Distribution Alignment (LDA) 
+
+Motivated by the observation and analysis in Sec-tion 3, we use a lightweight inference-time align-ment to mitigate the representation scale and vari-ance mismatch induced by reduced top-k routing. The key idea is to use the layer-wise representation statistics under the default top-k0 configuration as a reference, and align the representations produced under reduced top-k routing to the reference dis-tribution. A detailed pseudo-code description is provided in Appendix G. 
+
+4.1 Design Choice: Per-dimension Moment Alignment Original Representation Space Since SMoE outputs computed under top-k0 or different top-
+
+k settings lie in the same representation space, we align their statistics in the original representation space instead of applying an additional projection or non-linear transformation. 
+
+Per-dimension Alignment The analysis in Sec-tion 3.2 does not imply that the amplification is uniform across dimensions. As shown in Fig. 4, the variance shift differs substantially across di-mensions, suggesting that global scaling alone does not capture the remaining heterogeneous changes across dimensions. We therefore apply a per-dimension correction, with a direct comparison to global scaling baselines provided in Appendix E. 
+
+First- and Diagonal Second-order Moment Alignment As shown in Table 1, the significant and consistent shift appears in the variance, while higher-order moments such as skewness and kur-tosis exhibit weaker and less consistent changes. Thus, aligning the per-dimension mean and stan-dard deviation provides a simple affine correction that jointly corrects the amplified scale and the re-maining dimension-wise mismatch, while avoiding the computational cost of full-covariance alignment or higher-order transformations. 
+
+4.2 Layer-wise Distribution Estimation 
+
+We estimate the required statistics using a calibra-tion set. For each SMoE layer l, we compute the per-dimension mean and standard deviation of the SMoE output under the default top-k0 configura-tion and under reduced top-k routing. We denote the reference statistics from the default configura-tion as μ(l)
+
+k0 , σ(l)
+
+k0 ∈ RD, and the target statistics from reduced routing as μ(l)
+
+k , σ(l)
+
+k ∈ RD.During calibration, hidden states are propagated through preceding layers using the default top-k0
+
+routing. This prevents distribution shifts from accu-mulating across layers during statistics estimation and provides a stable reference for measuring how each layer’s SMoE output changes under reduced top-k routing. 
+
+4.3 Distribution-Consistent Inference 
+
+At inference time, when an SMoE layer uses re-duced top-k routing, we align its output to the refer-ence statistics of the corresponding default top-k0General Knowledge & Commonsense Reasoning                                                                                                                                                      
+
+> Method w/ LDA Avg. kMMLU Hella. Wino. ARC-E ARC-C CQA SciQ PIQA Average
+> Baseline ✗8.00 77.87% 59.52% 70.24% 79.80% 53.16% 79.12% 96.50% 79.33% 74.44% top-kk=4 ✗4.00 70.72% 55.73% 60.06% 69.57% 40.78% 65.52% 92.80% 76.77% 66.49%
+> ✓4.00 75.56% 57.12% 67.72% 77.44% 47.44% 77.31% 95.90% 78.89% 72.17%
+> k=2 ✗2.00 27.97% 36.02% 50.99% 41.29% 24.83% 22.36% 70.90% 61.48% 41.98%
+> ✓2.00 67.40% 49.43% 58.41% 71.42% 40.27% 66.17% 93.70% 74.97% 65.22% top-pp=0.3 ✗5.62 75.35% 57.85% 66.22% 70.33% 43.60% 60.61% 95.00% 78.51% 68.43%
+> ✓5.43 76.46% 58.23% 70.96% 79.38% 51.62% 79.28% 96.00% 79.11% 73.88%
+> p=0.2 ✗3.64 58.25% 51.68% 58.25% 56.61% 34.39% 50.45% 88.90% 72.85% 58.92%
+> ✓3.38 73.05% 54.65% 64.88% 74.28% 44.20% 76.74% 95.30% 77.26% 70.04%
+> p=p∗✗7.80 77.80% 59.57% 70.72% 79.71% 53.33% 78.95% 96.40% 79.38% 74.55%
+> ✓7.52 77.81% 59.75% 71.98% 80.26% 53.92% 80.51% 96.70% 79.71% 75.08%
+> PESF ( α=0.3) ✗7.87 76.20% 56.81% 68.90% 78.11% 50.34% 77.95% 94.80% 78.29% 72.67%
+> ✓7.87 76.30% 57.49% 69.53% 79.08% 50.51% 78.29% 94.80% 78.46% 73.07%
+
+Mathematical Reasoning Code Generation Instruction-Following 
+
+Method w/ LDA Avg. k GSM8K MATH Average MBPP HumanEval Average IFEval 
+
+Baseline ✗ 8.00 88.02% 68.20% 78.11% 72.60% 84.76% 78.68% 26.25% top-kk=4 ✗ 4.00 74.15% 38.00% 56.08% 34.80% 66.46% 50.63% 24.95% 
+
+✓ 4.00 87.49% 64.60% 76.05% 68.00% 72.56% 70.28% 24.77% 
+
+k=2 ✗ 2.00 00.99% 00.00% 00.50% 00.00% 00.61% 00.31% 09.43% 
+
+✓ 2.00 68.54% 42.60% 55.57% 44.40% 36.59% 40.50% 17.74% top-pp=0.3 ✗ 7.21 86.35% 67.40% 76.88% 67.20% 77.44% 72.32% 28.10% 
+
+✓ 7.17 88.93% 68.00% 78.47% 71.00% 79.88% 75.44% 30.13% 
+
+p=0.2 ✗ 5.46 73.16% 32.80% 52.98% 36.00% 46.95% 41.48% 24.03% 
+
+✓ 5.40 85.75% 60.20% 72.98% 61.60% 73.17% 67.39% 24.40% 
+
+p=p∗ ✗ 7.87 88.02% 68.80% 78.41% 72.40% 84.15% 78.28% 28.84% 
+
+✓ 7.66 88.93% 70.60% 79.77% 72.60% 85.37% 78.99% 30.13% 
+
+PESF ( α=0.3) ✗ 7.78 87.62% 18.60% 53.11% 0.00% 76.21% 38.11% 25.13% 
+
+✓ 7.78 87.41% 64.40% 75.91% 39.40% 79.26% 59.33% 27.54% 
+
+Table 2: Performance across a wide range of downstream tasks under different routing strategies on Qwen3-30B-A3B. We use deterministic algorithms for the evaluations. Avg. k denotes the average number of activated experts, and p* denotes the best-performing top-p threshold for each task, reported in Table 9. Results with the highest performance are highlighted in bold orange. 
+
+configuration. Given the SMoE output y(l) ∈ RD
+
+at layer l, LDA applies the following per-dimension affine transformation: 
+
+ˆy(l) =
+
+
+
+y(l), (k = k0),
+
+σ(l) 
+
+> k0
+
+⊙ y(l) − μ(l)
+
+> k
+
+σ(l) 
+
+> k
+
++ ϵ + μ(l) 
+
+> k0
+
+, (k < k 0).
+
+This operation restores the first- and diagonal second-order statistics of reduced top-k representa-tions toward those of the default training configura-tion. Since it only requires an element-wise affine transformation, LDA introduces negligible infer-ence overhead and requires no additional training or parameter updates. It can also be combined with existing training-free dynamic routing strategies, as it operates independently of how the reduced number of activated experts is selected. 
+
+5 Experiments 
+
+5.1 Experimental Setup 
+
+We evaluate LDA on recent SMoE LLMs, includ-ing Qwen3-30B-A3B (Team, 2025), kanana-2-30b-a3b-instruct (LLM, 2025) based on DeepSeek-V3 architecture (DeepSeek-AI et al., 2025), and GLM-4.7-Flash (Team et al., 2025). We consider top-k
+
+routing, dynamic top-p routing (Huang et al., 2024), and PESF (Chen et al., 2025) as inference-time routing baselines, and compare each routing strat-egy under reduced expert activation, with and with-out LDA across 13 benchmarks: 8 general knowl-edge & commonsense reasoning tasks, 2 mathe-matical reasoning tasks, 2 code generation tasks, and 1 instruction-following task. Layer-wise statis-tics are estimated using 4 ×2048 tokens sampled from C4 (Dodge et al., 2021) calibration subset. −0.20 −0.15 −0.10 −0.05 0.00 0.05 0.10 0.15 0.20 
+
+> Value
+> 02468
+> Density
+> var ( k=8): 0.0023 var ( k=4): 0.0043 → 0.0023 var ( k=2): 0.0084 → 0.0023
+> Layer 24
+> w/o LDA w/ LDA top-kk=8
+> k=4
+> k=2
+
+(a) SMoE output distribution k=8 k=7 k=6 k=5 k=4 k=3 k=2 k=1  
+
+> top-k
+> 0.0 0.1 0.2 0.3 0.4
+> ‖SMoE output‖ / ‖Residual‖ Layer 24
+> w/o LDA w/ LDA w/o LDA w/ LDA
+
+(b) ∥SMoE output ∥ / ∥Residual ∥0 10 20 30 40  
+
+> Layer Index
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> Routing Match Rate
+> Δ Routing Match Rate
+> w/o LDA w/ LDA top-kk=2
+> k=1
+
+(c) Layer-wise Routing Match Rate 
+
+Figure 5: Effect of LDA on SMoE outputs in Qwen3-30B-A3B. We use 2,048 held-out calibration tokens, and for (a), 100,000 values are randomly sampled. (a): LDA aligns reduced top-k SMoE output distributions toward the default k = 8 distribution. (b): LDA suppresses the increased SMoE output scale relative to the residual stream. (c) LDA increases the routing match rate (Eq. 7) across layers, indicating reduced routing trajectory mismatch. 
+
+We report accuracy-based metrics for all bench-mark tasks. Additional details on baselines, models, benchmarks, evaluation settings, and implementa-tion are provided in Appendix B. 
+
+5.2 Performance across Routing Strategies 
+
+Table 2 reports results under different inference-time routing strategies, including fixed top-k rout-ing, dynamic top-p routing, and PESF. Across these strategies, performance degradation becomes more pronounced as the average number of activated ex-perts decreases. Under fixed top-k routing, LDA substantially improves over reduced top-k baselines, particu-larly in low-k regimes. When k is reduced to 4 or 2, the vanilla baseline suffers large drops across tasks, whereas LDA preserves considerably higher performance under the same expert budget. This suggests that the degradation caused by reducing expert activation is not solely attributable to lower expert capacity, but is also closely tied to the repre-sentation variance and scale mismatch analyzed in Section 3. We observe a similar tendency under dynamic top-p routing and PESF. For top-p routing, LDA consistently improves performance at the same threshold, and with an appropriate p value, it can match or exceed the default top-k0 performance while using fewer experts on average. For PESF, LDA also improves performance over the corre-sponding dynamic expert-pruning baseline, indicat-ing that LDA is effective beyond fixed reduced top-
+
+k routing. Overall, these results show that LDA can be combined with diverse training-free dynamic routing strategies by correcting the representation mismatch induced by reduced expert activation. We provide results on additional models in Ap-pendix D, where LDA yields consistent improve-
+
+Task top-k w/o LDA w/ LDA p-value 
+
+MMLU k=6 76 .92% ±0.00% 77 .34% ±0.00% 0.0341 
+
+k=4 70 .72% ±0.00% 75 .56% ±0.00% 1.9e-57 
+
+MATH k=6 58 .00% ±0.89% 65 .40% ±0.49% 1.3e-04 
+
+k=4 35 .72% ±1.61% 61 .24% ±1.65% 8.4e-05 
+
+MBPP k=6 68 .56% ±0.64% 70 .80% ±1.29% 0.0308 
+
+k=4 43 .56% ±3.81% 68 .00% ±0.38% 3.7e-04 
+
+Table 3: Statistical significance of LDA improve-ments. For MMLU, we apply McNemar’s test. For MATH and MBPP, we apply paired t-test and report mean ±CI95 over 5 random seeds. LDA yields statisti-cally significant improvements ( p < 0.05 ) across all evaluated settings. 
+
+ments under reduced expert activation budgets. 
+
+5.3 Statistical Significance of Improvements 
+
+To assess whether the observed improvements are attributable to evaluation noise, we conduct sta-tistical significance tests under representative re-duced top-k settings. For multiple-choice tasks such as MMLU (Hendrycks et al., 2021a), where predictions are deterministic, we apply McNe-mar’s test (McNemar, 1947) to paired per-example correctness, comparing reduced top-k routing with and without LDA. For generation tasks such as MATH (Hendrycks et al., 2021b) and MBPP (Austin et al., 2021), we evaluate each method across five random seeds and use a paired 
+
+t-test (Student, 1908) to compare task-level perfor-mance. As shown in Table 3, LDA yields statisti-cally significant improvements ( p < 0.05 ) across all evaluated settings. We provide the specific null hypotheses and additional testing details in Ap-pendix C. 
+
+5.4 Effect of LDA 
+
+We analyze how LDA affects representations under reduced top-k routing. As shown in Fig. 5a, LDA ShareGPT NuminaMath-1.5                                                     
+
+> top-kw/ LDA TPOT(ms) ↓Throughput(tok/s) ↑TPOT(ms) ↓Throughput(tok/s) ↑TFLOPs ↓
+> k=8 ✗33.22 910.71 29.97 1035.71 ≈14.48
+> k=6 ✗30.14 999.78 27.01 1147.42 ≈12.63
+> ✓30.26 995.09 26.30 1177.90 ≈12.63
+> k=4 ✗26.00 1156.26 22.57 1368.72 ≈10.77
+> ✓25.97 1153.90 22.02 1402.42 ≈10.77
+> k=2 ✗20.11 1477.55 17.13 1780.97 ≈8.92
+> ✓20.29 1461.31 16.74 1819.19 ≈8.92
+
+Table 4: Inference efficiency comparison with and without LDA. We report TPOT, output token through-put, and TFLOPs across different top-k settings on ShareGPT and NuminaMath-1.5 in Qwen3-30B-A3B. TFLOPs are computed with a sequence length of 2,048. The results show that applying LDA introduces negligi-ble additional inference overhead. 900 1000 1100 1200 1300 1400 1500         
+
+> Output Token Throughput (tok/s)
+> 020 40 60 80 100
+> Average Performance (%)
+> k=8
+> k=4
+> k=2
+> k=4
+> k=2 Baseline Speed x1.27
+> General Knowledge & Commonsense Reasoning Tasks
+> w/o LDA w/ LDA 1000 1100 1200 1300 1400 1500 1600 1700 1800
+> Output Token Throughput (tok/s)
+> 020 40 60 80 100
+> Average Performance (%)  k=8
+> k=4
+> k=2
+> k=4
+> k=2 Baseline Speed x1.35
+> Mathematical Reasoning Tasks
+> w/o LDA w/ LDA
+
+Figure 6: Performance–throughput trade-off on Qwen3-30B-A3B. We compare the average perfor-mance and output token throughput under different top-
+
+k settings. LDA consistently shifts the trade-off curve upward. Throughput is measured using ShareGPT and NuminaMath-1.5 for general reasoning and mathemati-cal reasoning, respectively. 
+
+aligns the per-dimension distribution of SMoE out-puts toward the default top-k0 configuration. After correction, outputs from different reduced top-k
+
+settings exhibit comparable means and variances, indicating that LDA mitigates the distributional mismatch identified in Section 3.2. This correction also stabilizes the relative scale of the SMoE out-put. Fig. 5b shows that the ratio between the SMoE output scale and the residual stream remains close to that of the default setting after applying LDA, suggesting that LDA reduces the scale imbalance amplified under reduced routing. We further examine whether this correction af-fects subsequent routing behavior. Fig. 5c com-pares the routing match rate in Eq. 7 before and af-ter LDA. Across layers, LDA consistently increases the match rate relative to the reduced top-k base-line, especially for smaller k. This indicates that LDA helps preserve routing trajectories closer to those induced by the default routing configuration. We observe the same overall tendency on the other evaluated SMoE architectures (LLM, 2025; Team et al., 2025). These results suggest that the representation-level phenomenon is not confined to a specific architecture despite differences in gat-ing functions, shared-expert structures, and expert configurations. Detailed results are provided in Table 13. 
+
+5.5 Trade-off between Inference Efficiency and Performance 
+
+We evaluate inference efficiency in a realistic serv-ing setting using vLLM framework (Kwon et al., 2023), measuring Time Per Output Token (TPOT) and Output Token Throughput . All experiments are conducted on a single NVIDIA RTX PRO 6000 Blackwell Max-Q GPU (96GB). Our analysis fo-cuses on the performance–efficiency trade-off in-duced by varying the number of activated experts. To capture domain-dependent inference behavior, we use the ShareGPT dataset (Chiang et al., 2023) for general knowledge & commonsense reasoning, and NuminaMath-1.5 (LI et al., 2024) for mathe-matical reasoning. Table 4 reports the inference metrics, and Fig. 6 visualizes the trade-off between average task perfor-mance and output token throughput. As the number of activated experts decreases, inference becomes more efficient, leading to lower FLOPs and higher throughput. However, under vanilla top-k routing, this efficiency gain comes with a substantial perfor-mance drop, especially at smaller k values. In contrast, LDA improves this trade-off by pre-serving much of the task performance while retain-ing the efficiency benefit of reduced expert acti-vation. At the same reduced top-k setting, LDA consistently achieves higher average performance than vanilla top-k routing with comparable infer-ence cost. This is because LDA only applies a per-dimension affine transformation to the SMoE out-put at each layer, whose additional computational cost is O(LD ) across the entire model, where L is the number of SMoE layers and D is the hidden di-mension. This overhead is negligible compared to the entire computation cost, and it does not require additional training or parameter updates. This improved trade-off is consistent across both evaluated domains but is especially pronounced in mathematical reasoning, where vanilla reduced top-k routing otherwise suffers catastrophic degra-dation. Ultimately, these results demonstrate that LDA effectively decouples throughput gains from severe performance penalties, offering a highly practical solution for efficient SMoE serving. 6 Conclusion 
+
+In this work, we studied the performance degrada-tion of Sparse Mixture-of-Experts (SMoE) mod-els under reduced expert activation from the per-spective of representation scale and distribution mismatch. We observed that reducing top-k am-plifies the scale and variance of SMoE outputs, disturbing the balance between the weighted ex-pert output and the residual stream. This routing-induced representation mismatch constitutes a cor-rectable component of the degradation, distinct from the loss of expert capacity. To address this issue, we proposed Layer-wise Distribution Align-ment (LDA), a training-free inference-time correc-tion that aligns reduced top-k representations with the layer-wise statistics of the default training con-figuration. LDA is lightweight, requiring only an element-wise affine transformation with O(LD )
+
+additional cost across the model, and is compatible with training-free dynamic routing strategies. Ex-periments across multiple SMoE LLMs and diverse downstream tasks show that LDA consistently mitigates performance degradation under reduced expert activation and improves the performance– efficiency trade-off across routing strategies. These results highlight the importance of maintaining rep-resentation scale and distribution consistency for dynamic routing in SMoE models. 
+
+Limitations 
+
+LDA is a training-free inference-time correction for the representation scale and distribution mis-match induced by reduced expert activation, and it has several limitations. First, it corrects the routing-induced mismatch but but like other methods it cannot recover the expert capacity lost by activat-ing fewer experts, so under extreme reduction a capacity gap may remain after alignment and LDA may only partially recover default-routing perfor-mance. Second, LDA summarizes each layer-wise distribution with per-dimension mean and standard deviation. This keeps the method lightweight and stable but ignores covariance structure, asymme-try, and higher-order statistics; although variance is the most consistent and substantial shift under reduced top-k routing, more expressive alignment may help in certain layers or tasks. Third, LDA requires a calibration stage to estimate layer-wise reference and target statistics. Our ablations show robustness to the choice and size of the calibration set, but the method is not calibration-free. Finally, our dynamic top-p experiments use manually se-lected thresholds, which must be chosen per task. Training-free dynamic routing that determines the number of activated experts automatically, com-bined with LDA, is a useful direction for future work. 
+
+Acknowledgements 
+
+This work was supported by Institute for Informa-tion & communications Technology Planning & Evaluation (IITP) grant funded by the Korea gov-ernment(MSIT) (RS-2019-II190075, Artificial In-telligence Graduate School Program (KAIST)), Na-tional Research Foundation of Korea (NRF) grant funded by the Korea government (MSIT) (No. RS-2023-00256259), the Institute of Information & Communications Technology Planning & Evalu-ation (IITP) with a grant funded by the Ministry of Science and ICT (MSIT) of the Republic of Korea in connection with the Global AI Frontier Lab International Collaborative Research. (No. RS-2024-00469482 & RS-2024-00509279), Insti-tute of Information & communications Technology Planning & Evaluation(IITP) grant funded by the Korea government(MSIT) (No.RS-2022-II220713, Meta-learning Applicable to Real-world Problems), and the “Advanced GPU Utilization Support Pro-gram” funded by the Government of the Republic of Korea (Ministry of Science and ICT). 
+
+References       
+
+> Jacob Austin, Augustus Odena, Maxwell Nye, Maarten Bosma, Henryk Michalewski, David Dohan, Ellen Jiang, Carrie Cai, Michael Terry, Quoc Le, and Charles Sutton. 2021. Program synthesis with large language models. Preprint , arXiv:2108.07732. Yonatan Bisk, Rowan Zellers, Ronan Le bras, Jianfeng Gao, and Yejin Choi. 2020. Piqa: Reasoning about physical commonsense in natural language. Proceed-ings of the AAAI Conference on Artificial Intelligence ,34(05):7432–7439. Weilin Cai, Juyong Jiang, Fan Wang, Jing Tang, Sunghun Kim, and Jiayi Huang. 2025. A Survey on Mixture of Experts in Large Language Models .
+> IEEE Transactions on Knowledge & Data Engineer-ing , 37(07):3896–3915. Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, Alex Ray, Raul Puri, Gretchen Krueger, Michael Petrov, Heidy Khlaaf, Girish Sastry, Pamela Mishkin, Brooke Chan, Scott Gray, and 39 others.
+
+2021. Evaluating large language models trained on code. Preprint , arXiv:2107.03374. Yuanteng Chen, Yuantian Shao, Peisong Wang, and Jian Cheng. 2025. EAC-MoE: Expert-selection aware compressor for mixture-of-experts large language models. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Vol-ume 1: Long Papers) , pages 12942–12963, Vienna, Austria. Association for Computational Linguistics. Wei-Lin Chiang, Zhuohan Li, Zi Lin, Ying Sheng, Zhanghao Wu, Hao Zhang, Lianmin Zheng, Siyuan Zhuang, Yonghao Zhuang, Joseph E. Gonzalez, Ion Stoica, and Eric P. Xing. 2023. Vicuna: An open-source chatbot impressing gpt-4 with 90%* chatgpt quality. Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. 2018. Think you have solved question answering? try arc, the ai2 reasoning challenge. 
+
+Preprint , arXiv:1803.05457. Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. 2021. Training verifiers to solve math word prob-lems. Preprint , arXiv:2110.14168. Damai Dai, Chengqi Deng, Chenggang Zhao, R.x. Xu, Huazuo Gao, Deli Chen, Jiashi Li, Wangding Zeng, Xingkai Yu, Y. Wu, Zhenda Xie, Y.k. Li, Panpan Huang, Fuli Luo, Chong Ruan, Zhifang Sui, and Wen-feng Liang. 2024. DeepSeekMoE: Towards ultimate expert specialization in mixture-of-experts language models. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Vol-ume 1: Long Papers) , pages 1280–1297, Bangkok, Thailand. Association for Computational Linguistics. DeepSeek-AI, Aixin Liu, Bei Feng, Bing Xue, Bingx-uan Wang, Bochao Wu, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenyu Zhang, Chong Ruan, Damai Dai, Daya Guo, Dejian Yang, Deli Chen, Dongjie Ji, Erhang Li, Fangyun Lin, Fucong Dai, and 181 others. 2025. Deepseek-v3 technical report. 
+
+Preprint , arXiv:2412.19437. Jesse Dodge, Maarten Sap, Ana Marasovi´ c, William Agnew, Gabriel Ilharco, Dirk Groeneveld, Margaret Mitchell, and Matt Gardner. 2021. Documenting large webtext corpora: A case study on the colos-sal clean crawled corpus. In Proceedings of the 2021 Conference on Empirical Methods in Natural Language Processing , pages 1286–1305, Online and Punta Cana, Dominican Republic. Association for Computational Linguistics. Zican Dong, Han Peng, Peiyu Liu, Xin Zhao, Dong Wu, Feng Xiao, and Zhifeng Wang. 2025. Domain-specific pruning of large mixture-of-experts models with few-shot demonstrations. In Advances in Neural Information Processing Systems , volume 38, pages 103552–103577. Curran Associates, Inc. William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23(120):1–39. Leo Gao, Jonathan Tow, Baber Abbasi, Stella Bider-man, Sid Black, Anthony DiPofi, Charles Foster, Laurence Golding, Jeffrey Hsu, Alain Le Noac’h, Haonan Li, Kyle McDonell, Niklas Muennighoff, Chris Ociepa, Jason Phang, Laria Reynolds, Hailey Schoelkopf, Aviya Skowron, Lintang Sutawika, and 5 others. 2024. The language model evaluation har-ness. Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. 2016. Deep residual learning for image recog-nition. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR) .Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Stein-hardt. 2021a. Measuring massive multitask language understanding. Proceedings of the International Con-ference on Learning Representations (ICLR) .Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. 2021b. Measuring mathematical problem solving with the math dataset. Advances in neural information processing systems .Jeremy Herbst, Jae Hee Lee, and Stefan Wermter. 2026. The expert strikes back: Interpreting mixture-of-experts language models at expert level. Preprint ,arXiv:2604.02178. Quzhe Huang, Zhenwei An, Nan Zhuang, Mingxu Tao, Chen Zhang, Yang Jin, Kun Xu, Kun Xu, Liwei Chen, Songfang Huang, and Yansong Feng. 2024. Harder task needs more experts: Dynamic routing in MoE models. In Proceedings of the 62nd Annual Meet-ing of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 12883–12895. Wei Huang, Yue Liao, Jianhui Liu, Ruifei He, Haoru Tan, Shiming Zhang, Hongsheng Li, Si Liu, and XI-AOJUAN QI. 2025. Mixture compressor for mixture-of-experts LLMs gains more. In The Thirteenth In-ternational Conference on Learning Representations .Albert Q. Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch, Blanche Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Emma Bou Hanna, Florian Bressand, Gi-anna Lengyel, Guillaume Bour, Guillaume Lam-ple, Lélio Renard Lavaud, Lucile Saulnier, Marie-Anne Lachaux, Pierre Stock, Sandeep Subramanian, Sophia Yang, and 7 others. 2024. Mixtral of experts. 
+
+Preprint , arXiv:2401.04088. Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gon-zalez, Hao Zhang, and Ion Stoica. 2023. Efficient memory management for large language model serv-ing with pagedattention. In Proceedings of the 29th Symposium on Operating Systems Principles , SOSP ’23, page 611–626, New York, NY, USA. Association for Computing Machinery. Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu, Dehao Chen, Orhan Firat, Yanping Huang, Maxim Krikun, Noam Shazeer, and Zhifeng Chen. 2021. {GS}hard: Scaling giant models with conditional computation and automatic sharding. In Interna-tional Conference on Learning Representations .Mike Lewis, Shruti Bhosale, Tim Dettmers, Naman Goyal, and Luke Zettlemoyer. 2021. Base layers: Simplifying training of large, sparse models. In 
+
+Proceedings of the 38th International Conference on Machine Learning , volume 139 of Proceedings of Machine Learning Research , pages 6265–6274. PMLR. Jia LI, Edward Beeching, Lewis Tunstall, Ben Lipkin, Roman Soletskyi, Shengyi Costa Huang, Kashif Ra-sul, Longhui Yu, Albert Jiang, Ziju Shen, Zihan Qin, Bin Dong, Li Zhou, Yann Fleureau, Guillaume Lam-ple, and Stanislas Polu. 2024. Numinamath. Jiamin Li, Qiang Su, Yitao Yang, Yimin Jiang, Cong Wang, and Hong Xu. 2023. Adaptive gating in mixture-of-experts based language models. In Pro-ceedings of the 2023 Conference on Empirical Meth-ods in Natural Language Processing , pages 3577– 3587, Singapore. Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. 2024. Awq: Activation-aware weight quantization for on-device llm compression and acceleration. In Proceed-ings of Machine Learning and Systems , volume 6, pages 87–100. Kanana LLM. 2025. Kanana-2 llm. Quinn McNemar. 1947. Note on the sampling error of the difference between correlated proportions or percentages. Psychometrika , 12(2):153–157. Niklas Muennighoff, Luca Soldaini, Dirk Groeneveld, Kyle Lo, Jacob Morrison, Sewon Min, Weijia Shi, Evan Pete Walsh, Oyvind Tafjord, Nathan Lam-bert, Yuling Gu, Shane Arora, Akshita Bhagia, Dustin Schwenk, David Wadden, Alexander Wet-tig, Binyuan Hui, Tim Dettmers, Douwe Kiela, and 5 others. 2025. OLMoe: Open mixture-of-experts language models. In The Thirteenth International Conference on Learning Representations .Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavat-ula, and Yejin Choi. 2019. Winogrande: An adver-sarial winograd schema challenge at scale. Preprint ,arXiv:1907.10641. Noam Shazeer, *Azalia Mirhoseini, *Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. 2017. Outrageously large neural net-works: The sparsely-gated mixture-of-experts layer. In International Conference on Learning Representa-tions .Student. 1908. The probable error of a mean. 
+
+Biometrika , 6(1):1–25. Mingjie Sun, Zhuang Liu, Anna Bair, and J Zico Kolter. 2024. A simple and effective pruning approach for large language models. In The Twelfth International Conference on Learning Representations .Alon Talmor, Jonathan Herzig, Nicholas Lourie, and Jonathan Berant. 2019. CommonsenseQA: A ques-tion answering challenge targeting commonsense knowledge. In Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Tech-nologies, Volume 1 (Long and Short Papers) , pages 4149–4158, Minneapolis, Minnesota. Association for Computational Linguistics. GLM Team, Aohan Zeng, Xin Lv, Qinkai Zheng, Zhenyu Hou, Bin Chen, Chengxing Xie, Cunxiang Wang, Da Yin, Hao Zeng, Jiajie Zhang, Kedong Wang, Lucen Zhong, Mingdao Liu, Rui Lu, Shulin Cao, Xiaohan Zhang, Xuancheng Huang, Yao Wei, and 152 others. 2025. Glm-4.5: Agentic, reason-ing, and coding (arc) foundation models. Preprint ,arXiv:2508.06471. Qwen Team. 2025. Qwen3 technical report. Preprint ,arXiv:2505.09388. Zhongwei Wan, Xin Wang, Che Liu, Samiul Alam, Yu Zheng, Jiachen Liu, Zhongnan Qu, Shen Yan, Yi Zhu, Quanlu Zhang, Mosharaf Chowdhury, and Mi Zhang. 2024. Efficient large language models: A survey. Transactions on Machine Learning Research .Survey Certification. Johannes Welbl, Nelson F. Liu, and Matt Gardner. 2017. Crowdsourcing multiple choice science questions. In Proceedings of the 3rd Workshop on Noisy User-generated Text , pages 94–106, Copenhagen, Den-mark. Association for Computational Linguistics. Ruibin Xiong, Yunchang Yang, Di He, Kai Zheng, Shuxin Zheng, Chen Xing, Huishuai Zhang, Yanyan Lan, Liwei Wang, and Tieyan Liu. 2020. On layer normalization in the transformer architecture. In Pro-ceedings of the 37th International Conference on Machine Learning , volume 119 of Proceedings of Machine Learning Research , pages 10524–10533. PMLR. Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. 2019. HellaSwag: Can a ma-chine really finish your sentence? In Proceedings of the 57th Annual Meeting of the Association for Com-putational Linguistics , pages 4791–4800, Florence, Italy. Association for Computational Linguistics. Zihao Zeng, Yibo Miao, Hongcheng Gao, Hao Zhang, and Zhijie Deng. 2024. AdaMoE: Token-adaptive routing with null experts for mixture-of-experts lan-guage models. In Findings of the Association for Computational Linguistics: EMNLP 2024 , pages 6223–6235, Miami, Florida, USA. Association for Computational Linguistics. Biao Zhang and Rico Sennrich. 2019. Root mean square layer normalization. In Advances in Neural Informa-tion Processing Systems , volume 32. Curran Asso-ciates, Inc. Shuzhang Zhong, Ling Liang, Yuan Wang, Runsheng Wang, Ru Huang, and Meng Li. 2025. Adapmoe: Adaptive sensitivity-based expert gating and manage-ment for efficient moe inference. In Proceedings of the 43rd IEEE/ACM International Conference on Computer-Aided Design , ICCAD ’24. Association for Computing Machinery. Jeffrey Zhou, Tianjian Lu, Swaroop Mishra, Siddhartha Brahma, Sujoy Basu, Yi Luan, Denny Zhou, and Le Hou. 2023. Instruction-following evaluation for large language models. Preprint , arXiv:2311.07911. Layer Index Ex [PairwiseAbsCos] Ex [NormCV] Ex, i ∈S k                                                   
+
+> ∥Eθi(x)∥2
+> Ex
+> hP
+> i∈S kw2
+> i
+> iEx
+> hP
+> i,j ∈S ki̸=j wiwj
+> D
+> Eθi(x),E θj(x)
+> Ei
+> Ex
+> hP
+> i∈S kw2
+> i∥Eθi(x)∥22
+> i
+> k=8 k=4 k=2 k=8 k=4 k=2 k=8 k=4 k=2 12 0.0321 0.2415 3.2769 3.5664 3.7829 0.1455 0.2675 0.5125 0.1191 0.0726 0.0298
+> 24 0.0333 0.2256 4.8823 5.2075 5.4284 0.1401 0.2634 0.5102 0.1534 0.0855 0.0326
+> 36 0.0319 0.2740 7.4705 8.3009 8.9204 0.1440 0.2664 0.5122 0.1427 0.0885 0.0375
+
+Table 5: Empirical validation of the mild assumptions in Qwen3-30B-A3B. We use 8 ×2,048 calibration tokens and report the average for each measurement. The results show weak pairwise correlations and limited variation in the norms of activated expert outputs. Routing score concentration increases as k decreases, whereas the cross term remains substantially smaller than the diagonal term, supporting the dominance of the diagonal component. 
+
+A Theoretical Insight 
+
+We provide additional details for the theoretical in-sight in Section 3.2. We first derive the inequality 5. We then provide empirical measurements related to the mild assumptions used in the approximation. 
+
+A.1 Derivation of Eq. 5 
+
+We derive Eq. 5, which shows that removing the smallest selected routing score and re-normalizing the remaining scores increases the sum of squared routing scores. Assume that the selected routing scores are or-dered as 
+
+w1 ≥ w2 ≥ · · · ≥ wk > 0,
+
+and normalized such that 
+
+> k
+
+X
+
+> i=1
+
+wi = 1 .
+
+After removing the smallest selected score wk, the remaining k − 1 scores are re-normalized as 
+
+˜wi = wi
+
+1 − wk
+
+, i = 1 , . . . , k − 1.
+
+Let A denote the sum of squared routing scores over the remaining k − 1 scores before re-normalization, 
+
+A =
+
+> k−1
+
+X
+
+> i=1
+
+w2 
+
+> i
+
+.
+
+Then, 
+
+> k−1
+
+X
+
+> i=1
+
+˜w2 
+
+> i
+
+=
+
+> k−1
+
+X
+
+> i=1
+
+ wi
+
+1 − wk
+
+2
+
+= A
+
+(1 − wk)2 .
+
+We now show that this quantity is larger than the original squared sum over all k selected scores, 
+
+A
+
+(1 − wk)2 > A + w2
+
+> k
+
+.
+
+Multiplying both sides by (1 − wk)2 > 0,
+
+A > (A + w2
+
+> k
+
+)(1 − wk)2.
+
+Rearranging the inequality gives 
+
+A w k(2 − wk) > (wk(1 − wk)) 2 .
+
+Since wi ≥ wk for all i < k ,
+
+A =
+
+> k−1
+
+X
+
+> i=1
+
+w2 
+
+> i
+
+≥ wkk−1X
+
+> i=1
+
+wi = wk(1 − wk).
+
+Using A ≥ wk(1 − wk) and 0 < w k < 1,
+
+A w k(2 − wk) ≥ wk(1 − wk) wk(2 − wk).
+
+Moreover, since 2 − wk > 1 − wk,
+
+wk(1 − wk) wk(2 − wk) > (wk(1 − wk)) 2 .
+
+Thus, 
+
+A w k(2 − wk) > (wk(1 − wk)) 2 ,
+
+which proves 
+
+A
+
+(1 − wk)2 > A + w2
+
+> k
+
+.
+
+This shows that removing the smallest routing score and re-normalizing the remaining scores increases the sum of squared routing scores. 
+
+A.2 Empirical Support for Mild Assumptions 
+
+The theoretical insight in Section 3.2 relies on the mild assumptions that (1) activated expert output scales exhibit limited variation and remain compa-rable across top-k settings, and (2) pairwise cor-relations between expert outputs are weak such that the first diagonal term remains the dominant component. To empirically examine these assump-tions, we report statistics based on activated expert outputs and normalized routing scores in Table 5. We first measure the average absolute pairwise cosine similarity between activated expert outputs under the default routing configuration k0. We refer to this quantity as PairwiseAbsCos :
+
+Ei,j ∈S k0
+
+> i̸=j
+
+ cos  Eθi (x), E θj (x)  .
+
+We further quantify the relative variation in the norms of activated expert outputs using their coeffi-cient of variation, which we refer to as NormCV :
+
+σi∈S k0
+
+ ∥Eθi (x)∥2
+
+
+
+μi∈S k0
+
+ ∥Eθi (x)∥2
+
+ .
+
+We then measure the average norm of activated expert outputs and the sum of squared normalized routing scores under different top-k settings: 
+
+Ei∈S k
+
+∥Eθi (x)∥2
+
+ , X
+
+> i∈S k
+
+w2 
+
+> i
+
+.
+
+As shown in Table 5, the average norm of acti-vated expert outputs remains within a comparable range, supporting the assumption that their scale does not vary substantially. In contrast, the sum of squared normalized routing scores increases sub-stantially as k decreases, indicating increased con-centration of the normalized routing scores. Finally, we directly compare the second cross term with the first diagonal term in Eq. 4. Across all evaluated layers and top-k setting, the cross term re-mains substantially smaller than the diagonal term, and its relative contribution further decreases as k
+
+decreases. This supports the assumption that the first diagonal term remains the dominant compo-nent. Together, these results provide empirical sup-port for the approximation used in Section 3.2 and the RMS amplification mechanism under reduced top-k routing. 
+
+B Experimental Setup 
+
+We provide further details on our experimental setup, including baselines, models, benchmarks, and evaluation protocols. 
+
+B.1 Baselines 
+
+We consider three routing strategies as baselines: fixed top-k routing, dynamic top-p routing (Huang et al., 2024) and PESF (Chen et al., 2025). For each routing strategy, we compare reduced expert activation with and without LDA to validate the effect of distribution alignment. 
+
+top-k Routing top-k routing is the standard rout-ing strategy used in many SMoE LLMs, where each token activates a fixed number of experts. This set-ting provides a controlled comparison of LDA by keeping the expert budget identical between the vanilla reduced top-k baseline and its LDA-applied counterpart. 
+
+top-p Routing top-p routing is a dynamic expert routing strategy that selects experts until the cumu-lative routing score exceeds a threshold p. Unlike fixed top-k routing, the number of activated experts can vary across tokens depending on the routing distribution. To preserve the inference–efficiency motivation, we restrict the maximum number of activated experts so that it does not exceed the de-fault top-k0 configuration. This setting allows us to evaluate whether LDA remains effective when the number of activated experts is determined dynam-ically at inference time. The evaluated threshold values are described in Appendix B.4. 
+
+PESF Pruning based on Expert-Selection Fre-quency (PESF) is a dynamic expert pruning method applied at inference time. For each input sequence, PESF counts how many times each expert is se-lected by the router. Then, An expert is pruned if its selection count is smaller than a predefined threshold: 
+
+ci < l × KN × α, 
+
+where ci denotes the number of times expert Eθi
+
+is selected, l is the input sequence length, K is the number of selected experts per token before prun-ing, N is the total number of experts, and α is the pruning threshold. Since the set of retained experts can vary across each token, PESF can be viewed as an inference-time dynamic routing strategy that changes the number of activated experts. We set 
+
+α ∈ { 0.3, 0.7} following prior work. 
+
+B.2 Models 
+
+We evaluate LDA on recent SMoE LLMs with di-verse architectures to verify that it is not limited to a specific model structure and works consistently across different architectural designs. All evalu-ated models apply routing score re-normalization (Eq. 1). 
+
+Qwen3-30B-A3B (Team, 2025) This model has 30.5B total parameters, with 3.3B activated param-eters per token. Each MoE layer consists of 128 Task Metric Few-shot Max Seq. Length Max Gen. Tokens General Knowledge & Commonsense Reasoning                                                     
+
+> MMLU (Hendrycks et al., 2021a) Accuracy 0-shot 4096 -Hellaswag (Zellers et al., 2019) Accuracy 0-shot 4096 -Winogrande (Sakaguchi et al., 2019) Accuracy 0-shot 4096 -ARC-Easy (Clark et al., 2018) Accuracy 0-shot 4096 -ARC-Challenge (Clark et al., 2018) Accuracy 0-shot 4096 -CommonsenseQA (Talmor et al., 2019) Accuracy 0-shot 4096 -ScienceQA (Welbl et al., 2017) Accuracy 0-shot 4096 -PIQA (Bisk et al., 2020) Accuracy 0-shot 4096 -
+> Mathematical Reasoning
+> GSM8K (Cobbe et al., 2021) Exact Match 8-shot (single-turn) 4096 1024 MATH (Hendrycks et al., 2021b) Exact Match 4-shot (single-turn) 4096 1024
+> Code Generation
+> MBPP (Austin et al., 2021) Pass@1 3-shot (single-turn) 4096 1024 HumanEval (Chen et al., 2021) Pass@1 0-shot 4096 1024
+> Instruction-Following
+> IFEval (Zhou et al., 2023) Accuracy[prompt-level] 0-shot 4096 1024
+
+Table 6: Benchmark-specific evaluation settings. We report the evaluation metric, few-shot, max sequence length, and max generation tokens for each benchmark. 
+
+experts, among which 8 routed experts are acti-vated per token. The routing scores are computed using softmax gating. 
+
+kanana-2-30b-a3b-instruct (LLM, 2025) This model is based on the DeepSeek-V3 architec-ture (DeepSeek-AI et al., 2025) and has 30B total parameters with approximately 3B activated param-eters per token. Each MoE layer consists of 128 experts, among which 8 experts (2 shared experts and 6 routed experts) are activated per token. The routing scores are computed using sigmoid gating. 
+
+GLM-4.7-Flash (Team et al., 2025) This model has 30B total parameters with approximately 3B activated parameters per token. Each MoE layer consists of 64 experts, among which 5 experts (1 shared expert + 4 routed experts) are activated per token. The routing scores are calculated with sig-moid gating. 
+
+B.3 Benchmarks 
+
+We evaluate LDA across four domains of bench-marks: general knowledge & commonsense rea-soning, mathematical reasoning, code generation, and instruction-following. 
+
+General Knowledge & Commonsense Reason-ing Tasks: MMLU (Hendrycks et al., 2021a), Hellaswag (Zellers et al., 2019), Winogrande (Sak-aguchi et al., 2019), ARC (ARC-Easy, ARC-Challenge) (Clark et al., 2018), CommonsenseQA (CQA) (Talmor et al., 2019), ScienceQA (SciQ) (Welbl et al., 2017), and PIQA (Bisk et al., 2020). 
+
+Mathematical Reasoning Tasks: GSM8K (Cobbe et al., 2021) and MATH (Hendrycks et al., 2021b). 
+
+Code Generation Tasks: MBPP (Austin et al., 2021) and HumanEval (Chen et al., 2021). 
+
+Instruction-Following Tasks: IFEval (Zhou et al., 2023). 
+
+B.4 Evaluation Protocols 
+
+We use lm_eval framework (Gao et al., 2024) for benchmark evaluations. For reproducibility, we use the default random seed configuration provided by the evaluation framework. We categorize the evaluated benchmarks into option-based tasks and generation-based tasks, and detailed benchmark-specific settings are provided in Table 6. 
+
+GPU Resources All experiments were con-ducted on a single NVIDIA RTX PRO 6000 Black-well Max-Q GPU (96GB), using bfloat16 precision for inference without quantization. 
+
+Option-based Tasks These tasks require the model to select an answer from a given set of can-didates. This category includes the general knowl-edge and commonsense reasoning tasks described in Appendix B.3 Given an input prompt, we com-pute the probability of each candidate answer from the final logits and select the candidate with the highest probability as the model prediction. This allows deterministic evaluation. 
+
+Generation-based Tasks These tasks require the model to generate an output sequence, which is General Knowledge & Commonsense Reasoning 
+
+Method w/ LDA Avg. k MMLU Hella. Wino. ARC-E ARC-C CQA SciQ PIQA Average 
+
+Baseline ✗ 2+6.00 73.63% 62.16% 72.14% 85.69% 58.79% 65.68% 97.00% 80.69% 74.47% top-kk=2+4 ✗ 2+4.00 71.81% 61.13% 71.27% 84.43% 55.20% 59.95% 96.50% 79.49% 72.47% 
+
+✓ 2+4.00 73.33% 61.31% 72.69% 86.03% 56.57% 65.85% 97.20% 80.52% 74.19% 
+
+k=2+2 ✗ 2+2.00 60.87% 53.76% 58.96% 74.28% 45.56% 46.36% 90.20% 75.08% 63.13% 
+
+✓ 2+2.00 68.65% 55.09% 65.82% 83.92% 53.50% 63.31% 96.20% 78.18% 70.58% 
+
+k=2+1 ✗ 2+1.00 23.89% 32.28% 51.30% 35.27% 20.56% 19.41% 54.40% 56.09% 36.65% 
+
+✓ 2+1.00 49.42% 44.04% 56.12% 70.62% 37.80% 43.41% 92.90% 70.46% 58.10% top-pp=0.2 ✗ 2+3.45 69.21% 59.50% 66.61% 81.19% 50.60% 57.08% 95.00% 77.86% 69.63% 
+
+✓ 2+3.52 70.43% 59.50% 69.38% 84.72% 55.89% 67.24% 96.70% 77.97% 72.73% 
+
+p=0.1 ✗ 2+2.50 23.66% 31.72% 50.12% 35.27% 20.22% 19.82% 42.00% 59.09% 35.24% 
+
+✓ 2+1.93 58.92% 49.05% 60.77% 78.49% 45.99% 58.48% 94.60% 73.50% 64.98% 
+
+p=p∗ ✗ 2+5.93 73.62% 62.01% 72.38% 85.69% 59.13% 65.60% 97.00% 80.63% 74.50% 
+
+✓ 2+5.75 73.91% 62.06% 73.80% 85.88% 59.48% 66.18% 97.30% 80.90% 74.94% 
+
+PESF ( α=0.3) ✗ 2+5.94 73.03% 61.09% 72.16% 84.93% 57.32% 64.78% 97.00% 79.70% 73.76% 
+
+✓ 2+5.94 73.23% 61.09% 72.69% 85.05% 57.93% 65.11% 97.00% 79.81% 73.99% Mathematical Reasoning Code Generation Instruction-Following 
+
+Method w/ LDA Avg. k GSM8K MATH Average MBPP HumanEval Average IFEval 
+
+Baseline ✗ 2+6.00 87.95% 64.60% 76.28% 69.80% 82.93% 76.37% 42.33% top-kk=2+4 ✗ 2+4.00 83.78% 55.80% 69.79% 65.40% 81.32% 73.36% 41.04% 
+
+✓ 2+4.00 86.81% 66.40% 76.61% 68.20% 81.71% 74.96% 40.30% 
+
+k=2+2 ✗ 2+2.00 49.66% 10.80% 30.23% 17.40% 37.80% 27.60% 25.14% 
+
+✓ 2+2.00 79.53% 55.60% 67.57% 62.40% 82.93% 72.67% 38.82% 
+
+k=2+1 ✗ 2+1.00 00.23% 00.00% 00.12% 00.00% 00.00% 00.00% 07.95% 
+
+✓ 2+1.00 33.97% 13.00% 23.49% 29.40% 32.32% 30.86% 23.66% top-pp=0.2 ✗ 2+4.41 79.30% 46.60% 62.95% 54.60% 73.78% 64.19% 38.82% 
+
+✓ 2+4.78 81.73% 59.40% 70.57% 63.20% 84.15% 73.68% 41.77% 
+
+p=0.1 ✗ 2+3.72 00.30% 00.00% 00.15% 00.00% 00.00% 00.00% 14.60% 
+
+✓ 2+3.74 59.82% 38.20% 49.01% 46.60% 61.59% 54.10% 31.79% 
+
+p=p∗ ✗ 2+5.94 87.79% 64.00% 75.90% 69.20% 82.93% 76.07% 44.73% 
+
+✓ 2+5.80 88.48% 66.20% 77.34% 70.20% 84.15% 77.18% 46.58% 
+
+PESF ( α=0.3) ✗ 2+5.79 86.80% 61.20% 74.00% 66.20% 84.14% 75.17% 43.99% 
+
+✓ 2+5.79 87.03% 63.40% 75.30% 67.00% 85.36% 76.18% 44.91% 
+
+Table 7: Performance across a wide range of downstream tasks under different routing strategies on kanana-2-30b-a3b-instruct. We use deterministic algorithms for the evaluations. Avg. k denotes the average number of activated experts, and p* denotes the best-performing top-p threshold for each task, reported in Table 9. Results with the highest performance are highlighted in bold orange. 
+
+then filtered and compared against the reference an-swer. This category includes the mathematical rea-soning, code generation, and instruction-following tasks described in Appendix B.3. We use greedy decoding for deterministic evaluation and follow the task-specific filtering and answer extraction pro-cedures provided by lm_eval framework. 
+
+top-p Evaluation For top-p routing, we sweep the threshold over p ∈ { 0.1, 0.2, . . . , 0.9}. In the main results, p∗ denotes the threshold that achieves the best average performance for each task among the evaluated values. 
+
+C Statistical Significance Test 
+
+We use McNemar’s test (McNemar, 1947) for option-based tasks and paired t-test (Student, 1908) for generation-based tasks. 
+
+McNemar’s Test For option-based tasks, predic-tions are obtained deterministically from the same set of examples. Thus, we use McNemar’s test to compare paired correctness between reduced rout-ing with and without LDA. Let A denote the event that an example is correct only with LDA, and B
+
+denote the event that an example is correct only without LDA. The null hypothesis is defined as 
+
+H0 : P (A) = P (B).General Knowledge & Commonsense Reasoning 
+
+Method w/ LDA Avg. k MMLU Hella. Wino. ARC-E ARC-C CQA SciQ PIQA Average 
+
+Baseline ✗ 1+4.00 70.67% 61.06% 73.71% 82.41% 55.46% 72.32% 96.60% 80.09% 74.04% top-k k=1+1 ✗ 1+1.00 36.95% 40.99% 52.80% 51.09% 27.65% 24.41% 76.90% 65.72% 47.06% 
+
+✓ 1+1.00 58.08% 48.93% 60.77% 71.00% 40.53% 55.12% 91.30% 73.88% 62.45% top-p p=0.1 ✗ 1+1.42 48.43% 47.76% 57.45% 62.45% 36.51% 35.87% 87.50% 69.96% 55.74% 
+
+✓ 1+1.41 64.33% 52.23% 66.38% 77.57% 47.69% 67.56% 95.60% 76.80% 68.52% PESF ( α=0.7) ✗ 1+3.56 63.85% 57.60% 70.00% 79.12% 50.08% 64.29% 90.60% 77.09% 69.07% 
+
+✓ 1+3.57 64.70% 57.87% 70.71% 80.59% 50.68% 67.89% 93.70% 78.12% 70.53% Mathematical Reasoning Code Generation Instruction-Following 
+
+Method w/ LDA Avg. k GSM8K MATH Average MBPP HumanEval Average IFEval 
+
+Baseline ✗ 1+4.00 84.15% 19.40% 51.77% 40.80% 75.61% 58.21% 48.43% top-k k=1+1 ✗ 1+1.00 01.97% 00.00% 00.99% 00.80% 01.22% 02.01% 09.06% 
+
+✓ 1+1.00 63.76% 00.00% 31.88% 35.60% 32.93% 34.27% 23.29% top-p p=0.1 ✗ 1+2.09 21.53% 15.20% 18.37% 19.60% 32.92% 26.26% 20.51% 
+
+✓ 1+2.07 70.73% 40.80% 55.77% 47.80% 57.32% 52.56% 33.09% PESF ( α=0.7) ✗ 1+3.41 83.85% 1.00% 42.43% 46.00% 54.87% 50.44% 35.48% 
+
+✓ 1+3.41 83.39% 7.80% 45.60% 52.60% 56.34% 54.57% 37.70% 
+
+Table 8: Performance across a wide range of downstream tasks under different routing strategies on GLM-4.7-Flash. We use deterministic algorithms for the evaluations. Avg. k denotes the average number of activated experts.                                                                     
+
+> Model w/ LDA MMLU Hella. Wino. ARC-E ARC-C CQA SciQ PIQA GSM8K MATH MBPP HumanEval IFEval Qwen3-30B-A3B ✗0.8 0.8 0.7 0.6 0.7 0.5 0.7 0.8 0.7 0.8 0.7 0.8 0.4
+> ✓0.8 0.8 0.6 0.5 0.5 0.4 0.7 0.7 0.3 0.7 0.7 0.7 0.3
+> kanana-2-30b-a3b-instruct ✗0.7 0.7 0.7 0.8 0.7 0.7 0.5 0.5 0.6 0.8 0.5 0.6 0.6
+> ✓0.6 0.8 0.3 0.6 0.8 0.8 0.4 0.6 0.4 0.4 0.5 0.6 0.5
+
+Table 9: Selected p* values across models and downstream tasks. p* denotes the best-performing threshold among p ∈ { 0.1, 0.2, . . . , 0.9} under top-p routing. 
+
+This test examines whether the number of exam-ples corrected only by LDA is statistically different from the number of examples correctly predicted only by the baseline. 
+
+Paired t-test For generation-based tasks, we eval-uate 5 random seeds under the default generation configuration and compare task-level performance using a paired t-test. Let Xw/ LDA and Xw/o LDA 
+
+denote the performance under the same evaluation setting, The null hypothesis is defined as 
+
+H0 : E[Xw/ LDA − Xw/o LDA ] = 0 .
+
+This test examines whether the mean performance difference induced by LDA is statistically different from zero. 
+
+D Performance on Other Models 
+
+We provide additional results on kanana-2-30b-a3b-instruct and GLM-4.7-Flash to examine whether the effectiveness of LDA is limited to Qwen3-30B-A3B. As described in Appendix B.2, these models differ from Qwen3-30B-A3B in their expert con-figurations, use of shared experts, and gating func-tions. Overall, the results show a similar tendency to the main results in Section 5.2: reduced expert activation degrades vanilla routing performance, while LDA mitigates this degradation under the different routing strategies. 
+
+D.1 kanana-2-30b-a3b-instruct 
+
+Table 7 reports the results on kanana-2-30b-a3b-instruct. Under fixed top-k routing, performance decreases as the number of activated experts is reduced, and the degradation becomes more pro-nounced in smaller k settings. However, applying LDA consistently improves performance over the corresponding reduced top-k baseline across all task categories. Under the top-p routing, lowering the threshold 
+
+p reduces the average number of activated experts and degrades vanilla performance, whereas LDA improves performance under the same top-p set-ting. In the top-p* setting, LDA achieves higher MMLU GSM8K MBPP Method k=8 k=6 k=4 k=2 k=8 k=6 k=4 k=2 k=8 k=6 k=4 k=2 top-k 77.87% 76.92% 70.72% 27.97% 88.02% 86.81% 74.15% 00.99% 72.60% 68.20% 34.80% 00.00% top-k w/ ECS 77.87% 72.72% 24.69% 24.56% 88.02% 77.71% 01.06% 00.00% 72.60% 54.60% 00.00% 00.00% top-k w/ RMSS 77.87% 77.30% 75.33% 65.17% 88.02% 87.94% 86.65% 66.11% 72.60% 70.60% 67.60% 42.00%                                                                  
+
+> top-kw/ LDA 77.87% 77.34% 75.56% 67.40% 88.02% 88.63% 87.49% 68.54% 72.60% 70.60% 68.00% 44.40%
+> General Knowledge & Commonsense Reasoning Mathematical Reasoning Code Generation
+> Method MMLU Hella. Wino. ARC-E ARC-C CQA SciQ PIQA GSM8K MATH MBPP HumanEval
+> top-227.97% 36.02% 50.99% 41.29% 24.83% 22.36% 70.90% 61.48% 00.99% 00.00% 00.00% 00.61% top-2w/ RMSS 65.17% 49.05% 57.72% 67.00% 36.17% 63.88% 93.10% 72.41% 66.11% 37.00% 42.00% 26.21%
+> top-2w/ LDA 67.40% 49.43% 58.41% 71.42% 40.27% 66.17% 93.70% 74.97% 68.54% 42.60% 44.40% 36.59%
+
+Table 10: Comparison with simple scaling baselines on Qwen3-30B-A3B. ECS, RMSS, and LDA denote Expert-Count Scaling, RMS Scaling, and Layer-wise Distribution Alignment, respectively. We use deterministic algorithms for the evaluations. LDA generally outperforms simple scaling baselines under reduced top-k routing. 
+
+performance than the default top-k0 routing base-line across diverse tasks, indicating that LDA also remains effective under dynamic routing. We also observe consistent improvements when LDA is combined with PESF. This suggests that LDA is not limited to fixed reduced top-k or dy-namic top-p routing, but can also mitigate perfor-mance degradation under dynamic expert pruning. 
+
+D.2 GLM-4.7-Flash 
+
+Table 8 reports the results on GLM-4.7-Flash. We observe a similar pattern to the other models. Un-der aggressive reduced top-k routing, vanilla perfor-mance drops severely, whereas LDA substantially mitigates this degradation under the same expert budget. A similar trend is observed under dynamic top-p routing and PESF, where LDA improves per-formance over the corresponding routing baseline in most task categories. These additional results suggest that LDA is not restricted to a single SMoE architecture. Across different model architectures and routing strategies, LDA consistently improves reduced-routing perfor-mance, supporting the importance of maintaining representation scale and distribution consistency under reduced expert activation. 
+
+E Comparison with Simple Scaling Baselines 
+
+To examine whether the effect of LDA can be ex-plained solely by scalar rescaling of SMoE out-puts, we compare LDA with two simple scaling baselines: Expert-Count Scaling and RMS Scal-ing. These baselines are training-free and applied at inference time, similar to LDA. However, unlike LDA, they apply a single scalar correction to the entire SMoE output and do not align per-dimension distribution statistics. Thus, this comparison allows us to examine whether global scale correction is sufficient, or whether per-dimension distribution alignment is necessary for preserving downstream performance under reduced expert activation. 
+
+Expert-Count Scaling Expert-Count Scaling is a naive scaling baseline that rescales the SMoE output according to the ratio between the default and reduced numbers of activated experts. Given the SMoE output y(l) at layer l, it applies 
+
+ˆy(l) = y(l) · k0
+
+k ,
+
+where k0 is the default number of activated experts and k is the reduced number of activated experts. This baseline tests whether performance degrada-tion under reduced expert activation can be mit-igated by a simple multiplier based only on the expert count. 
+
+RMS Scaling RMS Scaling rescales the SMoE output using the average RMS scale estimated for each layer and top-k setting. Given the SMoE output y(l) at layer l, it applies 
+
+ˆy(l) = y(l) · ρ(l)
+
+> k0
+
+ρ(l)
+
+> k
+
+,
+
+where ρ(l) 
+
+> k
+
+= E[RMS( y(l) 
+
+> k
+
+)] denotes the average RMS of SMoE outputs at layer l under top-k rout-ing. Unlike Expert-Count Scaling, RMS Scaling uses calibration statistics to directly correct the average output scale. However, it still applies a single scalar correction and does not account for dimension-wise distributional mismatch. Table 10 compares LDA with simple scaling baselines. Expert-Count Scaling leads to sub-stantial performance degradation compared to the vanilla reduced top-k baseline. This indicates that the performance drop under reduced expert ac-tivation cannot be addressed by a naive expert-count-based multiplier. Since routing scores are re-normalized, the effect of reducing k is not sim-ply proportional to the number of activated experts. RMS Scaling provides a stronger baseline. Com-pared to the vanilla reduced top-k baseline, RMS Scaling substantially mitigates performance degra-dation across tasks, especially in low-k settings. This result supports our analysis that the scale of SMoE outputs plays an important role in maintain-ing downstream performance under reduced expert activation. However, LDA generally achieves higher perfor-mance than the simple scaling baselines. Unlike Expert-Count Scaling and RMS Scaling which ap-ply a single scalar correction to the entire SMoE output, LDA aligns the per-dimension mean and standard deviation of reduced top-k representations to those of the default top-k0 configuration. The consistent improvement of LDA over the simple scaling baselines suggests that the mismatch in-duced by reduced expert activation is not only a global scale shift, but also involves dimension-wise distributional changes. These results empirically provide additional evidence that per-dimension dis-tribution alignment is more effective than global scaling for mitigating routing-induced representa-tion distribution mismatch. 
+
+F Ablation Study 
+
+LDA estimates layer-wise distribution statistics from a calibration dataset and uses them to align SMoE outputs under reduced expert activation. Since the correction is determined by calibration statistics, its effectiveness may depend on the choice of calibration dataset and the number of calibration samples. We therefore conduct abla-tion studies to examine the robustness of LDA with respect to these factors. However, our calibration procedure relies on activation-level statistics of SMoE outputs, similar to post-training compression methods. Prior work on activation-aware quantization and activation-based pruning has shown that activation-based statistics can be estimated effectively from rela-tively small calibration sets (Sun et al., 2024) and                                
+
+> Calibration Dataset MMLU GSM8K MBPP
+> k=6 k=4 k=6 k=4 k=6 k=4 C4 77.34% 75.56% 88.63% 87.49% 70.60% 68.00% GSM8K 77.28% 75.52% 88.10% 87.41% 70.60% 68.40% MATH 77.32% 75.59% 88.09% 87.26% 70.00% 67.80% MBPP 77.35% 75.57% 88.09% 86.65% 71.00% 67.60%
+
+Table 11: Effect of calibration dataset choice on Qwen3-30B-A3B. All settings use top-k routing with LDA and 4 ×2,048 calibration tokens for layer-wise dis-tribution estimation. We use deterministic algorithms for the evaluations.                                 
+
+> MMLU GSM8K MBPP # of tokens k=6 k=4 k=6 k=4 k=6 k=4 1×2048 77.39% 75.67% 88.32% 87.02% 70.00% 67.60% 2×2048 77.29% 75.69% 88.55% 87.26% 70.40% 67.00% 4×2048 77.34% 75.56% 88.63% 87.49% 70.60% 68.00% 8×2048 77.35% 75.52% 88.63% 87.71% 70.60% 67.00%
+
+Table 12: Effect of calibration sample size on Qwen3-30B-A3B. All settings use top-k routing with LDA and C4 as the calibration dataset. We use deterministic algorithms for the evaluations. 
+
+are often robust across calibration data choices (Lin et al., 2024). This suggests that the role of calibra-tion data is primarily to provide stable estimates of the general representation distribution, rather than to encode task-specific knowledge. Nevertheless, because LDA explicitly uses cali-bration statistics for inference-time correction, we empirically examine whether calibration dataset choice and calibration sample size affect down-stream performance. We first compare calibration datasets from different domains and then vary the number of calibration samples used to estimate the layer-wise statistics. These ablations provide ad-ditional evidence that LDA remains stable across calibration settings. 
+
+F.1 Effect of Calibration Dataset Choice 
+
+We first examine the effect of calibration dataset choice. Table 11 compares downstream perfor-mance when the layer-wise distribution statistics are estimated from different calibration datasets, including C4, GSM8K, MATH, and MBPP. All settings use the same number of calibration tokens, and apply LDA under reduced top-k routing. Across different calibration datasets, the per-formance remains stable. For MMLU, GSM8K, and MBPP, calibration with C4 achieves perfor-mance comparable to calibration with task-specific or domain-specific datasets. Although small vari-ations appear across tasks and top-k settings, no kanana-2-30b-a3b-instruct (Layer 24) GLM-4.7-Flash (Layer 24)                                                 
+
+> Variance Scale Ratio Routing Match Rate Variance Scale Ratio Routing Match Rate
+> Method k=2+6 k=2+4 k=2+2 k=2+6 k=2+4 k=2+2 k=2+2 k=1+4 k=1+2 k=1+1 k=1+4 k=1+2 k=1+1 k=1+1 top-k0.0179 0.0260 0.0508 0.2180 0.2626 0.3662 62.08% 0.0046 0.0071 0.0121 0.2954 0.3652 0.4764 58.93% top-kw/ LDA 0.0179 0.0179 0.0179 0.2180 0.2181 0.2175 72.33% 0.0046 0.0046 0.0046 0.2954 0.2956 0.2948 80.49%
+
+Table 13: Effect of LDA on representations in the other evaluated SMoE architectures. For both kanana-2-30b-a3b-instruct and GLM-4.7-Flash, LDA restores the increased SMoE output variance and average scale ratio, i.e., 
+
+∥SMoE output ∥/∥Residual ∥, under reduced top-k routing toward the default configuration, while improving the average routing match rate (Eq. 7). These results show the same overall tendency as observed in Qwen3-30B-A3B. 
+
+calibration dataset consistently outperforms the oth-ers. These results indicate that using a dataset from the same downstream domain does not necessarily yield better performance. This observation supports the role of calibra-tion data in LDA. The calibration dataset is not used to inject task-specific knowledge or adapt the model to a particular domain. Instead, it is used to estimate layer-wise representation statistics under different routing configurations. Therefore, even when calibration datasets differ in domain, they can provide sufficiently stable estimates of the general representation distribution of SMoE outputs. 
+
+F.2 Effect of Calibration Sample Size 
+
+We next examine the effect of the number of cali-bration samples. Table 12 compares downstream performance when varying the number of calibra-tion tokens used to estimate the layer-wise distribu-tion statistics. We use C4 as the calibration dataset and apply LDA under reduced top-k routing. Across different calibration sample sizes, the performance remains relatively stable. Increasing the number of calibration tokens does not lead to consistent performance improvements, and even a small number of calibration samples provides competitive results. This indicates that the layer-wise mean and standard deviation of SMoE outputs can be estimated sufficiently well from a small cal-ibration set. In addition, the lower performance variation across calibration sample sizes further suggests that LDA is not overly sensitive to a par-ticular calibration subset and can be applied with a small calibration cost. 
+
+G Algorithms 
+
+We provide pseudo-code descriptions of our method. Algorithm 1 describes the calibration procedure, where layer-wise distribution statistics are estimated for each top-k setting using an MoE model and a calibration dataset. Algorithm 2 de-scribes the inference procedure, where the esti-mated layer-wise statistics are applied to align SMoE outputs under reduced expert activation. 
+
+H Additional Plots 
+
+We provide additional analysis figures for Qwen3-30B-A3B. Figure 7 shows the layer-wise distribu-tions of SMoE outputs under different top-k set-tings. Figure 8 shows the corresponding distribu-tions after applying LDA. These figures provide additional evidence that reduced top-k changes the SMoE output distribution across all layers, while LDA aligns it toward the default top-k0 configura-tion. 
+
+AI Assistant Usage Statement 
+
+AI assistants were used solely for language polish-ing, grammar correction, and improving clarity of presentation. All technical content, experimental design, and analysis are entirely our own. Algorithm 1 Layer-wise Distribution Estimation  
+
+> 1:
+
+Input: calibration dataset D, SMoE model M 
+
+> 2:
+
+Output: layer-wise distribution statistics S 
+
+> 3: 4:
+
+L ← number of layers in M 
+
+> 5:
+
+k0 ← default top-k routing value of M 
+
+> 6:
+
+K ← { 1, 2, . . . , k 0} 
+
+> 7: 8:
+
+▷ Step 1: Sample calibration data  
+
+> 9:
+
+Sample a calibration mini-batch X ∼ D  
+
+> 10: 11:
+
+▷ Step 2: Estimate layer-wise distributions  
+
+> 12:
+
+H(0) ← Embed M(X) 
+
+> 13:
+
+for l = 0 , 1, . . . , L − 1 do  
+
+> 14:
+
+if SMoE ∈ Layer (l) 
+
+> M
+
+then  
+
+> 15:
+
+▷ Estimate the statistics for each top-k setting  
+
+> 16:
+
+for k ∈ K do  
+
+> 17:
+
+Y (l) 
+
+> k
+
+← SMoEOutput (l)
+
+> M
+
+(H(l); k) 
+
+> 18:
+
+μ(l) 
+
+> k
+
+← Mean token-wise 
+
+
+
+Y (l)
+
+> k
+
+
+
+▷ Per-dimension mean  
+
+> 19:
+
+σ(l) 
+
+> k
+
+← Std token-wise 
+
+
+
+Y (l)
+
+> k
+
+
+
+▷ Per-dimension standard deviation  
+
+> 20:
+
+Store {μ(l) 
+
+> k
+
+, σ (l) 
+
+> k
+
+} in S 
+
+> 21:
+
+end for  
+
+> 22:
+
+end if  
+
+> 23:
+
+▷ Propagate with default top-k0 routing  
+
+> 24:
+
+H(l+1) ← Layer (l)
+
+> M
+
+(H(l); k0) 
+
+> 25:
+
+end for  
+
+> 26: 27:
+
+Return SAlgorithm 2 Distribution-Consistent Inference  
+
+> 1:
+
+Input: input data X, distribution statistics S, SMoE model M, routing value k 
+
+> 2:
+
+Output: model output ˆX 
+
+> 3: 4:
+
+L ← number of layers in M 
+
+> 5:
+
+k0 ← default top-k routing value of M 
+
+> 6: 7:
+
+H(0) ← Embed M(X) 
+
+> 8:
+
+for l = 0 , 1, . . . , L − 1 do  
+
+> 9:
+
+▷ Propagate to the next layer  
+
+> 10:
+
+if SMoE ∈ Layer (l) 
+
+> M
+
+then  
+
+> 11:
+
+▷ Forward with top-k routing  
+
+> 12:
+
+Y (l) 
+
+> k
+
+← SMoEOutput (l)
+
+> M
+
+(H(l); k) 
+
+> 13:
+
+if k < k 0 then  
+
+> 14:
+
+▷ Apply layer-wise distribution alignment  
+
+> 15:
+
+{μ(l) 
+
+> k0
+
+, σ (l) 
+
+> k0
+
+} ← S [l][ k0] ▷ Reference statistics  
+
+> 16:
+
+{μ(l) 
+
+> k
+
+, σ (l) 
+
+> k
+
+} ← S [l][ k] ▷ Target statistics  
+
+> 17:
+
+ˆY (l) ← σ(l) 
+
+> k0
+
+⊙ Y (l) 
+
+> k
+
+− μ(l)
+
+> k
+
+σ(l) 
+
+> k
+
++ ϵ + μ(l) 
+
+> k0
+
+▷ Per-dimension correction  
+
+> 18:
+
+else  
+
+> 19:
+
+ˆY (l) ← Y (l) 
+
+> k
+> 20:
+
+end if  
+
+> 21:
+
+H(l+1) ← Layer (l)
+
+> M
+
+(H(l); k, ˆY (l)) 
+
+> 22:
+
+else  
+
+> 23:
+
+H(l+1) ← Layer (l)
+
+> M
+
+(H(l)) 
+
+> 24:
+
+end if  
+
+> 25:
+
+end for  
+
+> 26: 27:
+
+ˆX ← Output M(H(L)) 
+
+> 28:
+
+Return ˆX010 20 30 40 
+
+Layer 0 Layer 4 Layer 8 
+
+> 010 20 30 40
+
+Layer 12 Layer 16 Layer 20 
+
+> 010 20 30 40
+
+Layer 24 Layer 28 Layer 32       
+
+> −0.3 −0.2 −0.1 0.0 0.1 0.2 0.3 010 20 30 40
+
+Layer 36       
+
+> −0.3 −0.2 −0.1 0.0 0.1 0.2 0.3
+
+Layer 40       
+
+> −0.3 −0.2 −0.1 0.0 0.1 0.2 0.3
+
+Layer 44 
+
+k=1 k=2 k=4 k=6 k=8 Figure 7: Layer-wise distributions of SMoE outputs under different top-k settings before applying LDA on Qwen3-30B-A3B. We use 2,048 held-out calibration tokens and sample 100,000 values. The distributions become more dispersed under smaller k across layers, consistent with Fig. 3a. 010 20 30 40 
+
+Layer 0 Layer 4 Layer 8 
+
+> 010 20 30 40
+
+Layer 12 Layer 16 Layer 20 
+
+> 010 20 30 40
+
+Layer 24 Layer 28 Layer 32       
+
+> −0.3 −0.2 −0.1 0.0 0.1 0.2 0.3 010 20 30 40
+
+Layer 36       
+
+> −0.3 −0.2 −0.1 0.0 0.1 0.2 0.3
+
+Layer 40       
+
+> −0.3 −0.2 −0.1 0.0 0.1 0.2 0.3
+
+Layer 44 
+
+k=1 k=2 k=4 k=6 k=8 Figure 8: Layer-wise distributions of SMoE outputs under different top-k settings after applying LDA on Qwen3-30B-A3B. We use 2,048 held-out calibration tokens and sample 100,000 values. Compared with Fig. 7, the layer-wise distributions become more closely aligned with the default top-k0 setting. Artifact Description License 
+
+MMLU General knowledge and reasoning benchmark; English; auxiliary_train/dev/val/test = 99,842/285/1,531/14,042 samples. MIT License HellaSwag Commonsense reasoning benchmark; English; train/val/test = 39,905/10,042/10,003 samples. MIT License WinoGrande Commonsense coreference reasoning benchmark; English; train/val/test = 40,398/1,267/1,767 samples. CC-BY License ARC-Easy Science question answering benchmark; English; train/val/test = 2,251/570/2,376 samples. CC BY-SA 4.0 License ARC-Challenge Challenging science question answering benchmark; English; train/val/test = 1,119/299/1,172 samples. CC BY-SA 4.0 License CommonsenseQA Commonsense question answering benchmark; English; train/val/test = 9,741/1,221/1,140 samples. MIT License SciQ Science question answering benchmark; English; train/val/test = 11,679/1,000/1,000 samples. CC BY-NC 2.5 License PIQA Physical commonsense reasoning benchmark; English; train/val/test = 16,113/1,838/3,084 samples. Academic Free License v2.5 GSM8K Grade-school mathematical reasoning benchmark; English; train/test = 7,473/1,319 samples. MIT License MATH500 Competition-level mathematical reasoning benchmark; English; 500 samples. MIT License MBPP Python code generation benchmark from natural language descriptions; English/Python; train/val/test = 374/90/500 samples. CC BY 4.0 License HumanEval Python code generation benchmark; English/Python; 164 samples. MIT License IFEval Instruction-following benchmark with verifiable constraints; English; 541 samples. Apache 2.0 License Qwen3-30B-A3B Sparse MoE LLM used for evaluation. Apache 2.0 License kanana-2-30b-a3b-instruct Sparse MoE LLM used for evaluation. Kanana License Agreement GLM-4.7-Flash Sparse MoE LLM used for evaluation. MIT License lm_eval Evaluation framework for language model benchmarks. MIT License vLLM Inference framework for efficient LLM serving and evaluation. Apache 2.0 License 
+
+Table 14: Documentation of experimental artifacts. We report summary of the datasets, models, and frameworks used in our experiments, including descriptions, split sizes, and licenses.
