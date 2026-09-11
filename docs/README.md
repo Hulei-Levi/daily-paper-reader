@@ -6,26 +6,29 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-09-10
-- 运行时间：2026-09-10 21:51:36 UTC
+- 最新运行日期：2026-09-11
+- 运行时间：2026-09-11 22:07:14 UTC
 - 运行状态：成功
 - 本次总论文数：2
-- 精读区：1
-- 速读区：1
+- 精读区：0
+- 速读区：2
 
 ### 今日简报（AI）
-今日精读1篇、速读1篇，共2篇，重点关注动态稀疏MoE与多模态持续学习。最值得看的是8.0分的《Distribution-Consistent Inference for Dynamic Sparse Mixture-of-Experts》，聚焦动态稀疏MoE的分布一致性推理。普通读者可先读这篇精读，再结合速读的NeuCME了解多专家神经组合思路。
-- 详情：[/202609/10/README](/202609/10/README)
+今日日报只速读了2篇，最高分7.0，聚焦“专家混合模型在重复数据下的过拟合”与“LLM智能体的多样性技能路由”，无精读。
+最值得看的是那篇7.0分研究：数据稀缺且模型稀疏时，MoE对重复数据的过拟合更严重；次之是6.0分的多样性感知技能检索思路。
+普通读者可先读MoE那篇的摘要与实验结论，再顺带了解技能路由的多样性动机，若感兴趣可等后续精读。
+- 详情：[/202609/11/README](/202609/11/README)
 
 ### 精读区论文标签
-1. [Distribution-Consistent Inference for Dynamic Sparse Mixture-of-Experts](/202609/10/2609.09241v1-distribution-consistent-inference-for-dynamic-sparse-mixture-of-experts)  
-   标签：评分：8.0/10、query:moe-special
-   evidence：稀疏MoE推理中的动态top-k专家选择策略
+- 本次无精读推荐。
 
 ### 速读区论文标签
-1. [NeuCME: Toward Dynamic Multimodal Continual Learning via Neural Combinatorics of Multiple Experts](/202609/10/2609.07009v1-neucme-toward-dynamic-multimodal-continual-learning-via-neural-combinatorics-of-multiple-experts)  
+1. [Data Scarcity and Model Sparsity: Mixtures-of-Experts Overfit More to Repeated Data](/202609/11/2609.11917v1-data-scarcity-and-model-sparsity-mixtures-of-experts-overfit-more-to-repeated-data)  
+   标签：评分：7.0/10、query:moe-special
+   evidence：研究稀疏混合专家模型在数据重复下的表现
+2. [Beyond Top-$k$ Skill Retrieval: Diversity-Aware Skill Routing for LLM Agents](/202609/11/2609.05824v1-beyond-top-k-skill-retrieval-diversity-aware-skill-routing-for-llm-agents)  
    标签：评分：6.0/10、query:moe-special
-   evidence：多专家神经组合实现自适应融合
+   evidence：多样性感知路由减少冗余技能
 
 
 <div class="dpr-home-promo-card">
