@@ -6,35 +6,28 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-09-12
-- 运行时间：2026-09-12 20:52:05 UTC
+- 最新运行日期：2026-09-13
+- 运行时间：2026-09-13 21:26:41 UTC
 - 运行状态：成功
-- 本次总论文数：4
-- 精读区：1
-- 速读区：3
+- 本次总论文数：1
+- 精读区：0
+- 速读区：1
 
 ### 今日简报（AI）
-- 今日共生成 4 篇推荐（精读 1 篇，速读 3 篇）
-- 精读：《Epoch: Compiling Diffusion Blocks for Sparse MoE Serving》（8.0/10）
-- 速读：《MI-PEFT: Mixture-of-Experts Integrated Parameter-Efficient Fine-Tuning Protein Language Models Improves Acidophilic Proteins Classification》（7.0/10）, 《Distance-Aware Attention and Wall-Distance Expert Routing for Transformer-Based 3D Flow Prediction》（6.0/10）, 《UniStream: Multi-Expert Residual Vector Quantization for 48 kHz Causal Streaming Audio Coding》（6.0/10）
-- 这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。
-- 详情：[/202609/12/README](/202609/12/README)
+今日速读 1 篇：探讨用空间分区专家（Spatially Partitioned Experts）打破坐标式神经进化中的"中心偏置"问题，暂无精读。
+
+唯一可看点是"中心偏置"这一常见痛点的分区专家解法，但该文评分 6.0/10 属中等，结论宜作参考而非定论。
+
+普通读者可先读摘要中 central bias 的定义与专家分区结构，判断是否与自己的坐标编码/进化搜索任务相关，再决定要不要深挖。
+- 详情：[/202609/13/README](/202609/13/README)
 
 ### 精读区论文标签
-1. [Epoch: Compiling Diffusion Blocks for Sparse MoE Serving](/202609/12/2609.09748v1-epoch-compiling-diffusion-blocks-for-sparse-moe-serving)  
-   标签：评分：8.0/10、query:moe-special
-   evidence：面向稀疏MoE服务的扩散块编译与路由结构
+- 本次无精读推荐。
 
 ### 速读区论文标签
-1. [MI-PEFT: Mixture-of-Experts Integrated Parameter-Efficient Fine-Tuning Protein Language Models Improves Acidophilic Proteins Classification](/202609/12/2609.08059v1-mi-peft-mixture-of-experts-integrated-parameter-efficient-fine-tuning-protein-language-models-improves-acidophilic-proteins-classification)  
-   标签：评分：7.0/10、query:moe-special
-   evidence：将专家混合集成到蛋白质语言模型的参数高效微调
-2. [Distance-Aware Attention and Wall-Distance Expert Routing for Transformer-Based 3D Flow Prediction](/202609/12/2609.07222v1-distance-aware-attention-and-wall-distance-expert-routing-for-transformer-based-3d-flow-prediction)  
+1. [Breaking the Central Bias: Spatially Partitioned Experts for Coordinate-Based Neuroevolution](/202609/13/2609.11518v1-breaking-the-central-bias-spatially-partitioned-experts-for-coordinate-based-neuroevolution)  
    标签：评分：6.0/10、query:moe-special
-   evidence：按壁面距离进行专家路由的表面-体积混合专家
-3. [UniStream: Multi-Expert Residual Vector Quantization for 48 kHz Causal Streaming Audio Coding](/202609/12/2609.09866v1-unistream-multi-expert-residual-vector-quantization-for-48-khz-causal-streaming-audio-coding)  
-   标签：评分：6.0/10、query:moe-special
-   evidence：多专家码本由确定性Top-K路由器控制
+   evidence：受混合专家启发的空间划分专家网络
 
 
 <div class="dpr-home-promo-card">
