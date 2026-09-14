@@ -1,0 +1,692 @@
+Title: From Collaboration to Capability: Internalizing Routed LLM Experts into Compact Reasoners
+
+URL Source: https://arxiv.org/pdf/2609.12578v1
+
+Published Time: Mon, 14 Sep 2026 00:58:56 GMT
+
+Number of Pages: 20
+
+Markdown Content:
+## From Collaboration to Capability: Internalizing Routed LLM Experts into Compact Reasoners 
+
+Frank Nie 1,* , Shuyao Wang 2,* , Ethan B. Liu 1,*,† 
+
+> 1
+
+Shandong University 
+
+> 2
+
+Zhejiang University 
+
+> *
+
+Equal contribution. †Corresponding authors. 
+
+Abstract 
+
+A compact controller can coordinate stronger experts by selecting whom to consult, formu-lating requests, and integrating their responses. We study whether learning from both the con-troller’s decisions and the experts’ reasoning and code improves its generation after expert re-moval. We introduce R IVET for collaboration internalization : expert-augmented reinforce-ment learning applies a shared outcome sig-nal to controller decisions and returned expert spans, and verified trajectory internalization consolidates complete successful interactions through format-aware supervised training. The deployed controller generates reasoning, code, and interaction structure with local Python ex-ecution and no external LLM. Across seven competition-mathematics benchmarks, RIVET-1.7B and RIVET-4B achieve average accura-cies of 28 .25% and 44 .16% ; Stage II improves RIVET-4B’s accuracy after expert removal by 
+
+6.49 points, and GPQA-Diamond results pro-vide evidence of generalization to scientific reasoning. Ablations show gains from ordi-nary trajectory supervision and additional for-mat weighting, supporting the effectiveness of training on the content and structure of verified collaborations. 
+
+1 Introduction 
+
+Compact language models can extend their reason-ing through executable tools and stronger language-model experts (Feng et al., 2025; Li et al., 2025; Cheng et al., 2026; Yu et al., 2025). A controller coordinates this assistance by choosing experts, for-mulating requests, and integrating the returned con-tent. Figure 1(a) illustrates a controller counting integer right triangles with legs a, b , hypotenuse 
+
+b + 1 , and b < 100 : it requests a derivation and then code to verify the count of six. The interac-tion records both the controller’s decisions and the expert’s contributions. What if a controller could learn not only how to coordinate experts, but also (a) Expert-assisted Tool Use Controller    
+
+> Select expert and tool Answer: 6 triangles
+> Think Code
+> a² = 2b + 1 a odd, 1 < a < √201 6 candidates
+> Code Python
+> Return: 6
+> Tool Feedback
+> Capability Internalization (b) RIVET: No External LLM Controller
+> Answer: 6 triangles
+> a² = 2b + 1
+> a odd,
+> 1 < a < √201 6 candidates Code
+> Python
+> Return: 6
+
+Figure 1: From coordinating experts to generating their contributions. (a) The controller requests expert reason-ing and code; Python verifies six valid triangles. (b) Schematic of internalized inference: the controller gen-erates reasoning and code with local Python and no external LLM. Training uses both controller decisions and expert content; Appendix A.5 gives the source tra-jectory and its conversion into supervision. 
+
+how to perform the reasoning it delegates to them? 
+
+Figure 1(b) illustrates this goal, with the controller generating reasoning and code while local Python executes the code. Existing approaches learn reasoning content and problem-solving behavior through several forms of supervision. Model routing and multi-agent or-chestration select and combine LLMs for inference-time quality or cost (Ong et al., 2024; Wang et al., 2024; Zhang et al., 2025; Su et al., 2025). Agent Distillation transfers reasoning and tool-use behav-ior through teacher-generated trajectories (Kang et al., 2025). On-policy distillation provides teacher guidance at student-visited states (Agarwal et al., 2024; Tan et al., 2026), with SOD adapting its strength across tool-use steps (Zhong et al., 2026). Our focus is the interaction between a controller and the heterogeneous experts it requests: how to train on both the decisions that elicit assistance and the returned content within the same collaborative history. A collaborative trajectory contains two con-arXiv:2609.12578v1 [cs.AI] 11 Sep 2026 nected sources of supervision. Its control deci-sions specify the expert, request, and interaction point; its expert content supplies the reasoning and code returned in that context. Our key idea is to train on both sides of the interaction, preserving the sequence that connects requested assistance to subsequent decisions. We call this collabora-tion internalization , and evaluate whether it im-proves generation with external experts removed and local Python retained. This evaluation com-plements collaborative accuracy: our Stage-I 4B controller reaches 46 .22% average mathematics accuracy with experts and 37 .67% without them (Tables 1 and 3). Learning from control decisions and expert con-tent presents two challenges. First, updating both sides of collaboration requires assigning a learn-ing signal to externally generated spans as well as controller decisions. Updating only controller tokens leaves returned expert content outside the direct training objective. Second, consolidating their sequential relationship requires training on requests, responses, and subsequent decisions as a complete interaction. Supervision must cover both reasoning content and the structure that supports code execution, while distinguishing content the controller should generate from observations that the environment must supply. We introduce RIVET (Routing and 
+
+Internalization via Verified Expert Trajectories) to train on the control decisions and expert content of collaborative interactions. Stage I, expert-augmented GRPO , applies a shared outcome advantage to controller decisions and the expert reasoning and code they elicit (Section 3.3). Stage II, verified trajectory internalization , further consolidates complete, correct, protocol-valid collaborations through supervised training with ad-ditional weight on tool-call structure (Section 3.4). In the triangle example, prediction targets include the requests and subsequent controller continuation as well as the expert’s derivation and verification code; actual execution results remain environment observations. Appendix A.5 illustrates this conversion. At deployment, one model generates the interaction sequence, with pauses for local Python execution. We evaluate RIVET at two controller scales on seven competition-mathematics benchmarks and test generalization to scientific reasoning on GPQA-Diamond. Our contributions are: • We introduce RIVET, a framework that trains a controller on both the decisions that organize expert assistance and the content experts pro-vide, targeting generation after expert removal (Section 3). • We connect outcome-weighted updates on controller and expert spans with format-aware consolidation of complete verified interac-tions, preserving requests, expert responses, and subsequent decisions as prediction targets while retaining execution feedback as context (Sections 3.3 and 3.4). • We quantify the gap between assisted and in-dependent generation and show a 6.49 -point Stage-II gain in RIVET-4B’s mathematics ac-curacy after expert removal. Ablations mea-sure the gains from trajectory supervision and format weighting, and compare the complete pipeline under different collaboration policies (Section 4). 
+
+2 Related Work 
+
+Tool-integrated reasoning and agentic reinforce-ment learning. Tool-integrated reasoning aug-ments language-model reasoning with executable tools and iterative feedback. ReTool uses cold-start SFT followed by outcome-based RL for code-interpreter use (Feng et al., 2025); ToRL learns multi-turn code use directly from final-answer re-wards (Li et al., 2025); and TRICE combines tool-integrated SFT and RL (Cheng et al., 2026). DemyAgent emphasizes end-to-end trajectories and exploration-oriented optimization (Yu et al., 2025), while ARPO and AEPO modify sampling, advantage attribution, or entropy control (Dong et al., 2025c,a). Recent studies further analyze collapse and unnecessary tool use in long-horizon agents (Hao et al., 2026; Chen et al., 2026). This line primarily studies a policy interacting with func-tional tools; RIVET additionally treats other lan-guage models as selectable sources of task-solving supervision. 
+
+Model routing and training-time guidance. 
+
+Model routers select among stronger and weaker LLMs (Ong et al., 2024), and multi-agent systems aggregate responses from several models (Wang et al., 2024). Router-R1 learns multi-round model invocation and aggregation through RL while masking routed-model outputs from its training loss (Zhang et al., 2025); ToolOrchestra trains a lightweight model to coordinate heterogeneous models and tools using outcome and efficiency rewards (Su et al., 2025). Several methods pro-vide denser training-time guidance: PACT uses fixed privileged traces (Du et al., 2026), OPID ex-tracts hindsight skills from completed policy tra-jectories (Yang et al., 2026), and ATOD combines teacher distributions with reward optimization (Tan et al., 2026). RIVET includes the expert responses requested during collaborative solving in the con-troller’s update, then consolidates verified interac-tions for deployment without those experts. 
+
+Trajectory construction and distillation. Tool-Star synthesizes multi-tool trajectories through tool-integrated prompting and filtering (Dong et al., 2025b); AgentMath converts natural-language so-lutions into executable tool-augmented trajecto-ries (Luo et al., 2026a); and COVERT constructs tool-use environments with multi-level verifica-tion (Xu et al., 2026). Tool-R0 co-evolves task generation and tool-using policies through self-play (Acikgoz et al., 2026). Agent Distillation transfers reasoning, retrieval, and code-use trajecto-ries from a large teacher agent (Kang et al., 2025), while Knowledge Purification selects or consoli-dates rationales from multiple teachers (Jin et al., 2026). QR-Distill routes filtered reasoning paths to students according to their learning states (Lei et al., 2025). On-policy distillation trains on student-generated sequences using teacher feedback (Agar-wal et al., 2024); SOD adapts that guidance across tool-use steps according to student–teacher diver-gence (Zhong et al., 2026). RIVET uses responses elicited by a controller’s requests to heterogeneous experts in outcome-weighted updates and subse-quent verified-trajectory training. AgentArk distills reasoning processes from ho-mogeneous multi-agent debates (Luo et al., 2026b), whereas RIVET trains on controller-requested het-erogeneous expert interactions with executable tools, including both requesting decisions and re-turned expert content. 
+
+3 Method 
+
+3.1 Overview 
+
+RIVET trains on two connected parts of a collabo-rative trajectory: controller decisions that organize expert assistance and expert content returned in re-sponse (Figure 2). Control decisions include expert selection, requests, and continuation or termina-tion; expert content comprises the returned reason-ing and code. Stage I uses the trajectory outcome to update the controller on both parts. Stage II freezes the learned collaboration policy to collect verified successful interactions, then consolidates their control decisions and expert content in con-text through format-aware supervised training on the complete sequences. At deployment, a single controller generates the reasoning, code, and inter-action structure; actual Python execution results remain environment observations. 
+
+3.2 Problem Formulation 
+
+Given a problem x with reference answer y⋆, let πθ
+
+denote a controller initialized from a base model 
+
+M0. During collaboration, the controller can rea-son independently or invoke a tool from a unified set U backed by frozen experts E = {Ek}Kk=1 .Each expert exposes two tools: a thinking tool that returns reasoning, and a Python tool that requests expert-generated code, executes it in a sandbox, and returns execution feedback. At interaction step 
+
+s, the controller selects its next action from the history hs:        
+
+> as∼πθ(· | hs), a s∈ { reason ,call( u, q s),finish },(1)
+
+where u ∈ U identifies the selected tool and qs is the instruction generated by the controller. Tool outputs are appended to the history before the con-troller continues. The trajectory ends when the con-troller returns a final answer. The controller’s his-tory hs conditions its choice of tool and request; the selected pair (u, q s) determines the expert source and requested content of the resulting supervision. 
+
+3.3 Stage I: Expert Augmented GRPO 
+
+Stage I learns from expert content requested dur-ing the controller’s own solving process. Selecting an expert, forming a query, and choosing when to continue or stop determine both the available as-sistance and the responses encountered in training. Expert-augmented GRPO includes those responses in the controller’s update by assigning controller and expert spans the same trajectory-outcome ad-vantage. The reward optimizes solution correct-ness; it does not directly measure a response’s value for later internalization. 
+
+Outcome-based reward. Following Li et al. (2025), we reward final-answer correctness and as-sign no intrinsic bonus to tool calls. Calls therefore receive credit through the outcome of the complete Stage I: Expert-augmented GRPO 
+
+> Learn from controller decisions and returned expert content
+
+Stage II: Verified trajectory internalization 
+
+> Consolidate successful collaborations into the controller
+> Input Problem x
+
+Controller πθ             
+
+> Reason / route / finish Initialized from M0
+> Tool Call + Query Reasoning/Code Feedback
+> Frozen Experts
+> Qwen3.5-9B Qwen3-8B
+> Qwen2.5-Coder-7B
+> Thinking Python
+> Online Collaborative Trajectory
+> Reason + Call Resoning Call Code Execution Answer
+> Controller Tokens Expert Tokens Masked Tokens
+> One outcome advantage for both token sources
+> mtrain =mctrl +mexp |Optimize Controller Only
+> Ri →
+> Âi
+> CRL
+> Freeze CRL from Stage I
+> Collect Collaborative Trajectories With the same external experts
+> Verify & Filter
+> Correct Answers Complete Traces Valid Tool Use No Degeneration
+
+Verified Trajectories 
+
+�ver 
+
+Format-Aware SFT LII =L CE +λfmt Lfmt 
+
+> Initialize from CRL
+
+Deployment   
+
+> No External LLMs Problem
+> Controller Cint
+> Generates Reasoning & Code Code Execution
+> Python Sandbox
+> Final Answer
+> Internalized Controller
+> Human Verification
+
+Complete Interaction Supervision Figure 2: Training overview of RIVET. Stage I trains the controller on its decisions and returned expert reasoning and code using a shared outcome signal. Stage II consolidates verified successful interactions through format-aware supervised fine-tuning. The deployed controller generates its own reasoning and code, with local Python execution and no external LLMs. 
+
+trajectory. For each problem, we sample G trajec-tories {τi}Gi=1 and assign the following reward to the final answer ˆyi of trajectory τi:
+
+Ri =
+
+(
+
++1 , Verify(ˆ yi, y ⋆) = 1 ,
+
+−1, otherwise . (2) 
+
+We use Qwen’s native tool-calling schema and rely on the base model’s pretrained format-following capability, without a separate format re-ward. 
+
+Expert-augmented GRPO. Sparse final-answer rewards provide limited guidance over long collab-orative trajectories, making exploration vulnerable to premature policy entropy collapse (Yu et al., 2025; Dong et al., 2025a). RIVET therefore in-cludes returned expert reasoning and code in the update. Let yi,t be token t in the serialized trajec-tory τi, with prefix hi,t = ( xi, y i,<t ). The disjoint masks mctrl 
+
+i,t and mexp 
+
+i,t select controller-generated tokens and external-expert reasoning or code, re-spectively. Actual Python execution outputs are environment observations and are assigned zero in both masks. We form the group-relative advantage 
+
+Ai = Ri − μG
+
+σG + ϵA
+
+, (3) 
+
+where μG and σG are the mean and standard deviation of the G rewards for the same problem. The scalar Ai is broadcast to every trainable token in τi. Let θold denote the controller before the current update. After the complete collaborative trajectory has been collected, we recompute its token probabilities by teacher forcing under this frozen pre-update controller and define 
+
+ρi,t (θ) = πθ (yi,t | hi,t )
+
+πθold (yi,t | hi,t ) . (4) 
+
+For s(ρ, A ) = min( ρA, clip( ρ, 1 − ϵ, 1 + ϵ)A),the dual-clipped surrogate is 
+
+g(ρ, A ) = 
+
+(
+
+s(ρ, A ), A ≥ 0,
+
+max( s(ρ, A ), cA ) , A < 0. (5) 
+
+With mtrain 
+
+i,t = mctrl 
+
+i,t + mexp 
+
+i,t and Ntrain =
+
+P
+
+i,t mtrain 
+
+i,t , Stage I minimizes 
+
+LI(θ) = − 1
+
+Ntrain 
+
+X
+
+> i,t
+
+mtrain  
+
+> i,t
+
+g(ρi,t (θ), A i) . (6) 
+
+We use token-mean normalization without an additional KL term. For an expert-origin token, the denominator in Eq. (4) is its teacher-forced likeli-hood under the pre-update controller , rather than under the frozen expert that produced it. The re-sulting term performs advantage-weighted online distillation with the same proximal ratio used for controller tokens; it is not an importance-sampling estimate for the expert policy. Controller-token updates learn reasoning, routing, refinement, and termination, while expert-token updates transfer reasoning and code observed at controller-visited states. We denote the resulting controller by 
+
+CRL = πθRL .
+
+3.4 Stage II: Verified Trajectory Internalization 
+
+Stage II consolidates complete successful collabo-rations to train reasoning, code, and tool-call gen-eration after expert removal. Stage I already up-dates the controller on expert spans, while receiving those spans from external models during rollouts and learning from both successful and unsuccessful trajectories. Stage II freezes the learned policy to collect successful interactions and supervises their verified sequences, retaining Python execution out-puts as environment context. 
+
+Verified trajectory construction. We freeze 
+
+CRL and generate eight collaborative trajectories per training problem using the same tool set. We retain only complete, protocol-compliant trajecto-ries with correct, parseable final answers, valid Python execution when applicable, and no severe repetition, malformed text, or degenerate call loops. Both tool-assisted and independently solved tra-jectories are eligible. Following prior work that penalizes excessive tool calls (Chen et al., 2026), we prioritize candidates with fewer calls when mul-tiple trajectories satisfy all quality criteria. After deduplication and manual review, we retain at most two trajectories per problem. The resulting inter-nalization datasets Dver , generated entirely from the training split, contain 12,000 trajectories for Qwen3-4B-Instruct and 10,000 for Qwen3-1.7B. 
+
+Training the controller to generate complete interactions. We preserve Qwen’s native tool-call serialization and canonicalize missing or free-form instructions using fixed tool-specific tem-plates. The supervised sequence includes the con-troller’s requests, the expert reasoning and code they elicited, and the final answer as prediction targets. For the resulting sequence z1: T , msft  
+
+> t
+
+= 1 
+
+for controller-generated spans, tool-call structure, expert reasoning or code, and the final answer, whereas problem tokens and Python execution out-puts have msft  
+
+> t
+
+= 0 . In the triangle example, this places both the derivation and the verification pro-gram in the controller’s target sequence. At inter-nalized inference, the controller generates these kinds of content in the same decoding stream, paus-ing for local Python execution when it generates code. Appendix A.5 provides the exact templates, token ownership, execution interface, and complete before–after training example. 
+
+Format-aware supervised internalization. 
+
+Starting from CRL , we fine-tune the controller on the canonicalized Dver . Let Nsft = PTt=1 msft  
+
+> t
+
+.The masked next-token cross-entropy loss is          
+
+> LCE =−1
+> Nsft
+> TX
+> t=1
+> msft
+> tlog πθ(zt|x, z <t ).(7)
+
+We place additional weight on the format to-kens that specify each native tool call. Let Ωfmt ⊆{t : msft  
+
+> t
+
+= 1 } denote their positions, including tool-call delimiters, tool identifiers, and required argument fields. The format loss is         
+
+> Lfmt =−1
+> |Ωfmt |
+> X
+> t∈Ωfmt
+> log πθ(zt|x, z <t ).(8)
+
+For trajectories without tool calls, we set Lfmt =0. This term supervises the structure of calls present in verified trajectories; it supplies no sepa-rate reward for choosing to invoke a tool or for call frequency. The combined loss is      
+
+> LII =LCE +λfmt Lfmt ,(9)
+
+where λfmt controls the additional weight on tool-call structure. Training with Eq. (9) yields the internalized controller Cint = πθint . Its supervision includes the reasoning, code, and interaction struc-ture of verified collaborations as well as their final answers. 
+
+Inference modes. We evaluate R IVET in two set-tings. In collaborative mode , the Stage-I controller 
+
+CRL uses the expert-backed tools and provides an expert-assisted reference. In internalized mode , the Stage-II controller Cint invokes no external LLM; a local Python sandbox executes code generated by the controller. Internalized mode is the primary deployment setting. For the expert-removal diag-nostic, we also evaluate CRL with external experts disabled and local Python available. Comparing this model with Cint measures the change after Stage II under the same deployment interface. 4 Experiments 
+
+Our evaluation tests the effectiveness of training on controller decisions and expert content for gen-eration after expert removal. Main results estab-lish performance on competition mathematics and scientific reasoning. Ablations then address three questions: how much accuracy is lost when experts are removed, which Stage-II training choices im-prove performance under that interface, and how the collaboration policy affects the final two-stage model. Retention/recovery diagnostics characterize changes in solved instances, while routing and call-budget analyses describe control behavior during expert-assisted inference. 
+
+4.1 Experiment Setup Datasets and Metrics. We train on the ToRL dataset (Li et al., 2025). Following Cheng et al. (2026); Yu et al. (2025), we evaluate seven mathe-matics benchmarks: AIME2024–2026 (Zhang and Math-AI, 2024, 2025, 2026), HMMT2025 (Dekon-inck et al., 2026), BeyondAIME (Seed et al., 2025), IMO-AnswerBench (Luong et al., 2025), and APEX2025 (Dekoninck et al., 2026). We ad-ditionally use GPQA-Diamond to test whether the learned capability generalizes beyond competition mathematics to scientific reasoning (Rein et al., 2023). Accuracy is the sole task-performance met-ric. We report Mean@8 for AIME2024–2026 and HMMT2025, and Mean@16 for APEX2025. 
+
+Baselines. We group baselines by tool avail-ability at inference. Tool-free reasoning mod-els include Qwen3-1.7B, Qwen3-4B-Instruct, and Qwen3-14B (Yang et al., 2025); Qwen3.5-4B (Qwen Team, 2026); and DeepSeek-R1-Distill-Qwen-14B (DPSK-14B) (Guo et al., 2025). We also construct Distillation-1.7B and Distillation-4B from correct Qwen3.5-9B solutions to RIVET’s training problems, and train OPD-1.7B through on-policy distillation (Agarwal et al., 2024) from Qwen3-8B to Qwen3-1.7B in thinking mode with-out tools. Tool-integrated reasoning agents use execution or retrieval feedback. They include Tool-Star-3B (Dong et al., 2025b), TRICE-4B (Cheng et al., 2026), DemyAgent-4B (Yu et al., 2025), ToRL-7B (Li et al., 2025), ARPO-3B and ARPO-8B (Dong et al., 2025c), AEPO-8B (Dong et al., 2025a), Agent Distillation-7B (Kang et al., 2025), SOD-1.7B and its GRPO-trained teacher (SOD-Teacher-4B) (Zhong et al., 2026), and ReTool-32B (Feng et al., 2025). We additionally con-struct Tool-Distillation-1.7B and Tool-Distillation-4B from verified trajectories independently gen-erated by Qwen3.5-9B with access to a Python tool on the same training problems. We also train Tool-OPD-1.7B through on-policy distillation in non-thinking mode with access to a Python tool. RIVET’s internalized mode uses local Python with no external LLM; the + External Experts rows re-port assisted-inference references. Appendix A.2 details the baseline configurations. 
+
+Training Details. We train Qwen3-1.7B and Qwen3-4B-Instruct using veRL (Sheng et al., 2024) on NVIDIA A800 GPUs. Stage I uses three frozen experts: Qwen3.5-9B, Qwen3-8B, and Qwen2.5-Coder-7B-Instruct. Stage II uses two SFT epochs. The training setup and hyperparameters for both stages are provided in Appendix A.3. 
+
+4.2 Main Results Internalized performance on mathematics and scientific reasoning. RIVET-1.7B and RIVET-4B lead their respective model-size groups on com-petition mathematics, with average accuracies of 28.25% and 44.16% (Table 1). RIVET-4B also scores higher than substantially larger models, including ReTool-32B. On GPQA-Diamond (Ta-ble 2), RIVET-1.7B ranks first in the smaller-model group, while RIVET-4B ties AEPO-8B for first place in the larger-model group. Both RIVET mod-els produce these results with local Python and no external LLM, providing evidence that the learned capability generalizes to scientific reasoning. 
+
+Improvements over offline and on-policy distil-lation. At both model sizes, R IVET scores higher than the offline Distillation and Tool-Distillation baselines on the mathematics average and GPQA-Diamond. At 1.7B, it also scores higher than OPD, Tool-OPD, and the SOD student on both measures. SOD-1.7B leads on AIME 2024, while RIVET-1.7B has the higher mathematics average. These results compare the complete RIVET pipeline with the evaluated distillation configurations; the ab-lations below examine Stage-II training and the routing policies that produce its initialization and trajectories. 
+
+4.3 Ablation Study Expert removal exposes a gap that Stage II re-duces. The Stage-I controller reaches 46 .22% 
+
+with experts (Table 1) and 37 .67% when they are disabled (Table 3), an 8.55 -point gap. Stage II Table 1: Main results on math benchmarks. Bold and underlined values denote the best and second-best results. Expert-assisted variants are references excluded from the ranking. SOD-Teacher-4B denotes the GRPO-trained teacher released with SOD. 
+
+Method Tool AIME 2024 AIME 2025 AIME 2026 HMMT 2025 Beyond AIME IMO Answer APEX 2025 Avg. 
+
+Models with 1.7–3B Parameters 
+
+Qwen3-1.7B (Nothinking) × 10.42 8.33 6.67 3.33 5.00 10.00 0.00 6.25 
+
+Qwen3-1.7B (Thinking) × 37.50 33.33 34.58 19.58 15.00 17.25 0.00 22.46 
+
+Distillation-1.7B × 17.08 15.42 14.58 10.83 10.00 14.50 0.52 11.85 
+
+OPD-1.7B × 42.50 38.33 37.08 22.08 16.00 17.25 0.52 24.82 
+
+Tool-Distillation-1.7B ✓ 25.83 18.75 17.08 16.25 12.00 15.75 0.52 15.17 
+
+Tool-OPD-1.7B ✓ 37.08 34.17 32.92 19.17 14.00 16.50 0.52 22.05 
+
+SOD-1.7B ✓ 47.08 40.42 40.83 23.33 16.00 20.25 0.52 26.92 
+
+Tool-Star-3B ✓ 17.92 12.50 13.75 10.42 6.00 10.50 0.52 10.23 
+
+ARPO-3B ✓ 18.75 19.17 23.33 10.83 5.00 11.75 2.08 12.99 
+
+RIVET-1.7B ✓ 46.25 42.08 43.75 25.42 19.00 20.75 0.52 28.25 
+
++ External Experts ✓ 55.83 50.42 52.92 33.75 27.00 31.50 2.60 36.29 
+
+Models with 4–32B Parameters 
+
+Qwen3-4B-Instruct × 56.25 45.42 52.50 29.17 28.00 35.25 0.52 35.30 
+
+Qwen3.5-4B (Nothinking) × 67.92 48.75 56.25 38.33 35.00 33.00 0.52 39.97 
+
+Distillation-4B × 61.67 49.58 56.25 33.75 29.00 35.50 0.52 38.04 
+
+Qwen3-14B (Thinking) × 67.92 61.25 60.00 39.58 34.00 31.75 0.00 42.07 
+
+DPSK-14B × 65.83 47.08 56.67 30.00 32.00 29.25 0.00 37.26 
+
+Tool-Distillation-4B ✓ 62.08 52.92 57.50 36.25 31.00 35.25 0.52 39.36 
+
+SOD-Teacher-4B ✓ 67.08 58.33 59.58 37.92 35.00 33.50 1.56 41.85 
+
+TRICE-4B ✓ 60.00 58.33 56.25 40.42 27.00 32.25 1.56 39.40 
+
+DemyAgent-4B ✓ 66.25 62.50 58.33 40.83 29.00 35.50 1.56 42.00 
+
+Agent Distillation-7B ✓ 16.25 12.92 12.08 11.25 10.00 13.75 0.00 10.89 
+
+ToRL-7B ✓ 40.00 27.92 26.67 17.08 11.00 17.75 0.00 20.06 
+
+ARPO-8B ✓ 30.42 23.75 19.17 20.83 10.00 13.25 0.00 16.77 
+
+AEPO-8B ✓ 40.00 21.25 19.58 17.92 12.00 18.25 1.04 18.58 
+
+ReTool-32B ✓ 58.33 45.42 48.75 37.50 23.00 26.00 3.13 34.59 
+
+RIVET-4B ✓ 68.75 61.25 61.67 42.08 35.00 37.75 2.60 44.16 
+
++ External Experts ✓ 70.83 62.92 63.33 44.58 39.00 39.25 3.65 46.22 
+
+raises accuracy under the latter deployment inter-face to 44 .16% , a 6.49 -point improvement with-out external LLMs. Supervised internalization thus improves performance beyond the expert-span training already included in collaborative RL. A variant trained without external experts through-out the pipeline obtains 38 .16% , or 6.00 points below RIVET, with the same self-reasoning and local-Python interface. The next ablation examines how trajectory training and the Stage-II objective contribute to the improvement. 
+
+Trajectory SFT and format weighting both im-prove post-removal accuracy. Ordinary SFT on verified trajectories ( λfmt = 0 ) raises accuracy from 37 .67% to 40 .90% , a 3.23 -point gain (Ta-bles 3 and 4). Adding format weight λfmt = 0 .5
+
+raises it to 44 .16% , a further 3.26 points. Stronger weighting ( λfmt = 1 .0) obtains 42 .64% . These sequential gains show that ordinary cross-entropy training on complete successful interactions im-proves accuracy after expert removal, with addi-tional gains from emphasizing tool-call structure. We use λfmt = 0 .5 in the remaining experiments. 
+
+Expert-span updates maintain higher controller entropy in the observed run. Figure 3 compares the full objective in Eq. (6) with a controller-token-only variant, mtrain = mctrl . Both curves report controller-policy entropy. Over the displayed in-terval, the full objective maintains higher entropy, while entropy in the controller-only variant con-tinues to decline. The controller-only run did not complete Stage I; no final Stage-I or Stage-II ac-curacy is reported. This comparison characterizes an optimization difference associated with expert-span updates, without isolating their effect on final task accuracy. 
+
+Collaboration policy affects performance after internalization. We compare RIVET-4B with variants that use only Qwen3.5-9B or select ex-Table 2: Results on GPQA-Diamond. SOD-Teacher-4B is SOD’s GRPO-trained teacher; expert-assisted rows are references excluded from the ranking. 
+
+Method Tool GPQA Diamond 
+
+Models with 1.7–3B Parameters 
+
+Qwen3-1.7B (Nothinking) × 27.78 
+
+Qwen3-1.7B (Thinking) × 36.87 
+
+Distillation-1.7B × 30.81 
+
+OPD-1.7B × 39.90 
+
+Tool-Distillation-1.7B ✓ 35.86 
+
+Tool-OPD-1.7B ✓ 37.37 
+
+SOD-1.7B ✓ 39.90 
+
+Tool-Star-3B ✓ 27.78 
+
+ARPO-3B ✓ 22.73 
+
+RIVET-1.7B ✓ 44.95 
+
++ External Experts ✓ 54.04 
+
+Models with 4–32B Parameters 
+
+Qwen3-4B-Instruct × 43.94 
+
+Distillation-4B × 42.42 
+
+Qwen3-14B (Thinking) × 59.09 
+
+DPSK-14B × 55.05 
+
+Tool-Distillation-4B ✓ 43.94 
+
+SOD-Teacher-4B ✓ 57.07 
+
+TRICE-4B ✓ 46.46 
+
+DemyAgent-4B ✓ 54.55 
+
+ARPO-8B ✓ 55.56 
+
+AEPO-8B ✓ 61.62 
+
+ReTool-32B ✓ 46.97 
+
+RIVET-4B ✓ 61.62 
+
++ External Experts ✓ 67.68 
+
+Table 3: Stage II improves RIVET-4B’s accuracy after expert removal. All rows use local Python without ex-ternal LLMs.                          
+
+> Method AIME 2024 AIME 2025 AIME 2026 HMMT 2025 Beyond AIME IMO Answer APEX 2025 Avg.
+> RIVET-4B 68.75 61.25 61.67 42.08 35.00 37.75 2.60 44.16
+> Stage I Remove Experts 61.25 47.08 55.42 32.92 30.00 36.00 1.04 37.67 Training w/o Experts 59.58 50.42 54.58 33.75 28.00 39.75 1.04 38.16
+
+perts randomly (Table 5). Each starts Stage II from its own Stage-I checkpoint and trains on 12,000 verified trajectories with the same SFT hyperpa-rameters. Learned routing gives the highest col-laborative average and leads to 44 .16% after inter-nalization, compared with 42 .08% for Qwen3.5-9B-only routing and 39 .03% for random selection. The advantage persists after expert removal in this comparison of complete two-stage variants, where routing affects both the Stage-II initialization and its training trajectories. Appendix A.4 details the protocol. 
+
+Table 4: Moderate format weighting improves on ordi-nary Stage-II SFT ( λfmt = 0 ) for Qwen3-4B-Instruct.                               
+
+> λfmt
+> AIME 24 AIME 25 AIME 26 HMMT 25 Beyond AIME IMO Answer APEX 25 Avg.
+> 1.066.25 57.08 60.42 39.17 37.00 36.50 2.08 42.64
+> 0.568.75 61.25 61.67 42.08 35.00 37.75 2.60 44.16
+> 0.064.58 55.83 59.17 37.92 33.00 34.25 1.56 40.90 020 40 60 80 100
+> Training Step
+> 0.04 0.08 0.12 0.16 0.20
+> Actor Entropy Training Token Entropy
+> With Expert Loss Without Expert Loss
+> Faint lines: per-step values; bold lines: 5-step trailing mean.
+
+Figure 3: Controller entropy is higher with expert-span updates during the early Stage I steps shown. Bold curves show the five-step moving average, while faint curves show per-step values. 
+
+4.4 Analysis Experiments 
+
+We first examine which successes survive expert re-moval, then characterize the expert content elicited by the collaboration policy through routing distri-butions and call-budget analysis. 
+
+Internalization preserves existing successes and recovers assisted ones. Table 6 compares the same three model states introduced above: Stage I with experts, Stage I without experts, and the inter-nalized Stage-II controller. Retention is the percent-age of cases solved without experts before Stage II that remain correct afterward. Internalization is the percentage solved by Stage II among cases that Stage I solves with experts but fails without them. Across the reported task groups, RIVET-4B retains 74.68–84.55% of independent successes and recov-ers 46.43–55.56% of expert-rescued cases. These rates measure instance-level preservation and re-covery on different conditioning sets, rather than the aggregate accuracy differences in the ablation study. 
+
+Expert and tool choices vary across tasks. 
+
+The Stage-I RIVET-4B controller exhibits dif-ferent routing distributions across benchmarks in collaborative mode. Figure 4(a) shows a higher share of code-expert calls on AIME tasks, greater use of Qwen3-8B on BeyondAIME, and near-exclusive use of Qwen3.5-9B on GPQA-Table 5: Effect of Stage-I expert selection on the complete two-stage pipeline with Qwen3-4B-Instruct. Stage-I performance is evaluated with external experts, whereas Stage-II performance is evaluated without them.                                                       
+
+> Method Evaluation AIME 2024 AIME 2025 AIME 2026 HMMT 2025 Beyond AIME IMO Answer APEX 2025 Avg.
+> RIVET-4B Stage I (collaborative) 70.83 62.92 63.33 44.58 39.00 39.25 3.65 46.22
+> Stage II (internalized) 68.75 61.25 61.67 42.08 35.00 37.75 2.60 44.16
+> Qwen3.5-9B Only Stage I (collaborative) 71.25 59.58 60.42 41.25 39.00 36.75 2.60 44.41 Stage II (internalized) 69.58 57.08 57.92 37.92 36.00 34.00 2.08 42.08 Random Selection Stage I (collaborative) 63.75 56.25 58.75 39.58 34.00 35.50 3.13 41.57 Stage II (internalized) 61.25 54.58 55.83 36.25 30.00 33.25 2.08 39.03
+
+Figure 4: Routing behavior of the Stage-I controller when interacting with external experts. (a) Distribution of external expert calls across the three heterogeneous experts. (b) Distribution of thinking and Python tool calls. (c) Number of tool calls per trajectory; values above the bars report the mean number of calls. Table 6: Retention and internalization rates of RIVET-4B. 
+
+Benchmark Retention Rate Internalization Rate AIME Family 81.17 53.01 HMMT 2025 74.68 46.43 BeyondAIME 80.00 50.00 GPQA-Diamond 84.55 55.56 
+
+Diamond. Figure 4(b) shows a larger Python share on competition-mathematics tasks than on the scientific-reasoning benchmark. Figure 4(c) shows task-dependent call counts, averaging fewer than two per trajectory on each benchmark despite a maximum budget of four. These distributions char-acterize the expert reasoning and code encountered during collaboration; the routing ablation measures performance of the resulting two-stage variants. 
+
+The marginal benefit of expert calls depends on the task. We vary the maximum number of external-expert calls while holding all other infer-ence settings fixed. Figure 5 shows that allow-ing one call produces most of the gain on GPQA-Diamond, with smaller improvements at higher budgets. The AIME family continues to bene-fit from additional calls across the tested budgets. 0 1 2 3 4  
+
+> Maximum Expert-Call Budget
+> 52.5 55.0 57.5 60.0 62.5 65.0 67.5 70.0
+> Accuracy (%)
+> 54.58 58.33 62.92 64.58 65.69 55.56 65.66 66.16 67.17 67.68
+> AIME Family GPQA-Diamond
+
+Figure 5: Accuracy of RIVET-4B under different maxi-mum external expert call budgets. 
+
+Thus, expert access improves accuracy in both task groups, but the benefit of a larger call budget differs between them. Together with the routing distribu-tions, this analysis characterizes how the controller acquires assistance before internalization. 
+
+5 Conclusion 
+
+RIVET trains a controller on both the decisions that organize expert assistance and the reasoning and code experts provide. Expert-augmented GRPO updates controller and expert spans using a shared outcome signal; verified trajectory internalization further consolidates their sequential relationship through format-aware supervised training. RIVET-4B reaches 44 .16% mathematics accuracy with lo-cal Python and no external LLMs, a 6.49 -point improvement over its Stage-I checkpoint under the same deployment interface. Ablations show gains from ordinary trajectory supervision and additional format weighting, while the routing comparison measures the effect of collaboration policy on the complete two-stage pipeline. GPQA-Diamond pro-vides evidence of generalization to scientific rea-soning. These results support training on complete collaborations to extend a controller from coordi-nating expert assistance to generating reasoning and code itself. 
+
+Limitations 
+
+Our evaluation covers two Qwen-based controller scales and three frozen experts. The deploy-ment setting is external-LLM-free but retains lo-cal Python, so the results concern tool-integrated reasoning. Expert calls add training cost; we re-port call counts but do not quantify total token cost or the deployment volume at which internal-ization becomes cost-effective. The expert-span ablation characterizes optimization behavior in one run, while the strong dependence on Stage-II for-mat weighting leaves the relative contributions of semantic learning and interface supervision unre-solved. Accuracy is the sole task-performance met-ric. Establishing broader generality requires addi-tional model families, expert pools, domains, and random seeds. References 
+
+Emre Can Acikgoz, Cheng Qian, Jonas Hübotter, Heng Ji, Dilek Hakkani-Tür, and Gokhan Tur. 2026. Tool-r0: Self-evolving llm agents for tool-learning from zero data. Preprint , arXiv:2602.21320. Rishabh Agarwal, Nino Vieillard, Yongchao Zhou, Pi-otr Stanczyk, Sabela Ramos, Matthieu Geist, and Olivier Bachem. 2024. On-policy distillation of lan-guage models: Learning from self-generated mis-takes. Preprint , arXiv:2306.13649. Liuji Chen, Dianxing Tang, Xing Shi, Dingshuo Chen, Qiang Liu, Shu Wu, and Liang Wang. 2026. Learning when not to act: Mitigating tool abuse in agentic reinforcement learning. Preprint , arXiv:2606.02132. Qianjia Cheng, Yuchen Zhang, Zhilin Wang, Yuxin Zuo, Shunkai Zhang, Yuchen Fan, Yu Qiao, Bowen Zhou, Ning Ding, Yu Cheng, Yun Luo, and Ganqu Cui. 2026. Teaching thinking models to reason with tools: A full-pipeline recipe for tool-integrated reasoning. 
+
+Preprint , arXiv:2605.06326. Jasper Dekoninck, Nikola Jovanovi´ c, Tim Gehrunger, Kári Rögnvaldsson, Ivo Petrov, Chenhao Sun, and Martin Vechev. 2026. Beyond benchmarks: Math-arena as an evaluation platform for mathematics with llms. Preprint , arXiv:2605.00674. Guanting Dong, Licheng Bao, Zhongyuan Wang, Kangzhi Zhao, Xiaoxi Li, Jiajie Jin, Jinghan Yang, Hangyu Mao, Fuzheng Zhang, Kun Gai, Guorui Zhou, Yutao Zhu, Ji-Rong Wen, and Zhicheng Dou. 2025a. Agentic entropy-balanced policy optimiza-tion. Preprint , arXiv:2510.14545. Guanting Dong, Yifei Chen, Xiaoxi Li, Jiajie Jin, Hongjin Qian, Yutao Zhu, Hangyu Mao, Guorui Zhou, Zhicheng Dou, and Ji-Rong Wen. 2025b. Tool-star: Empowering llm-brained multi-tool reasoner via reinforcement learning. Preprint , arXiv:2505.16410. Guanting Dong, Hangyu Mao, Kai Ma, Licheng Bao, Yifei Chen, Zhongyuan Wang, Zhongxia Chen, Ji-azhen Du, Huiyang Wang, Fuzheng Zhang, Guorui Zhou, Yutao Zhu, Ji-Rong Wen, and Zhicheng Dou. 2025c. Agentic reinforced policy optimization. 
+
+Preprint , arXiv:2507.19849. Zhenbang Du, Jun Luo, Zhiwei Zheng, Xiangchi Yuan, Kejing Xia, Dachuan Shi, Qirui Jin, Qijia He, Shaofeng Zou, Yingbin Liang, and Wenke Lee. 2026. Pact: Privileged trace co-training for multi-turn tool-use agents. Preprint , arXiv:2606.16215. Jiazhan Feng, Shijue Huang, Xingwei Qu, Ge Zhang, Yujia Qin, Baoquan Zhong, Chengquan Jiang, Jinxin Chi, and Wanjun Zhong. 2025. Retool: Reinforce-ment learning for strategic tool use in llms. Preprint ,arXiv:2504.11536. Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Peiyi Wang, Qihao Zhu, Runxin Xu, Ruoyu Zhang, Shirong Ma, Xiao Bi, Xiaokang Zhang, Xingkai Yu, Yu Wu, Z. F. Wu, Zhibin Gou, Zhihong Shao, Zhu-oshu Li, Ziyi Gao, Aixin Liu, and 175 others. 2025. Deepseek-r1 incentivizes reasoning in llms through reinforcement learning. Nature , 645(8081):633–638. Yupu Hao, Zhuoran Jin, Huanxuan Liao, Kang Liu, and Jun Zhao. 2026. Why multi-step tool-use reinforce-ment learning collapses and how supervisory signals fix it. Preprint , arXiv:2606.26027. Ruihan Jin, Pengpeng Shao, Zhengqi Wen, Jinyang Wu, Mingkuan Feng, Shuo Yang, Chu Yuan Zhang, and Jianhua Tao. 2026. Exploring knowledge purification in multi-teacher knowledge distillation for LLMs. 
+
+Preprint , arXiv:2602.01064. ICLR 2026. Minki Kang, Jongwon Jeong, Seanie Lee, Jaewoong Cho, and Sung Ju Hwang. 2025. Distilling llm agent into small models with retrieval and code tools. 
+
+Preprint , arXiv:2505.17612. Zhenyu Lei, Zhen Tan, Song Wang, Yaochen Zhu, Zihan Chen, Yushun Dong, and Jundong Li. 2025. Learning from diverse reasoning paths with routing and collab-oration. In Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing ,pages 2832–2845, Suzhou, China. Association for Computational Linguistics. Xuefeng Li, Haoyang Zou, and Pengfei Liu. 2025. Torl: Scaling tool-integrated rl. Preprint ,arXiv:2503.23383. Haipeng Luo, Huawen Feng, Qingfeng Sun, Can Xu, Kai Zheng, Yufei Wang, Tao Yang, Han Hu, and Yan-song Tang. 2026a. Agentmath: Empowering math-ematical reasoning for large language models via tool-augmented agent. Preprint , arXiv:2512.20745. Yinyi Luo, Yiqiao Jin, Weichen Yu, Mengqi Zhang, Srijan Kumar, Xiaoxiao Li, Weijie Xu, Xin Chen, and Jindong Wang. 2026b. Agentark: Distilling multi-agent intelligence into a single llm agent. Preprint ,arXiv:2602.03955. Thang Luong, Dawsen Hwang, Hoang H. Nguyen, Gol-naz Ghiasi, Yuri Chervonyi, Insuk Seo, Junsu Kim, Garrett Bingham, Jonathan Lee, Swaroop Mishra, Alex Zhai, Clara Huiyi Hu, Henryk Michalewski, Jimin Kim, Jeonghyun Ahn, Junhwi Bae, Xingyou Song, Trieu H. Trinh, Quoc V. Le, and Junehyuk Jung. 2025. Towards robust mathematical reasoning. 
+
+Preprint , arXiv:2511.01846. Isaac Ong, Amjad Almahairi, Vincent Wu, Wei-Lin Chi-ang, Tianhao Wu, Joseph E. Gonzalez, M. Waleed Kadous, and Ion Stoica. 2024. RouteLLM: Learn-ing to route LLMs with preference data. Preprint ,arXiv:2406.18665. Qwen Team. 2026. Qwen3.5: Towards native multi-modal agents. David Rein, Betty Li Hou, Asa Cooper Stickland, Jackson Petty, Richard Yuanzhe Pang, Julien Di-rani, Julian Michael, and Samuel R. Bowman. 2023. Gpqa: A graduate-level google-proof q&a bench-mark. Preprint , arXiv:2311.12022. ByteDance Seed, :, Jiaze Chen, Tiantian Fan, Xin Liu, Lingjun Liu, Zhiqi Lin, Mingxuan Wang, Chengyi Wang, Xiangpeng Wei, Wenyuan Xu, Yufeng Yuan, Yu Yue, Lin Yan, Qiying Yu, Xiaochen Zuo, Chi Zhang, Ruofei Zhu, Zhecheng An, and 255 others. 2025. Seed1.5-thinking: Advancing superb reason-ing models with reinforcement learning. Preprint ,arXiv:2504.13914. Guangming Sheng, Chi Zhang, Zilingfeng Ye, Xibin Wu, Wang Zhang, Ru Zhang, Yanghua Peng, Haibin Lin, and Chuan Wu. 2024. Hybridflow: A flexible and efficient rlhf framework. arXiv preprint arXiv: 2409.19256 .Hongjin Su, Shizhe Diao, Ximing Lu, Mingjie Liu, Ji-acheng Xu, Xin Dong, Yonggan Fu, Peter Belcak, Hanrong Ye, Hongxu Yin, Yi Dong, Evelina Bakh-turina, Tao Yu, Yejin Choi, Jan Kautz, and Pavlo Molchanov. 2025. ToolOrchestra: Elevating intel-ligence via efficient model and tool orchestration. 
+
+Preprint , arXiv:2511.21689. Qitai Tan, Zefang Zong, Mo Li, Yipeng Shi, Yang Li, and Peng Chen. 2026. Atod: Annealed turn-aware on-policy distillation for multi-turn agentic tasks. Preprint , arXiv:2606.27814. Junlin Wang, Jue Wang, Ben Athiwaratkun, Ce Zhang, and James Zou. 2024. Mixture-of-agents en-hances large language model capabilities. Preprint ,arXiv:2406.04692. Siyuan Xu, Shiyang Li, Xin Liu, Tianyi Liu, Yix-iao Li, Zhan Shi, Zixuan Zhang, Zilong Wang, Qingyu Yin, Jianshu Chen, Tuo Zhao, and Bing Yin. 2026. Controllable and verifiable tool-use data syn-thesis for agentic reinforcement learning. Preprint ,arXiv:2604.09813. An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, Chujie Zheng, Day-iheng Liu, Fan Zhou, Fei Huang, Feng Hu, Hao Ge, Haoran Wei, Huan Lin, Jialong Tang, and 41 others. 2025. Qwen3 technical report. Preprint ,arXiv:2505.09388. Shuo Yang, Jinyang Wu, Zhengxi Lu, Yuhao Shen, Fan Zhang, Lang Feng, Shuai Zhang, Haoran Luo, Zheng Lian, Zhengqi Wen, and Jianhua Tao. 2026. Opid: On-policy skill distillation for agentic reinforcement learning. Preprint , arXiv:2606.26790. Zhaochen Yu, Ling Yang, Jiaru Zou, Shuicheng Yan, and Mengdi Wang. 2025. Demystifying rein-forcement learning in agentic reasoning. Preprint ,arXiv:2510.11701. Haozhen Zhang, Tao Feng, and Jiaxuan You. 2025. Router-R1: Teaching LLMs multi-round routing and aggregation via reinforcement learning. Preprint ,arXiv:2506.09033. Accepted to NeurIPS 2025. Yifan Zhang and Team Math-AI. 2024. American invi-tational mathematics examination (aime) 2024. Yifan Zhang and Team Math-AI. 2025. American invi-tational mathematics examination (aime) 2025. Yifan Zhang and Team Math-AI. 2026. American invi-tational mathematics examination (aime) 2026. Qiyong Zhong, Mao Zheng, Mingyang Song, Xin Lin, Jie Sun, Houcheng Jiang, Xiang Wang, and Jun-feng Fang. 2026. Sod: Step-wise on-policy distil-lation for small language model agents. Preprint ,arXiv:2605.07725. A Appendix 
+
+A.1 Controller Prompt and Tool Definitions 
+
+Table 7 presents the controller input template from a logged Stage-I Qwen3-4B-Instruct rollout. The native tools argument supplies the two function definitions in Table 8, which the chat template inserts into the system message. For presenta-tion, <TOOL_SCHEMAS> marks their location and 
+
+<PROBLEM> replaces only the task-specific question. Prompt wording, parameter descriptions, and re-quired fields are otherwise preserved. 
+
+A.2 Baseline Details Tool-free reasoning models. These models are evaluated without external tools. We enable Qwen3-14B’s native thinking mode and evaluate Qwen3-1.7B in both thinking and non-thinking settings. Qwen3-4B-Instruct and DeepSeek-R1-Distill-Qwen-14B use their official chat templates with external tools disabled. 
+
+Distillation baselines. We train two supervised-distillation baselines on the same problems as RIVET. For each problem, Qwen3.5-9B generates eight candidate responses; those with correct fi-nal answers are retained as teacher supervision. Fine-tuning Qwen3-1.7B and Qwen3-4B-Instruct on these trajectories yields Distillation-1.7B and Distillation-4B, respectively. Both are evaluated without the teacher or external tools. 
+
+On-policy distillation. We construct two on-policy distillation baselines using Qwen3-8B as the teacher and Qwen3-1.7B as the student. Both variants use the same training problems as RIVET and a training batch size of 32. For OPD-1.7B, the teacher provides supervision in thinking mode without tools, and the student is trained and evalu-ated in the same setting. For Tool-OPD-1.7B, both teacher and student operate in non-thinking mode with access to a Python tool. At inference, OPD-1.7B reasons without tools, whereas Tool-OPD-1.7B can invoke the Python tool; neither student accesses the teacher or any other external LLM. We do not construct an OPD baseline for Qwen3-4B-Instruct because Qwen3-8B in non-thinking mode underperforms this student in our setting. 
+
+Tool-augmented distillation baselines. We addi-tionally construct Tool-Distillation-1.7B and Tool-Distillation-4B to control for access to local Python. For each training problem, we provide Qwen3.5-9B with a Python tool definition through its na-tive tool-calling interface and sample eight candi-date trajectories. The teacher generates structured Python tool calls and receives sandbox execution results as feedback for subsequent reasoning. We retain complete trajectories with correct final an-swers and valid Python execution when applicable, preserving the native tool-call and response struc-ture when fine-tuning Qwen3-1.7B and Qwen3-4B-Instruct. Teacher reasoning, tool calls, code, and final answers are prediction targets, whereas problem prompts and execution outputs are masked from the loss. At inference, both students use the same local Python interface as internalized RIVET, without access to the teacher or any other external LLM. 
+
+Tool-integrated reasoning agents. These agents incorporate observations from external tools into subsequent reasoning. We evaluate released check-points where available. ReTool interleaves reason-ing with multi-turn code execution, using cold-start fine-tuning followed by RL; we evaluate ReTool-32B. TRICE combines tool-integrated supervised fine-tuning with RL to train interleaved reason-ing and code execution; we evaluate TRICE-4B. Tool-Star combines synthesized tool-use trajecto-ries with multi-tool self-critic RL; we evaluate Tool-Star-3B. DemyAgent trains on end-to-end tool-use trajectories with exploration-oriented agentic RL. We reproduce it with Qwen3-4B-Instruct as DemyAgent-4B. ToRL incorporates a code inter-preter into RL rollouts to learn from execution feedback; we evaluate GAIR/ToRL-7B as ToRL-7B. ARPO trains multi-turn tool-use policies through agentic RL; we evaluate Qwen2.5-3B-ARPO and 
+
+Qwen3-8B-ARPO-DeepSearch as ARPO-3B and ARPO-8B, respectively. AEPO uses entropy-balanced policy optimization to maintain explo-ration; we evaluate Qwen3-8B-AEPO-DeepSearch 
+
+as AEPO-8B. Agent Distillation transfers teacher-agent behavior involving retrieval and code exe-cution through supervised learning; we evaluate its released 7B checkpoint as Agent Distillation-7B. SOD introduces adaptive step-level weighting for on-policy distillation of tool-using agents; we evaluate its released 1.7B student as SOD-1.7B and its GRPO-trained 4B teacher as SOD-Teacher-4B. The latter is a teacher checkpoint, not a 4B student trained with SOD. The Agent Distillation and SOD checkpoints are evaluated without further fine-tuning. Table 7: Controller input template for Stage-I collaboration. Shaded headings identify message roles; tool schemas are given separately in Table 8. 
+
+System message: native tool-calling interface 
+
+# Tools You may call one or more functions to assist with the user query. You are provided with function signatures within <tools></tools> XML tags: <tools> <TOOL_SCHEMAS> </tools> For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags: <tool_call> {"name": <function-name>, "arguments": <args-json-object>} </tool_call> 
+
+User message: collaboration instructions and problem 
+
+You are a tool-using math controller. The external expert tools are available to improve correctness. Use them actively but efficiently: - For non-trivial problems, prefer at least one useful expert/tool step when it can improve correctness. - Use `think ` for planning, derivation, critique, or deciding the next step. Use `code_interpreter ` when the next useful step is computation, symbolic manipulation, case checking, or verification. - For multi-step or uncertain problems, use alternating tool evidence and reasoning such as `think -> code_interpreter -> think `, then finish once the answer is clear. - Keep controller reasoning concise. Use expert/tool evidence to avoid long self-derivations. - After receiving expert/tool evidence, do not repeat a full derivation. Summarize only the key evidence and finish with the final boxed answer once confident. - When calling `code_interpreter ` with an external expert model, set `code ` to an empty string and put the request in `instruction `. Use `model="self" ` only for simple direct code execution or small fixes. - Do not add extra tool calls after the answer is already determined. The final line must be exactly: Answer: \boxed{answer} Available strong expert models: - Qwen3.5-9B - Qwen2.5-Coder-7B-Instruct - Qwen3-8B Use the tool-call JSON format shown in the system Tools section. The final line must be exactly: Answer: \boxed{answer} # Problem Solve the following math problem step by step. The last line of your response should be exactly of the form Answer: \boxed{answer}, where answer is the answer to the problem. <PROBLEM> Remember to put your final answer on its own line using exactly: Answer: \boxed{answer}. 
+
+Generation prefix: assistant Table 8: Complete native tool definitions supplied to the Stage-I controller. These two objects form the tools list and are serialized inside the <tools> block in Table 7. JSON whitespace is reformatted for readability. 
+
+Reasoning tool: think Python tool: code_interpreter 
+
+{"type": "function", "function": { "name": "think", "description": "Ask a strong external expert model to produce a concise reasoning/planning step. These experts are stronger specialist solvers than the controller; call this tool often for non-trivial planning, derivation, critique, or answer checks, but never call think twice in a row. The returned text is appended to the trajectory for the controller to use next. Qwen2.5-Coder-7B-Instruct is especially strong at code, while Qwen3.5-9B is especially strong at reasoning and planning.", "parameters": { "type": "object", "properties": { "model": { "type": "string", "enum": [ "Qwen3.5-9B", "Qwen2.5-Coder-7B-Instruct", "Qwen3-8B" ], "description": "Strong external expert model to ask for the reasoning/planning step." }, "instruction": { "type": "string", "description": "Optional short instruction for what this expert should think about." }}, "required": [ "model" ]}}}{"type": "function", "function": { "name": "code_interpreter", "description": "Run a Python code-interpreter step. Use model='self' when the controller writes executable code directly; prefer an external expert model name for non-trivial code generation, checks, or symbolic work. Code is executed in an isolated sandbox.", "parameters": { "type": "object", "properties": { "model": { "type": "string", "enum": [ "self", "Qwen3.5-9B", "Qwen2.5-Coder-7B-Instruct", "Qwen3-8B" ], "description": "Prefer selecting a strong external expert model to generate Python code. Use self only for simple direct execution or small fixes." }, "instruction": { "type": "string", "description": "Optional short instruction for the Python step." }, "code": { "description": "Required field for python tool calls. When model is self, provide executable Python code for one isolated call. The last bare expression is automatically displayed like Jupyter, and print(...) output is also returned. Do not rely on variables from previous calls. When model is an external expert, set code to an empty string; the expert will generate the code.", "type": "string" }}, "required": [ "model", "code" ]}}}Table 9: Training settings for the two stages of RIVET.                        
+
+> Hyperparameter Value
+> Stage I: GRPO
+> Learning rate 1×10 −6
+> Training steps 300 Global batch size 32 Rollouts per prompt 8Advantage stabilizer ϵA10 −6
+> PPO clip ϵ0.2
+> Dual-clip c3
+> Maximum rollout length 8k tokens Maximum expert response length 3k tokens Maximum expert calls per rollout 4Random seed 66
+> Stage II: SFT
+> Learning rate 2×10 −6
+> Global batch size 128 Training epochs 2Maximum sequence length 16,384 tokens
+
+Evaluation protocol. We evaluate all baselines on NVIDIA A800 GPUs. Unless an official method requires a different configuration, we use tem-perature 0.6, top-p 0.95, and a maximum output length of 16,384 tokens. Tool-free baselines use their official chat templates with external tool in-terfaces disabled. For tool-integrated baselines, we preserve the released tool specification, system prompt, and interaction protocol, changing only the benchmark-specific problem statement and re-quired answer format. We report Mean@8 on AIME 2024, AIME 2025, AIME 2026, and HMMT 2025; Mean@16 on APEX 2025; and single-run accuracy on BeyondAIME, IMO-AnswerBench, and GPQA-Diamond. 
+
+A.3 Training Configuration Training setup. We train Qwen3-1.7B and Qwen3-4B-Instruct using veRL (Sheng et al., 2024) on NVIDIA A800 GPUs. Stage I uses three frozen experts: Qwen3.5-9B, Qwen3-8B, and Qwen2.5-Coder-7B-Instruct. Table 9 summarizes the train-ing settings for Stage-I GRPO and Stage-II super-vised fine-tuning. 
+
+A.4 Details of Ablation Experiments Routing ablation setup. All variants in Table 5 use exactly the same training problems as RIVET-4B, with expert selection set to learned routing, Qwen3.5-9B-only routing, or random selection. Their Stage-II SFT datasets are constructed using the same trajectory generation and filtering pro-cedure described in Section 3.4: eight candidate trajectories are sampled per training problem, fol-lowed by correctness and validity filtering, dedu-plication, and manual review, with at most two re-tained trajectories per problem. Each variant uses 12,000 verified trajectories and the same SFT hy-perparameters as RIVET-4B, including the batch size, learning rate, number of training epochs, and format-loss weight λfmt = 0 .5. Each variant ini-tializes Stage II from its own trained Stage-I check-point. We train for two full SFT epochs and eval-uate the final checkpoint after the second epoch. This comparison evaluates the complete two-stage variants, allowing both the Stage-II initialization and the training trajectories to depend on the Stage-I routing policy. 
+
+A.5 Stage-II Trajectory Conversion Example Canonicalization and target ownership. 
+
+Stage II preserves the native <tool_call> –
+
+<tool_response> serialization, selected expert, call order, code field, and returned content. Missing or free-form instructions are replaced by fixed tool-specific instructions. The retained expert reasoning and code are included as controller prediction targets in the supervised sequence, whereas actual Python execution results remain masked environment observations. Stage I already trains on expert spans; the conversion here specifies their place in the complete Stage-II target sequence and subsequent internalized decoding. 
+
+Decoding and execution in internalized mode. 
+
+The Stage-II controller generates the tool-call struc-ture, serialized role markers, and the reasoning and code formerly supplied by experts within the same decoding stream. Thus, user <tool_response> 
+
+does not indicate a new external message, and the retained model field does not dispatch a call to the named expert. Decoding continues through these spans and pauses for tool execution when a complete <python> –</python> block has been generated. The runtime executes the code in this block, rather than the empty code argument shown in the example, appends the actual result within 
+
+<output> –</output> , and resumes controller gen-eration from the updated context. This cycle con-tinues until the final answer; no external LLM is invoked. Stage I already includes expert-origin rea-soning and code in the controller’s training loss, and Stage II further supervises these spans while assigning additional loss weight to tool-call format tokens. Complete before–after example. Table 10 repro-duces both sides of a verified conversion without abbreviation. Panel (a) gives the original Stage-I collaborative trajectory, and Panel (b) gives the corresponding Stage-II training sequence together with its target mask. The panels show the surface-form canonicalization and distinguish each span’s original producer from its role in supervised train-ing. The before–after comparison makes both trans-formations explicit. The missing thinking instruc-tion and problem-specific Python instruction in Panel (a) are mapped to fixed tool-specific instruc-tions in Panel (b). Reasoning and code originally generated by Qwen3.5-9B are supervised controller targets in Panel (b), while the sandbox output re-mains contextual input. This converted training sequence illustrates how the expert’s derivation and verification program are used to train the controller; it is not a separately sampled Stage-II inference tra-jectory. Table 10: A complete before–after example of Stage-II trajectory conversion. Panel (a) shows the original Stage-I collaborative trajectory. Panel (b) shows the corresponding Stage-II sequence, in which instructions are canonicalized and former expert outputs become controller targets. Both panels reproduce the complete problem, expert reasoning, Python program, execution result, and final response. 
+
+(a) Original Stage-I collaborative trajectory (Part 1 of 2) Turn Producer Original serialized content 
+
+Input Problem prompt Solve the following math problem step by step. The last line of your response should be exactly of the form Answer: \boxed{answer} , where answer is the answer to the problem. Determine how many right triangles exist with integer leg lengths a and b, where the hypotenuse is of length b + 1 and 
+
+b < 100 .Remember to put your final answer on its own line using exactly: Answer: \boxed{answer} .Call 1 Controller <tool_call> {"name": "think", "arguments": {"model": "Qwen3.5-9B"}} </tool_call> 
+
+Response 1 Qwen3.5-9B user <tool_response> 
+
+I need to find the number of right triangles with integer legs a, b and hypotenuse c = b + 1 , where b < 100 . The Pythagorean theorem states a2 + b2 = c2. Substituting c = b + 1 :
+
+a2 + b2 = ( b + 1) 2
+
+a2 + b2 = b2 + 2 b + 1 
+
+a2 = 2 b + 1 
+
+This implies 2b + 1 must be a perfect square. Let a2 = k2 for some integer a. So 
+
+2b + 1 = a2 =⇒ 2b = a2 − 1 =⇒ b = a2−12 . Since b must be an integer, a2 − 1 must be even, which means 
+
+a2 must be odd, so a must be odd. Also, we are given b < 100 . Substituting b: 
+
+> a2−12
+
+< 100 
+
+a2 − 1 < 200 
+
+a2 < 201 
+
+Since a is a positive integer (leg length), a ≥ 1. Possible values for a: 1, 3, 5, . . . such that a2 < 201 .√201 ≈ 14 .17 . So a can be 1, 3, 5, 7, 9, 11 , 13 . Let’s verify for each a:1. a = 1 =⇒ b = (1 − 1) /2 = 0 . Usually leg lengths are positive integers. If b = 0 , it’s a degenerate triangle. The problem asks for “right triangles,” implying non-degenerate. So b > 0 =⇒ a2 > 1 =⇒ a > 1.2. a = 3 =⇒ b = (9 − 1) /2 = 4 . c = 5 . 32 + 4 2 = 5 2. Valid. 3. a = 5 =⇒ b = (25 − 1) /2 = 12 . c = 13 . Valid. 4. a = 7 =⇒ b = (49 − 1) /2 = 24 . c = 25 . Valid. 5. a = 9 =⇒ b = (81 − 1) /2 = 40 . c = 41 . Valid. 6. a = 11 =⇒ b = (121 − 1) /2 = 60 . c = 61 . Valid. 7. a = 13 =⇒ b = (169 − 1) /2 = 84 . c = 85 . Valid. Next odd a = 15 =⇒ a2 = 225 > 201 , so b > 100 .So the valid values for a are 3, 5, 7, 9, 11 , 13 . This gives 6 solutions. I will write a python script to verify this count. 
+
+</tool_response> assistant 
+
+Panel (a) continues on the next page. Table 10 (continued): (a) Original Stage-I collaborative trajectory (Part 2 of 2) Turn Producer Original serialized content 
+
+Call 2 Controller <tool_call> {"name": "code_interpreter", "arguments": {"model": "Qwen3.5-9B", "instruction": "Verify the number of valid right triangles with integer legs a and b, hypotenuse b+1, and b < 100. Compute the valid odd values of a such that aˆ2 < 201 and b = (aˆ2 - 1)/2 > 0 and b < 100.", "code": ""}} </tool_call> 
+
+Code Qwen3.5-9B user <tool_response> <python> count = 0 valid_triangles = [] for a in range(1, 100): b = (a**2 - 1) / 2 if b.is_integer() and b > 0 and int(b) < 100: count += 1 valid_triangles.append((a, int(b), int(b)+1)) print(f"Number of valid triangles: {count}") for t in valid_triangles: print(t) </python> 
+
+Output Python sandbox <output> Number of valid triangles: 6 (3, 4, 5) (5, 12, 13) (7, 24, 25) (9, 40, 41) (11, 60, 61) (13, 84, 85) </output> 
+
+Final Controller </tool_response> assistant 
+
+The verification confirms there are 6 valid right triangles with integer leg lengths a and b, hypotenuse b + 1 , and 
+
+b < 100 . The triangles are: – (3 , 4, 5) 
+
+– (5 , 12 , 13) 
+
+– (7 , 24 , 25) 
+
+– (9 , 40 , 41) 
+
+– (11 , 60 , 61) 
+
+– (13 , 84 , 85) 
+
+All conditions are satisfied, and no degenerate or invalid cases are included. 
+
+Answer: \boxed{6} Table 10 (continued): (b) Complete converted Stage-II training sequence Turn Stage-I source Serialized content after canonicalization Target mask 
+
+Input Problem prompt Solve the following math problem step by step. The last line of your response should be exactly of the form 
+
+Answer: \boxed{answer} , where answer is the answer to the problem. Determine how many right triangles exist with integer leg lengths a and b, where the hypotenuse is of length 
+
+b + 1 and b < 100 .Remember to put your final answer on its own line using exactly: Answer: \boxed{answer} .
+
+0
+
+Call 1 Controller <tool_call> {"name": "think", "arguments": {"model": "Qwen3.5-9B", "instruction": "Solve the current problem independently and provide rigorous mathematical reasoning."}} </tool_call> 
+
+1
+
+Response 1Qwen3.5-9B user <tool_response> 
+
+I need to find the number of right triangles with integer legs a, b and hypotenuse c = b + 1 , where b < 100 .The Pythagorean theorem states a2 + b2 = c2. Substituting c = b + 1 :
+
+a2 + b2 = ( b + 1) 2
+
+a2 + b2 = b2 + 2 b + 1 
+
+a2 = 2 b + 1 
+
+This implies 2b + 1 must be a perfect square. Let a2 = k2 for some integer a. So 
+
+2b + 1 = a2 =⇒ 2b = a2 − 1 =⇒ b = a2−12 . Since b must be an integer, a2 − 1 must be even, which means a2 must be odd, so a must be odd. Also, we are given b < 100 . Substituting b: 
+
+> a2−12
+
+< 100 
+
+a2 − 1 < 200 
+
+a2 < 201 
+
+Since a is a positive integer (leg length), a ≥ 1. Possible values for a: 1, 3, 5, . . . such that a2 < 201 .√201 ≈ 14 .17 . So a can be 1, 3, 5, 7, 9, 11 , 13 . Let’s verify for each a:1. a = 1 =⇒ b = (1 − 1) /2 = 0 . Usually leg lengths are positive integers. If b = 0 , it’s a degenerate triangle. The problem asks for “right triangles,” implying non-degenerate. So 
+
+b > 0 =⇒ a2 > 1 =⇒ a > 1.2. a = 3 =⇒ b = (9 − 1) /2 = 4 . c = 5 . 32 + 4 2 = 5 2. Valid. 3. a = 5 =⇒ b = (25 − 1) /2 = 12 . c = 13 . Valid. 4. a = 7 =⇒ b = (49 − 1) /2 = 24 . c = 25 . Valid. 5. a = 9 =⇒ b = (81 − 1) /2 = 40 . c = 41 . Valid. 6. a = 11 =⇒ b = (121 − 1) /2 = 60 . c = 61 . Valid. 7. a = 13 =⇒ b = (169 − 1) /2 = 84 . c = 85 . Valid. Next odd a = 15 =⇒ a2 = 225 > 201 , so b > 100 .So the valid values for a are 3, 5, 7, 9, 11 , 13 . This gives 6 solutions. I will write a python script to verify this count. 
+
+</tool_response> assistant 
+
+1
+
+Call 2 Controller <tool_call> {"name": "code_interpreter", "arguments": {"model": "Qwen3.5-9B", "instruction": "Solve or verify the current problem using Python when helpful.", "code": ""}} </tool_call> 
+
+1
+
+Code Qwen3.5-9B user <tool_response> <python> count = 0 valid_triangles = [] for a in range(1, 100): b = (a**2 - 1) / 2 if b.is_integer() and b > 0 and int(b) < 100: count += 1 valid_triangles.append((a, int(b), int(b)+1)) print(f"Number of valid triangles: {count}") for t in valid_triangles: print(t) </python> 
+
+1
+
+Output Python sandbox <output> Number of valid triangles: 6 (3, 4, 5) (5, 12, 13) (7, 24, 25) (9, 40, 41) (11, 60, 61) (13, 84, 85) </output> 
+
+0
+
+Final Controller </tool_response> assistant 
+
+The verification confirms there are 6 valid right triangles with integer leg lengths a and b, hypotenuse b + 1 , and 
+
+b < 100 . The triangles are: – (3 , 4, 5) 
+
+– (5 , 12 , 13) 
+
+– (7 , 24 , 25) 
+
+– (9 , 40 , 41) 
+
+– (11 , 60 , 61) 
+
+– (13 , 84 , 85) 
+
+All conditions are satisfied, and no degenerate or invalid cases are included. 
+
+Answer: \boxed{6} 
+
+1
