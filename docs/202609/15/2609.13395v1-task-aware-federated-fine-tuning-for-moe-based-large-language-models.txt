@@ -1,0 +1,1304 @@
+Task-Aware Federated Fine-Tuning for MoE-based
+Large Language Models
+Tingqi Wang, Hongyu Ke, Haoxin Wang, Rafal Angryk, and Zhipeng Cai*
+Department of Computer Science, Georgia State University
+Atlanta, GA, United States
+{twang33, hke3, haoxinwang, angryk, zcai}@gsu.edu
+Abstract—Mixture-of-Experts (MoE) has become a widely
+adopted architecture for Large Language Models (LLMs), as it
+improves model capacity while limiting computational overhead
+through sparse expert activation. This property makes MoE-
+based LLMs particularly attractive for resource-constrained dis-
+tributed environments. However, federated fine-tuning of MoE-
+based LLMs remains challenging under heterogeneous client
+data. Since clients often correspond to different task preferences,
+directly aggregating their local updates may weaken expert
+specialization and introduce conflicting update directions on
+shared experts. To address these challenges, we propose Fed-
+TAR, a task-aware federated fine-tuning method for MoE-based
+LLMs. FedTAR establishes the association between local updates
+and task preference via routing outputs. Specifically, we apply
+Singular Value Decomposition (SVD) to both routing features
+and local updates to extract low-dimensional task coordinates
+and update directions. Based on the task coordinates, FedTAR
+performs intra-cluster aggregation among clients with similar
+task preferences and inter-cluster aggregation across different
+task groups. The aggregated update is then reconstructed through
+the learned task-to-update mapping, ensuring that the final
+update remains aligned with task-specific optimization direc-
+tions. In this way, FedTAR preserves expert specialization and
+mitigates destructive interference among heterogeneous clients.
+We evaluate FedTAR on four benchmark tasks under different
+non-IID settings. Experimental results demonstrate that FedTAR
+consistently outperforms strong federated fine-tuning baselines
+and achieves state-of-the-art performance. The code is available
+at https://github.com/Tingqi0708/FedTAR.
+Index Terms—Federated Fine-Tuning, Large Language Model,
+Mixture-of-Experts
+I. INTRODUCTION
+Mixture-of-Experts (MoE), a popular architecture for Large
+Language Models (LLMs), has attracted significant attention
+for its ability to balance model capability and computational
+overhead [1], [2]. By employing conditional computation,
+MoE selectively activates only a subset of experts for each
+token [3]. Such sparse activation enables MoE-based LLMs
+to scale model capacity without proportionally increasing in-
+ference cost, making them well-suited for resource-constrained
+distributed environments [4]–[6]. In practice, adapting LLMs
+to various domain-specific tasks often requires fine-tuning
+on limited and dispersed private data owned by multiple
+clients [7], [8]. Federated fine-tuning provides a promising
+solution by enabling collaborative adaptation without direct
+data sharing. However, the combination of MoE architectures
+*To whom correspondence should be addressed
+(a) Expert specialization weaken
+due to updates averaged out.
+(b) Share expert convergence con-
+flicts in different tasks.
+Fig. 1: Illustration of challenges in Federated MoE-based
+LLMs Fine-Tuning.
+and heterogeneous client data introduces new challenges that
+have not been systematically investigated in existing works: (i)
+weakened expert specialization, and (ii) conflicting updates
+on shared experts.
+Specifically, clients with different task preferences may
+cause different update magnitudes [9], [10]. During the ag-
+gregation, these task-specific differences are averaged indis-
+criminately, which may weaken expert specialization across
+tasks. As shown in Fig. 1(a), a client specializing in task A
+applies larger updates to expert e2 than to expert e4, while a
+client focusing on task B exhibits the opposite pattern. After
+federated fine-tuning aggregation, the updates to e2 and e4
+are merged without considering their task-specific roles. As
+a result, the global model may become suboptimal for both
+tasks A and B. In addition, the same expert may be activated by
+clients with different task preferences and thus receive updates
+with inconsistent optimization directions [2], [11], [12]. As
+illustrated in 1(b), expert e3 is shared by both tasks A and B,
+but its convergence directions under the two tasks conflict with
+each other. Such conflicts can cause destructive interference in
+global model updates and further degrade federated fine-tuning
+performance.
+The aforementioned challenges raise an essential question:
+how can client updates be aligned with their underlying task
+arXiv:2609.13395v1  [cs.LG]  11 Sep 2026
+
+
+intentions in federated MoE fine-tuning? Since task prefer-
+ences are not directly observable, it is difficult to determine
+which clients should be aggregated together and how their
+updates should be combined. This motivates us to introduce
+an intermediate representation that captures the underlying
+task structure. In MoE models, routing outputs naturally
+reflect expert utilization patterns of each client, and thus
+implicitly encode the underlying task representations. Based
+on this observation, we propose FedTAR, a novel Task-awARe
+Federated fine-tuning method for MoE-based LLMs. FedTAR
+leverages routing outputs to establish a mapping between the
+task space and the update space, enabling task-aware aggre-
+gation and reconstruction of federated updates. To the best of
+our knowledge, this is the first work focusing on federated
+fine-tuning for MoE-based LLMs. Specifically, FedTAR first
+collects routing statistics during local fine-tuning, including
+average expert utilization, expert co-activation relationships,
+and routing confidence for each client. Then, Singular Value
+Decomposition (SVD) is applied to both routing features and
+local updates to extract task coordinates and dominant update
+directions. Based on the task coordinates, FedTAR performs
+task-aware aggregation within and across client clusters. Fi-
+nally, the learned mapping between task and update spaces is
+used to reconstruct the aggregated update, ensuring that the
+global update remains aligned with task-specific directions. In
+this way, FedTAR preserves expert specialization while mit-
+igating destructive interference among heterogeneous clients.
+We conduct comprehensive experiments under different data
+heterogeneity levels, tasks, and hyper-parameter settings [13].
+The results show that FedTAR achieves state-of-the-art (SOTA)
+performance across multiple tasks and settings. Our contribu-
+tions are summarized as follows:
+• To the best of our knowledge, this is the first work to
+study federated fine-tuning for MoE-based LLMs. We
+identify two unique challenges: degraded expert special-
+ization and conflicting updates on shared experts.
+• We propose FedTAR, a task-aware federated fine-tuning
+method for MoE-based LLMs. FedTAR uses routing
+statistics to infer task representations, performs task-
+aware clustering and aggregation, and reconstructs global
+updates through a learned task-update mapping to pre-
+serve expert specialization and mitigate conflicts.
+• We conduct extensive experiments under various data
+heterogeneity levels, tasks, and hyper-parameter settings.
+The results demonstrate the effectiveness of FedTAR and
+its state-of-the-art performance in federated fine-tuning.
+II. RELATED WORK
+In the era of LLMs, federated learning (FL) has been
+widely adopted for on-device fine-tuning without direct data
+access. The vanilla FL approach, FedAvg [14], averages model
+updates from participating clients. However, FedAvg often
+underperforms on non-independent and identically distributed
+(Non-IID) data. To tackle this issue, Li et al. proposed FedProx
+[15], which improves training stability by adding a proximal
+term to local training. SCAFFOLD mitigates client drift by
+employing control variates [16]. More broadly, alleviating
+performance degradation caused by Non-IID data in FL has
+been extensively explored [17]. Over the years, these methods
+have been widely applied to various domains [18], [19].
+Extending FL to LLMs faces additional challenges due
+to the massive model size and communication overhead.
+To address this issue, parameter-efficient fine-tuning (PEFT)
+methods, such as low-rank adaptation (LoRA), have been
+proposed to reduce the number of trainable parameters and
+computational costs [20]. Recent works integrate PEFT with
+FL by restricting local updates to low-rank adapters and
+aggregating them across clients [7], [21]. These approaches
+significantly improve the communication efficiency and scal-
+ability of LLM fine-tuning. As one of the earliest approaches
+integrating LoRA into FL, FFA-LoRA adopts a simple yet
+effective strategy by freezing the LoRA A matrices and only
+training and aggregating the LoRA B matrices across clients,
+thereby reducing communication overhead [22]. It also con-
+siders aggregation interference and improves robustness under
+differential privacy (DP) noise, enhancing training stability.
+Building upon this, FedEx-LoRA further improves aggregation
+by introducing more flexible parameter sharing mechanisms
+to better capture client-specific characteristics [23]. There are
+also works that primarily focus on improving efficiency, such
+as FedBiOT [8] and FedDiAL [24]. More recently, FedSVD
+leverages the low-rank structure of client updates and performs
+aggregation in a shared subspace via SVD, which partially
+alleviates update inconsistency [25].
+With the growing adoption of MoE architectures in LLMs,
+recent works have explored their integration with FL [26].
+However, these approaches mainly incorporate MoE into ex-
+isting fine-tuning pipelines, rather than rethinking the federated
+optimization process for MoE-based models. Consequently,
+they fail to fully exploit the routing mechanisms that natu-
+rally encode task-specific structures and expert specialization.
+Ignoring such structural information may lead to the aggrega-
+tion of incompatible expert updates across clients, especially
+under heterogeneous data distributions, resulting in suboptimal
+global models.
+III. PRELIMINARY
+A. MoE-Based LLM.
+In an MoE-based LLM, each layer contains a set of experts
+and a router [27]. Each expert f (l)
+e
+is a parameterized feed-
+forward network. Given an input x, the router assigns the
+input to a subset of experts, and only the selected experts
+are activated. The output of the l-th layer is:
+h(l)(x) =
+X
+e∈E(l)
+g(l)
+e (x)f (l)
+e (x),
+∥g(l)(x)∥0 ≤k,
+(1)
+where E(l) denotes the set of experts in layer l, g(l)
+e (x) is the
+routing weight of expert e, and k is the number of activated
+experts.
+Compared with dense LLMs, MoE achieves a better trade-
+off between model capacity and computational cost. In a
+
+
+dense model, all parameters are activated for each input. In
+contrast, an MoE model maintains a larger set of parameters
+{We}e∈E, but only a subset of experts is activated for each
+input. As a result, MoE enables higher model capacity without
+a proportional increase in computational cost.
+B. Federated Fine-Tuning
+Consider a FL system with N clients C = {C1, C2, ..., CN}
+and a Server S. Each client Ci has a private dataset Di with ni
+training samples {(xij, yij)}ni
+j=1.. All clients can either deploy
+the same MoE-based LLM locally or remotely host it. Our
+objective is to fine-tune a global MoE-based LLM over these
+N clients:
+∆W∗= arg min
+∆W
+N
+X
+i=1
+piLi(W0 + ∆W),
+(2)
+where pi denotes the weight of client i, and Li(·) is the local
+empirical risk defined over dataset Di. It should be note that
+our method is suitable for full fine-tuning and LoRA. Due to
+the large size of foundation model, we use LoRA instead of
+training all parameters.
+IV. METHODOLOGY
+A. Overview
+We present FedTAR, a task-aware federated fine-tuning
+framework for MoE-based LLMs. Our design is motivated
+by two major challenges in federated fine-tuning of MoE-
+based LLMs: (i) weakened expert specialization, and (ii)
+incompatible update directions on shared experts caused by
+task heterogeneity. To tackle these issues, FedTAR captures
+the relationship between task preferences and model updates
+via local routing behaviors, thereby enabling task-aware fine-
+tuning of the global model.
+The overview of our method is shown in Fig. 2. On
+the client side, after local fine-tuning, the router calculates
+logits on a local held-out dataset, which are used to compute
+routing statistics such as mean expert usage and expert co-
+activation. The fine-tuning updates and routing features are
+then uploaded to the server. On the server side, FedTAR
+separately decomposes the local updates and routing features
+to extract the primary update directions and task coordinates,
+and then learns the mapping between them. Subsequently,
+client updates with similar task coordinates are hierarchically
+aggregated through clustering. Finally, guided by the learned
+mapping, the aggregated result is reconstructed in the task-
+aligned subspace to obtain the final global update. In the
+following subsections, we detail our design.
+B. Local Fine-Tuning
+All clients start with a frozen pretrained MoE model W0 ∈
+Rd×k deployed locally or hosted in the cloud. Before the first
+communication round, the server broadcasts the global LoRA
+parameters B0
+g = {Bg
+k}K
+k=1 and A0
+g = {Ag
+k}K
+k=1 [28]:
+∆W0
+g = {Bg
+kAg
+k}K
+k=1,
+Bg
+k ∈Rdin×r,
+Ag
+k ∈Rr×dout,
+(3)
+where K is the number of experts. r is the rank of B0
+gA0
+g.
+din and dout are the input and output dimensions, respectively.
+r << min(din, dout). B0
+g is initialized to zero, A0
+g uses random
+Gaussian initialization. Following the vanilla FL LoRA setting,
+we freeze Ag
+k and only aggregate B0
+g, enforcing a shared
+subspace across clients to mitigate severe update conflicts
+while improving communication efficiency [22].
+In t-th communication round, each client Ci fine-tunes
+locally on its dataset Di in multiple steps. It optimizes the
+following objective:
+Bt
+i = arg min
+B
+Li(W0 + ∆W(B)) .
+(4)
+After local training, each client obtains Bt
+i, which captures
+local adaptations and is sent to the server.
+C. Router Feature Extraction
+In MoE models, the router selects a subset of experts for
+each input x to process the task. Consequently, routing behav-
+ior varies across different data distributions. Since different
+tasks require distinct expert capabilities, routing decisions
+implicitly encode underlying task preferences, which can be
+leveraged to represent client-specific tasks.
+Specifically, the average routing probability of each expert is
+a highly indicative feature. In MoE models, the load balancing
+loss calculates Pk for expert k, which denotes the average
+probability of assigning expert k to all tokens in a batch,
+computed based on the routing probabilities before top-k
+selection [29], [30].
+Inspired by this, we extend Pk from the batch level to the
+client level. The average routing probability µi for client Ci
+is:
+µi = Ex∼Di[g(x)],
+(5)
+where g(x) ∈RK denotes the routing probability distribution
+over K experts for input x. µi represents the probability that
+each expert is used on the current client.
+Since each task may require collaboration among experts
+with different capabilities, we further consider expert co-
+activation by computing their joint usage patterns:
+coi = Ex∼Di[g(x)g(x)⊤].
+(6)
+The (p, q)-th element of g(x)g(x)⊤is given by gp(x)gq(x),
+which measures the joint activation strength between experts
+p and q. Therefore, coi encodes the task-specific interaction
+structure among experts for client Ci.
+In addition, to improve robustness, we quantify the confi-
+dence of expert selection for each client by computing the
+entropy of the routing distribution:
+hi = Ex∼Di
+"
+−
+K
+X
+k=1
+gk(x) log gk(x)
+#
+.
+(7)
+hi distinguishes between well-defined and ambiguous tasks,
+providing valuable information for aggregation: clients with
+low-entropy routing patterns (i.e., precise expert selection)
+tend to be more reliable.
+
+
+Fig. 2: Overview of FedTAR. Client Side: Each client performs local LoRA fine-tuning and extracts routing features along
+with local updates. Server Side: The server clusters clients based on the task coordinates, aggregates updates within clusters,
+and reconstructs a global update via task-aligned subspace projection.
+µi, coi, and hi collectively provide a comprehensive de-
+scription of each client’s routing behavior. These features
+capture the client’s expert selection preferences, interaction
+structure, and selection confidence, respectively. Then, we
+construct a task representation by concatenating and ℓ2-
+normalizing these features to obtain a unified and scale-
+invariant representation:
+ci = [µi; vec(coi); hi] ,
+∥ci∥2 = 1,
+(8)
+where vec(·) denotes matrix vectorization. ci is sent once if
+the router is frozen, and every round if the router is trainable.
+D. Task–Update Subspace Alignment
+For each client Ci, the server receives its update Bt
+i and
+routing feature ci. Although routing features and model up-
+dates reside in different spaces, they are governed by the
+same underlying task variations and thus admit a shared
+low-dimensional structure. This structure enables alignment
+between task representations and update directions via joint
+subspace analysis [31].
+To achieve this goal, we first stack all clients to form
+the update matrix: ∆= [Bt
+1, Bt
+2, . . . , Bt
+N]. Next, the SVD
+decomposes ∆to obtain the dominant structure of updates:
+∆= U∆Σ∆V⊤
+∆,
+(9)
+the top-r components is retained as a low-dimensional update
+subspace: ∆r = U(r)
+∆Σ(r)
+∆V(r)⊤
+∆
+, where U(r)
+∆defines the prin-
+cipal directions of the update space, providing how to recon-
+struct updates from low-dimensional coordinates. Similarly,
+task matrix, stacked routing features C = [c1, c2, . . . , cN], can
+be decomposed into reorganization of task axes:
+C = UCΣCV⊤
+C.
+(10)
+The top-r components is the low-dimensional task subspace:
+Cr = U(r)
+C Σ(r)
+C V(r)⊤
+C
+, where U(r)
+C
+captures the principal
+task directions, and V(r)
+C
+provides the corresponding low-
+dimensional task intentions for each client. To obtain explicit
+task coordinates, we center the routing features as ¯c =
+1
+N
+PN
+i=1 ci, ˜ci = ci −¯c. Let P = U(r)
+C
+denote the top-r task
+subspace. Each client is then represented by its task coordinate,
+such as zi = P⊤˜ci. It provides a geometric interpretation
+of the task representation: routing feature is projected onto
+a shared low-dimensional task subspace, and its differences
+between the various clients correspond to underlying task
+differences.
+Then, we approximate the relationship between task rep-
+resentations and update directions within the learned low-
+dimensional subspaces using a parametric form. Specifically,
+the update coordinate αi is approximated from the task coor-
+dinate zi as αi ≈Rzi, which can be rewritten as:
+Bt
+i ≈U(r)
+∆Rzi = Mzi.
+(11)
+This formulation provides a low-dimensional approximation
+that links task coordinates to update directions. With both
+routing features and updates projected onto their principal
+subspaces, their dominant variations can be effectively aligned.
+While more expressive mappings are possible, we adopt a reg-
+ularized least-squares solution [32] for stability and robustness:
+M = arg min
+M ∥∆−MZ∥2
+F + λ∥M∥2
+F ,
+(12)
+which admits the closed-form solution: M = ∆Z⊤(ZZ⊤+
+λI)−1, where λ > 0 is a regularization parameter that
+improves numerical stability and prevents overfitting. Ac-
+cordingly, for any given update ∆′, we project it onto the
+task-aligned subspace to ensure consistency with the learned
+task–update structure:
+∆= M(M⊤M + λI)−1M⊤∆′.
+(13)
+The above calculation process is provided in the appendix.
+
+
+E. Task-Aware Aggregation and Reconstruction
+In server aggregation, task heterogeneity across clients
+significantly affects the global update. In our method, we
+perform intra-cluster and inter-cluster aggregation based on
+task coordinates, ensuring that clients with similar tasks are ag-
+gregated together. Then, the aggregated update is reconstructed
+through the mapping M to maintain consistency with the task-
+aligned subspace, thereby mitigating the negative impact of
+task heterogeneity.
+We first cluster the task coordinates zi into Q groups
+{Gq}Q
+q=1, where each cluster represents a group of clients
+with similar task characteristics. Within each cluster, the
+cluster-level update is obtained by averaging client updates:
+∆cq =
+1
+|Gq|
+P
+i∈Gq Br
+i . Then, inter-cluster aggregation weights
+are assigned based on each cluster’s proximity to the global
+task center. Let the global task center be zcenter = 1
+N
+PN
+i=1 zi.
+The weight of each cluster is:
+wq =
+exp
+ −τ|zq −zcenter|2
+P
+j exp (−τ|zj −zcenter|2),
+(14)
+where zq
+=
+1
+|Gq|
+P
+i∈Gq zi denotes the cluster-level task
+representation. Therefore, the aggregated update is given by:
+∆Cluster =
+Q
+X
+q=1
+wq∆cq.
+(15)
+Although ∆Cluster integrates information from different
+clients, it may not strictly follow the learned task–update
+relationship due to the aggregation of heterogeneous updates,
+which may introduce components outside the task-aligned
+subspace. To enforce structural consistency, we reconstruct
+∆Cluster by projecting it onto the subspace spanned by the
+learned mapping M. Let SM = span(M) denote the task-
+aligned update subspace. The reconstructed update is given
+by:
+Bt
+g = M(M⊤M + λI)−1M⊤∆Cluster,
+(16)
+which is the closed-form solution of a regularized least-
+squares projection onto SM. This projection enforces the final
+update to lie within the task-consistent subspace, removing
+components that are not aligned with the learned task–update
+structure. Bt
+g is the task-aware update at the current round,
+which is sent back to clients and applied to the global model
+via Wg ←Wg + Bt
+gA0
+g.
+F. Privacy
+The local updates Bt
+i are transmitted under differential
+privacy protection. In addition, our method requires each client
+to share a routing representation. Specifically, each client
+computes routing statistics as xi = [µi; vec(Ci); hi], where
+µi ∈RK is the mean expert usage, Ci ∈RK×K is the co-
+activation matrix, and hi is the entropy term. These quantities
+are aggregated over local data and do not expose individual
+samples, but they may still reveal coarse information about
+the underlying data distribution. To provide formal privacy
+guarantees, we apply differential privacy to the routing features
+Fig. 3: Task Structure vs. Update Directions (dolly)
+Fig. 4: KL-divergence heatmap
+via the Gaussian mechanism. Each client first clips its feature
+vector to bound the sensitivity:
+¯xi = xi · min
+
+1,
+S
+∥xi∥2
+
+,
+(17)
+and then adds the noise:
+˜xi = ¯xi + ηi,
+ηi ∼N(0, σ2S2I).
+(18)
+This ensures that the ℓ2-sensitivity is bounded by 2S, and
+the mechanism satisfies (ε, δ)-differential privacy with σ =
+O
+√
+log(1/δ)
+ε
+
+. Since dimensionality reduction, such as SVD,
+is a post-processing step, the privacy guarantee is preserved
+for the released representation.
+G. Communication Cost
+The task representation ci has dimension O(K2) due to the
+co-activation matrix. In each communication round, a client
+transmits: (i) a model update ∆wi ∈Rd, and (ii) the task
+representation ci. Thus, the communication cost per client is
+Cours = O(d+K2), compared with O(d) in standard FL. Since
+K2 ≪d in practice (e.g., tens of experts versus millions of
+parameters), the additional overhead is small. Moreover, ci is
+transmitted only once when the router is frozen, and updated
+every round only when the router is trainable. Therefore,
+the amortized communication overhead remains negligible.
+Notably, compared with methods that transmit both LoRA
+matrices (i.e., A and B), our design is more communication-
+efficient because only B is aggregated while A is kept fixed.
+V. EXPERIMENTS
+A. Experimental Setup
+a) Datasets and Evaluations: We primarily evaluate the
+proposed method on a popular MoE-based sparse LLM:
+
+
+TABLE I: Performance comparison on reasoning and knowledge benchmarks under different task heterogeneity levels. All
+reported results in the following tables are averaged over three random seeds, with standard deviation below 0.5%.
+Method
+GSM8K (EM)
+MMLU (ACC)
+BBH (EM)
+AVG.
+α
+0.1
+0.5
+0.9
+0.1
+0.5
+0.9
+0.1
+0.5
+0.9
+0.1
+0.5
+0.9
+Base Model
+61.50%
+61.50%
+61.50%
+62.50%
+62.50%
+62.50%
+36.46%
+36.46%
+36.46%
+53.49%
+53.49%
+53.49%
+Centralized
+68.00%
+68.00%
+68.00%
+70.17%
+70.17%
+70.17%
+42.57%
+42.57%
+42.57%
+60.25%
+60.25%
+60.25%
+Local
+54.23%
+62.01%
+64.50%
+57.85%
+62.10%
+62.90%
+33.23%
+36.60%
+37.22%
+48.44%
+53.57%
+54.87%
+FedAvg ((AISTATS 2017)) [14]
+52.16%
+63.87%
+66.59%
+56.94%
+65.00%
+64.30%
+30.13%
+36.72%
+39.87%
+46.41%
+55.20%
+56.92%
+FedProx (MLSys 2020) [15]
+55.38%
+63.95%
+66.31%
+58.26%
+63.40%
+64.00%
+31.76%
+37.36%
+39.38%
+48.47%
+54.90%
+56.56%
+SCAFFOLD (ICML 2020) [16]
+48.81%
+52.86%
+54.28%
+54.77%
+56.43%
+57.32%
+28.58%
+30.52%
+32.51%
+44.05%
+46.60%
+48.04%
+FFA-LoRA (ICLR 2024) [22]
+62.29%
+64.12%
+65.03%
+61.43%
+62.87%
+63.41%
+36.46%
+37.17%
+38.08%
+53.39%
+54.72%
+55.51%
+Fedex-LoRA (ACL 2025) [23]
+63.25%
+63.01%
+61.00%
+61.68%
+62.75%
+63.57%
+33.67%
+35.00%
+41.35%
+52.87%
+53.59%
+55.31%
+FedSVD (NeurIPS 2025) [24]
+63.11%
+64.62%
+66.71%
+62.06%
+66.22%
+65.86%
+33.52%
+38.21%
+39.52%
+52.90%
+56.35%
+57.36%
+FedTAR (ours)
+64.37%
+66.34%
+67.43%
+64.81%
+68.95%
+69.20%
+37.98%
+41.76%
+41.95%
+55.72%
+59.02%
+59.53%
+(a) GSM8K
+(b) MMLU
+(c) BBH
+(d) Dolly
+Fig. 5: Training dynamics under federated settings. We report loss (left) and accuracy (right) across communication rounds on
+four datasets. Our method achieves faster convergence and consistently better performance.
+TABLE II: Results on dolly (ROUGE-L).
+Method
+Dolly-15K
+α
+0.1
+0.5
+0.9
+Base Model
+24.54%
+24.54%
+24.54%
+Centralized
+34.17%
+34.17%
+34.17%
+Local
+25.89%
+27.03%
+33.23%
+FedAvg
+23.56%
+25.57%
+34.05%
+FedProx
+24.45%
+27.65%
+33.17%
+SCAFFOLD
+23.17%
+26.80%
+26.40%
+FFA-LoRA
+30.02%
+31.60%
+33.61%
+Fedex-LoRA
+30.58%
+31.36%
+33.00%
+FedSVD
+31.21%
+31.53%
+32.90%
+FedTAR (ours)
+31.88%
+32.12%
+34.13%
+Qwen1.5-MoE-A2.7B [33]. Qwen1.5-MoE-A2.7B has 14.3
+billion parameters in total and 2.7 billion activated parameters
+during runtime with 64 fine-grained experts in each layer. As
+a highly competitive open-source MoE model with fewer than
+3B activated parameters, Qwen1.5-MoE-A2.7B is particularly
+suitable for federated scenarios involving multiple resource-
+constrained devices. Four benchmark tasks are used for eval-
+uation: GSM8K (math reasoning) [34], MMLU (knowledge
+understanding) [35], BBH (complex reasoning) [36], and
+Dolly-15K (instruction following) [37]. We evaluate model
+performance using task-specific metrics. For GSM8K and
+BBH, Exact Match (EM) accuracy is reported. For MMLU,
+we use classification accuracy (ACC). For Dolly-15K, we use
+ROUGE-L to measure quality.
+
+
+TABLE III: Ablation study of the proposed method across four
+datasets (α = 0.5).
+Variant
+GSM8K
+Dolly
+MMLU
+BBH
+Avg.
+Full model
+66.34%
+32.12%
+68.95%
+41.76%
+52.29%
+w/o SVD
+64.17%
+26.56%
+66.24%
+37.31%
+48.57%
+w/o clustering
+63.65%
+27.01%
+67.87%
+39.14%
+49.42%
+w/o reconstruction
+64.83%
+27.75%
+67.43%
+39.77%
+49.95%
+mean-only router
+65.26%
+31.24%
+68.32%
+41.34%
+51.54%
+coact-only router
+65.67%
+31.58%
+68.51%
+41.56%
+51.83%
+w/o router (FedAvg)
+63.87%
+25.57%
+65.00%
+36.72%
+47.79%
+b) Comparison Methods: We compare FedTAR with
+several FL baseline methods and state-of-the-art federated
+LLM fine-tuning methods. 1. FedAvg [14]: Baseline FL
+method. Both LoRA matrix A and B are trained locally and
+averaged on server. 2. FedProx [15]: The standard federated
+learning baseline. An extension of FedAvg with a proximal
+regularization term, which mitigates client drift under het-
+erogeneous data distributions. 3. Scaffold [16]: A variance
+reduction method, correcting client drift by control variates.
+4. FFA-LoRA [22]: It fixes matrix A and only update B for
+decreasing the server aggregation bias. 5. FedEx-LoRA [23]:
+After training A and B, the redefined residual is added to pre-
+trained matrix. 6. FedSVD [24]: Only B is updated on server.
+Client refactorizes BA locally via SVD. FedTAR (ours): Only
+the B is updated while keeping A fixed. We leverage routing
+features to reconstruct task-aware updates.
+c) Implementation Details:
+We adopt Alpaca-GPT-4
+dataset for training and evaluation on GSM8K, BBH and
+MMLU, following general instruction-tuning protocol. To sim-
+ulate data heterogeneity in FL, the training data are partitioned
+across clients by Dirichlet distribution. For Dolly-15K (in-
+struction following), we follow the setting of [38]. Specifically,
+Dolly-15K contains 15015 data samples corresponding to 8
+tasks. 1188 samples from one task are reserved for evaluation,
+while the remaining date are used for training. The training
+data are partitioned across clients via a Dirichlet distribution
+based on the task category This setup introduces a more
+challenging form of task heterogeneity.
+The training data are partitioned among 10 clients using
+a Dirichlet distribution with α ∈0.1, 0.5, 0.9 to simulate
+different levels of non-IID data distributions. A smaller α
+indicates stronger heterogeneity. LoRA is used with rank
+r = 8, scaling factor 16, and dropout rate 0.05. Each round
+takes approximately 2 to 3 minutes. The learning rate is set
+to 1 × 10−5, and the maximum input sequence length is
+256 tokens. Each client uses a local batch size of 16. All
+clients are trained for 100 communication rounds. In each
+round, each client locally updates the parameters using vanilla
+SGD for τ = 5 steps, with the gradient clipping norm set
+to 2. We incorporate differential privacy (DP) into federated
+training to protect transmission privacy with ϵ = 6. The
+standard deviation is below 0.5% for all reported results. All
+experiments are conducted on a single NVIDIA RTX Ada
+6000 Pro GPU.
+B. Insight Validation
+We first verify our insight that task space and update
+space exhibit a corresponding relationship. Fig. 3 visualizes
+the client distributions in both update directions and task
+coordinates using t-SNE on Dolly-15K with 10 clients and
+α = 0.5. The clustering results in the two spaces exhibit
+a high-level consistency. For example, clients 5 and 7 are
+grouped into the same cluster in both spaces, indicating that
+their update behaviors are aligned with their underlying task
+representations. In addition, different clusters in the update
+space show distinct convergence directions. For instance, the
+yellow and red clusters are clearly separated, revealing po-
+tential update conflicts under diverse tasks. Furthermore, Fig.
+4 shows the KL divergence [39] between expert usage dis-
+tributions of different FL methods and that of the centralized
+training model, where lower values indicate better consistency.
+FedTAR achieves the lowest KL divergence, outperforming
+local training, FedAvg, and FedSVD. This demonstrates that
+task-aware aggregation better preserves task structure and
+reduces update conflicts, making the aggregated updates more
+consistent with centralized training.
+C. Main Results
+a) Performance Evaluation: Tables I and II present the
+performance of FedTAR and comparison methods under vary-
+ing levels of data heterogeneity. The best and second-best
+results are highlighted in green and yellow, respectively. All
+baselines suffer performance degradation as data heterogeneity
+increases. For example, on GSM8K, FedAvg drops from
+0.6639 (α = 0.9) to 0.5126 (α = 0.1), while FedSVD
+decreases from 0.6671 to 0.6311. In particular, these baseline
+methods lack explicit task awareness, making them prone to
+conflicting updates. In contrast, FedTAR consistently achieves
+SOTA across all settings. For instance, under α = 0.1, FedTAR
+reaches 0.6437, outperforming FedAvg (0.5126) and FedSVD
+(0.6311), and further improves to 0.6743 at α = 0.9. Similar
+trends are observed on other datasets, with more pronounced
+gains on Dolly-15K where task heterogeneity is stronger.
+Under α = 0.1, FedTAR achieves 0.3188, outperforming
+FedAvg (0.2356) and SCAFFOLD (0.2317), and remaining
+competitive with FedSVD (0.3121).
+b) Training Curves: FedTAR improves communication
+efficiency by achieving higher performance within fewer com-
+munication rounds through faster convergence. As shown
+in Fig. 5, on GSM8K and BBH, FedTAR reaches its best
+performance within 10 rounds, while the second-best method,
+FedSVD, requires around 30 rounds. On MMLU and Dolly-
+15K, despite more fluctuating loss curves, FedTAR consis-
+tently maintains superior performance.
+Overall, FedTAR achieves both superior performance and
+improved communication efficiency under different heteroge-
+neous settings.
+D. Ablation Study
+To quantify the effectiveness of each component in our
+design, we conduct ablation studies by comparing the full
+
+
+Fig. 6: Impact of number of clients in FedTAR (α = 0.5).
+model with several variants: (1) w/o SVD: removing the
+SVD decomposition and directly aggregating full updates and
+routing features on the server; (2) w/o clustering: applying
+reconstruction to the FedAvg result without task-based cluster-
+ing; (3) w/o reconstruction: performing task-based clustering
+and aggregation without the reconstruction step; (4) mean-
+only router: using only the average expert usage as the routing
+feature; (5) coact-only router: using only the average expert
+co-activation as the routing feature; (6) w/o router: removing
+routing features entirely, which degenerates to FedAvg.
+As shown in Table III, removing any component leads
+to performance degradation. Among all variants, w/o router
+results in the most significant drop, with the average perfor-
+mance decreasing from 52.29% to 47.79%. Removing SVD
+also leads to a notable decrease, from 52.29% to 48.57%.
+This shows that SVD effectively extracts structured update
+directions and task coordinates. Without SVD, the model tends
+to learn entangled signals, limiting the update–task alignment
+mechanism. Meanwhile, w/o clustering and w/o reconstruction
+further degrade performance, indicating that both task group-
+ing and task-aligned reconstruction are essential for mitigating
+update conflicts. Furthermore, using partial routing features,
+such as only the mean expert usage (51.54%) or only expert
+co-activation (51.83%), is inferior to the full model (52.29%),
+indicating that a richer task representation is needed to fully
+capture task heterogeneity.
+E. Parameters
+a) Impact of client number in FedTAR: We first inves-
+tigate the impact of the number of clients. As illustrated in
+Fig. 6, FedTAR consistently outperforms the baseline methods,
+FedAvg and FedSVD, regardless of the number of clients.
+For example, on the GSM8K+BBH+MMLU tasks, FedTAR
+achieves approximately 0.59, 0.55, and 0.53 with 10, 20, and
+30 clients, respectively, while FedAvg drops from approxi-
+mately 0.55 to 0.51. A similar trend is observed on Dolly:
+as the number of clients increases, FedTAR maintains the
+best performance, decreasing only slightly from approximately
+0.32 to 0.31. These results indicate that although performance
+slightly drops as the number of clients increases, FedTAR
+remains more robust than the baseline methods.
+b) Impact of LoRA rank in FedTAR: We further analyze
+the effect of LoRA rank in Fig. 7. We tested the model perfor-
+mance for LoRA ranks ranging from 4 to 64. As r increased
+Fig. 7: Impact of number of rank in FedTAR (α = 0.5).
+Fig. 8: Impact of number of cluster in FedTAR (α = 0.5).
+from 4 to 8, FedTAR’s performance improved from approx-
+imately 0.65 to 0.66 on the GSM8K+BBH+MMLU dataset
+and from 0.31 to 0.32 on the Dolly dataset; performance
+then plateaued. In contrast, baseline methods such as FedAvg
+show only marginal improvements (e.g., approximately 0.55
+to 0.56). This suggests that a moderate rank is sufficient for
+FedTAR to capture the fundamental update structure while
+avoiding unnecessary parameter overhead.
+c) Impact of cluser number in FedTAR: Finally, we ex-
+amine the impact of the number of clusters in Fig. 8. Increasing
+the number of clusters from 1 to 5 improves performance from
+approximately 0.57 to 0.59 on the GSM8K+MMLU+BBH
+dataset, and from 0.30 to 0.32 on the Dolly dataset. However,
+further increasing the number of clusters leads to a slight
+performance decline or a plateau. This indicates a trade-off
+between capturing finer-grained task structures and maintain-
+ing sufficient data within each cluster. FedTAR maintains the
+best performance across all settings.
+VI. CONCLUSION
+In this paper, we propose FedTAR, a task-aware federated
+fine-tuning method for MoE-based LLMs. FedTAR leverages
+routing features to establish a mapping between task coordi-
+nates and update directions. Based on the task coordinates,
+the server aggregates local updates through clustering and re-
+constructs the aggregated result using the learned mapping. In
+this way, FedTAR preserves expert specialization and mitigates
+conflicting updates on shared experts. Experimental results on
+four tasks demonstrate that FedTAR achieves state-of-the-art
+performance, highlighting the importance of task-aware MoE
+aggregation for heterogeneous federated fine-tuning.
+
+
+VII. ACKNOWLEDGE
+This work was supported by the National Science Founda-
+tion of U.S. (2416872, 2315596, 2244219, 2146497, 2551417,
+2548961).
+REFERENCES
+[1] S. Mu and S. Lin, “A comprehensive survey of mixture-of-experts:
+Algorithms, theory, and applications,” arXiv preprint arXiv:2503.07137,
+2025.
+[2] D. Zhang, J. Song, Z. Bi, X. Song, Y. Yuan, T. Wang, J. Yeong, and
+J. Hao, “Mixture of experts in large language models,” arXiv preprint
+arXiv:2507.11181, 2025.
+[3] Y. Zhou, T. Lei, H. Liu, N. Du, Y. Huang, V. Zhao, A. M. Dai, Q. V.
+Le, J. Laudon et al., “Mixture-of-experts with expert choice routing,”
+Advances in Neural Information Processing Systems, vol. 35, pp. 7103–
+7114, 2022.
+[4] Y. Zhuang, Z. Zheng, F. Wu, and G. Chen, “Litemoe: Customizing on-
+device llm serving via proxy submodel tuning,” in Proceedings of the
+22nd ACM Conference on Embedded Networked Sensor Systems, 2024,
+pp. 521–534.
+[5] H. Wang, Q. Zhou, Z. Hong, and S. Guo, “D2moe: Dual routing and
+dynamic scheduling for efficient on-device moe-based llm serving,” in
+Proceedings of the 31st Annual International Conference on Mobile
+Computing and Networking, 2025, pp. 574–588.
+[6] H. Ke, W. Jin, and H. Wang, “Carboncp: Carbon-aware dnn partitioning
+with conformal prediction for sustainable edge intelligence,” arXiv
+preprint arXiv:2404.16970, 2024.
+[7] Z. Wang, Y. Zhou, Y. Shi, and K. B. Letaief, “Federated fine-tuning
+for pre-trained foundation models over wireless networks,” IEEE Trans-
+actions on Wireless Communications, vol. 24, no. 4, pp. 3450–3464,
+2025.
+[8] F. Wu, Z. Li, Y. Li, B. Ding, and J. Gao, “Fedbiot: Llm local fine-tuning
+in federated learning without full model,” in Proceedings of the 30th
+ACM SIGKDD conference on knowledge discovery and data mining,
+2024, pp. 3345–3355.
+[9] J. Bai, M. Tong, Y. Liu, Z. Jia, and Z. Zheng, “Understanding and
+leveraging the expert specialization of context faithfulness in mixture-
+of-experts llms,” in Proceedings of the 2025 Conference on Empirical
+Methods in Natural Language Processing, 2025, pp. 21 938–21 953.
+[10] H. Ke, J. Morris, K. Oguchi, X. Cao, Y. Liu, H. Wang, and Y. Ding,
+“Mambev: Enabling state space models to learn birds-eye-view rep-
+resentations,” in The Thirteenth International Conference on Learning
+Representations, 2025.
+[11] A. Wang, X. Sun, R. Xie, S. Li, J. Zhu, Z. Yang, P. Zhao, W. Han,
+Z. Kang, D. Wang et al., “Hmoe: Heterogeneous mixture of experts
+for language modeling,” in Proceedings of the 2025 Conference on
+Empirical Methods in Natural Language Processing, 2025, pp. 21 954–
+21 968.
+[12] E. Yu, J. Lu, K. Wang, X. Yang, and G. Zhang, “Drift-aware collabora-
+tive assistance mixture of experts for heterogeneous multistream learn-
+ing,” in Proceedings of the AAAI Conference on Artificial Intelligence,
+vol. 40, no. 19, 2026, pp. 16 199–16 207.
+[13] H. Xu, S. Shrestha, W. Chen, Z. Li, and Z. Cai, “Dp-fedlora: Privacy-
+enhanced federated fine-tuning for on-device large language models,”
+arXiv preprint arXiv:2509.09097, 2025.
+[14] B. McMahan, E. Moore, D. Ramage, S. Hampson, and B. A. y Arcas,
+“Communication-efficient learning of deep networks from decentralized
+data,” in Artificial intelligence and statistics.
+Pmlr, 2017, pp. 1273–
+1282.
+[15] T. Li, A. K. Sahu, M. Zaheer, M. Sanjabi, A. Talwalkar, and V. Smith,
+“Federated optimization in heterogeneous networks,” Proceedings of
+Machine learning and systems, vol. 2, pp. 429–450, 2020.
+[16] S. P. Karimireddy, S. Kale, M. Mohri, S. Reddi, S. Stich, and A. T.
+Suresh, “Scaffold: Stochastic controlled averaging for federated learn-
+ing,” in International conference on machine learning.
+PMLR, 2020,
+pp. 5132–5143.
+[17] M. Ye, X. Fang, B. Du, P. C. Yuen, and D. Tao, “Heterogeneous feder-
+ated learning: State-of-the-art and research challenges,” ACM Computing
+Surveys, vol. 56, no. 3, pp. 1–44, 2023.
+[18] M. Li, P. Xu, J. Hu, Z. Tang, and G. Yang, “From challenges and pitfalls
+to recommendations and opportunities: Implementing federated learning
+in healthcare,” Medical image analysis, vol. 101, p. 103497, 2025.
+[19] A. Karunamurthy, K. Vijayan, P. R. Kshirsagar, and K. T. Tan, “An op-
+timal federated learning-based intrusion detection for iot environment,”
+Scientific Reports, vol. 15, no. 1, p. 8696, 2025.
+[20] X. Lin, W. Wang, Y. Li, S. Yang, F. Feng, Y. Wei, and T.-S. Chua, “Data-
+efficient fine-tuning for llm-based recommendation,” in Proceedings
+of the 47th international ACM SIGIR conference on research and
+development in information retrieval, 2024, pp. 365–374.
+[21] Z. Gao, Z. Zhang, Y. Guo, and Y. Gong, “Federated adaptive fine-tuning
+of large language models with heterogeneous quantization and lora,” in
+Ieee infocom 2025-ieee conference on computer communications. IEEE,
+2025, pp. 1–10.
+[22] Y. Sun, Z. Li, Y. Li, and B. Ding, “Improving lora in privacy-preserving
+federated learning,” arXiv preprint arXiv:2403.12313, 2024.
+[23] R. Singhal, K. Ponkshe, and P. Vepakomma, “Fedex-lora: Exact aggre-
+gation for federated and efficient fine-tuning of large language models,”
+in Proceedings of the 63rd Annual Meeting of the Association for
+Computational Linguistics (Volume 1: Long Papers), 2025, pp. 1316–
+1336.
+[24] G. Yan and W. Du, “Feddial: Adaptive federated learning with hierarchi-
+cal discriminative network for large pre-trained models,” in Proceedings
+of the 31st ACM SIGKDD Conference on Knowledge Discovery and
+Data Mining V. 2, 2025, pp. 3461–3470.
+[25] S. Lee, S. Park, D. B. Lee, D. Wagner, H. Seong, T. Bocklet, J. Lee,
+and S. J. Hwang, “FedSVD: Adaptive orthogonalization for private
+federated learning with loRA,” in The Thirty-ninth Annual Conference
+on Neural Information Processing Systems, 2025. [Online]. Available:
+https://openreview.net/forum?id=Qq19n9LZ97
+[26] G. Hu, Y. Teng, P. Wu, and N. Wang, “Fft-moe: Efficient federated
+fine-tuning for foundation models via large-scale sparse moe under
+heterogeneous edge,” arXiv preprint arXiv:2508.18663, 2025.
+[27] F. Xue, Z. Zheng, Y. Fu, J. Ni, Z. Zheng, W. Zhou, and Y. You, “Open-
+moe: An early effort on open mixture-of-experts language models,”
+arXiv preprint arXiv:2402.01739, 2024.
+[28] E. J. Hu, Y. Shen, P. Wallis, Z. Allen-Zhu, Y. Li, S. Wang, L. Wang,
+W. Chen et al., “Lora: Low-rank adaptation of large language models.”
+Iclr, vol. 1, no. 2, p. 3, 2022.
+[29] D. F. Harvey, G. Weale, and B. Yilmaz, “Optimizing moe routers:
+Design, implementation, and evaluation in transformer models,” arXiv
+preprint arXiv:2506.16419, 2025.
+[30] H. Ke, J. Morris, Y. Liu, S. Kitai, K. Oguchi, Y. Ding, and H. Wang,
+“Deformba: Vision state space model with adaptive state fusion,” arXiv
+preprint arXiv:2605.21308, 2026.
+[31] S. Yuan, Y. Zheng, T. Wang, BINBINLIU, and H. Xu, “MoORE:
+SVD-based model moe-ization for conflict- and oblivion-resistant
+multi-task adaptation,” in The Thirty-ninth Annual Conference on
+Neural Information Processing Systems, 2025. [Online]. Available:
+https://openreview.net/forum?id=g42mGfR6We
+[32] H. Nguyen, N. Ho, and A. Rinaldo, “On least square estimation in soft-
+max gating mixture of experts,” in Proceedings of the 41st International
+Conference on Machine Learning, 2024, pp. 37 707–37 735.
+[33] Qwen
+Team,
+“Qwen1.5-moe-a2.7b,”
+https://huggingface.co/Qwen/
+Qwen1.5-MoE-A2.7B, 2024, large-scale Mixture-of-Experts Language
+Model.
+[34] K. Cobbe, V. Kosaraju, M. Bavarian, M. Chen, H. Jun, L. Kaiser,
+M. Plappert, J. Tworek, J. Hilton, R. Nakano et al., “Training verifiers
+to solve math word problems,” arXiv preprint arXiv:2110.14168, 2021.
+[35] D. Hendrycks, C. Burns, S. Basart, A. Zou, M. Mazeika, D. Song, and
+J. Steinhardt, “Measuring massive multitask language understanding,” in
+International Conference on Learning Representations, 2021. [Online].
+Available: https://openreview.net/forum?id=d7KBjmI3GmQ
+[36] M. Kazemi, B. Fatemi, H. Bansal, J. Palowitch, C. Anastasiou, S. V.
+Mehta, L. K. Jain, V. Aglietti, D. Jindal, Y. P. Chen et al., “Big-
+bench extra hard,” in Proceedings of the 63rd Annual Meeting of the
+Association for Computational Linguistics (Volume 1: Long Papers),
+2025, pp. 26 473–26 501.
+[37] M. Conover, M. Hayes, A. Mathur, J. Xie, J. Wan, S. Shah, A. Ghodsi,
+P. Wendell, M. Zaharia, and R. Xin, “Free dolly: Introducing the world’s
+first truly open instructiontuned llm,” 2023.
+[38] Z. Qin, Z. Wu, B. He, and S. Deng, “Federated data-efficient instruction
+tuning for large language models,” in Findings of the Association for
+Computational Linguistics: ACL 2025, 2025, pp. 15 550–15 568.
+[39] J. Li, H. Chen, L. Liu, Y. Yuan, Y. Wang, Y. Zhang, C. Yu, X. Tong,
+W. Zhang, S. Liu et al., “Expert divergence learning for moe-based
+language models,” arXiv preprint arXiv:2603.00054, 2026.
+
+
+APPENDIX
+A. Effectiveness of Task-Aware Alignment
+We provide a principled justification for why routing-based
+task representations can guide update aggregation.
+a) Routing captures task structure.: In MoE models, the
+output for an input x is
+f(x) =
+K
+X
+k=1
+gk(x)Ek(x),
+(19)
+where gk(x) is the routing probability over experts. For a client
+dataset Di, define the average routing pattern:
+µi = Ex∼Di[g(x)],
+(20)
+and co-activation matrix
+Ci = E[g(x)g(x)⊤].
+(21)
+These statistics summarize how inputs are distributed across
+experts. Since different tasks typically activate different sub-
+sets of experts, (µi, Ci) encode the task preference of client
+i. In particular, clients with similar data distributions induce
+similar routing patterns.
+b) From routing to updates.: Local updates are driven
+by gradients:
+∆wi = −η Ex∼Di∇ℓ(f(x)).
+(22)
+Since f(x) depends on routing weights g(x), the gradient
+depends on how tokens are assigned to experts. Under standard
+smoothness assumptions on the loss ℓand expert networks Ek,
+the mapping from routing behavior to updates is continuous.
+We therefore model this relationship as
+∆wi = Φ(zi) + ξi,
+(23)
+where zi is the routing-based representation, ∥ξi∥≤σ, and Φ
+is L-Lipschitz:
+∥Φ(zi) −Φ(zj)∥≤L∥zi −zj∥.
+(24)
+c) Implication for aggregation.: For any clients i, j, we
+obtain
+∥∆wi −∆wj∥≤L∥zi −zj∥+ 2σ.
+(25)
+Thus, proximity in the task space implies proximity in update
+directions. This provides a theoretical basis for clustering
+clients using routing features and performing task-aware ag-
+gregation.
+d) Low-rank structure of updates.: Empirically, client
+updates often lie in a low-dimensional subspace due to shared
+model structure. We model this as
+∆wi = Uai + ϵi,
+(26)
+where U ∈Rd×m is an orthonormal basis (e.g., obtained via
+SVD over client updates).
+Given aggregated update
+∆wagg =
+X
+i
+αi∆wi,
+(27)
+define
+∆wTA = UU ⊤∆wagg.
+(28)
+Let
+∆w⋆=
+X
+i
+αiUai.
+(29)
+Then
+∥∆wTA −∆w⋆∥≤∥∆wagg −∆w⋆∥.
+(30)
+Moreover, the error admits the decomposition
+∥∆wagg−∆w⋆∥2 = ∥∆wTA−∆w⋆∥2+∥(I−UU ⊤)
+X
+i
+αiϵi∥2.
+(31)
+This shows that task-aware projection removes the compo-
+nent orthogonal to the shared subspace, which corresponds to
+conflicting or task-inconsistent update directions.
+B. Least-Squares Alignment and Projection
+We detail the computation of the task–update mapping used
+in the main method.
+Let
+Z = [z1, . . . , zN] ∈Rr×N,
+∆= [∆w1, . . . , ∆wN] ∈Rd×N.
+We aim to approximate the (unknown) mapping Φ from
+task space to update space. To this end, we solve the ridge
+regression problem:
+M = arg min
+M ∥∆−MZ∥2
+F + λ∥M∥2
+F .
+(32)
+Expanding the objective,
+∥∆−MZ∥2
+F = Tr((∆−MZ)(∆−MZ)⊤),
+and taking derivative with respect to M yields the normal
+equation:
+MZZ⊤+ λM = ∆Z⊤.
+(33)
+Solving for M gives
+M = ∆Z⊤(ZZ⊤+ λI)−1.
+(34)
+Thus, Mzi provides the best linear approximation (under
+squared loss) to the update induced by task zi. The column
+space of M therefore defines a task-aligned update subspace
+that captures the dominant variation of client updates condi-
+tioned on tasks.
+Given an aggregated update ∆′, we project it onto this
+subspace by solving
+min
+a ∥∆′ −Ma∥2
+2 + λ∥a∥2
+2,
+(35)
+whose solution is
+a⋆= (M⊤M + λI)−1M⊤∆′.
+(36)
+Substituting back yields the projected update:
+∆proj = M(M⊤M + λI)−1M⊤∆′.
+(37)
+This projection restricts the aggregated update to directions
+that can be expressed as combinations of task-conditioned
+update bases, thereby filtering out components that are incon-
+sistent with any learned task structure.

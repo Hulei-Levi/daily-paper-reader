@@ -1,0 +1,654 @@
+REH-FUSE: RELIABILITY-AWARE HIERARCHICAL FUSION OF EXPERTS FOR
+MULTIMODAL EMOTION RECOGNITION IN CONVERSATION
+Guan-Hua Wen
+Hou-Chiang Tseng
+Kuan-Yu Chen
+National Taiwan University of Science and Technology, Taipei, Taiwan
+ABSTRACT
+Multimodal emotion recognition in conversation (ERC) re-
+quires adapting to the instance-dependent reliability of differ-
+ent evidence sources. Lexical content may be decisive, vocal
+expression may provide complementary cues, or accurate
+recognition may require cross-modal interaction; fixed fusion
+does not explicitly account for this variation. We propose
+ReH-FUSE, a reliability-aware framework with dialogue-
+aware text, audio, and cross-modal experts.
+Its decision-
+level router first models the relative preference between text
+and audio and then balances the resulting unimodal mixture
+against the cross-modal expert. This factorization separates
+unimodal competition from cross-modal selection.
+Across
+three independent runs on IEMOCAP, ReH-FUSE achieves
+74.34% weighted F1 and 73.11% macro F1; on MELD, it
+achieves 68.03% weighted F1.
+Controlled ablations show
+that learned routing outperforms uniform expert averaging
+and benefits from cross-modal interaction.
+Index Terms— emotion recognition in conversation,
+multimodal learning, mixture of experts, reliability-aware
+routing, decision-level fusion
+1. INTRODUCTION
+Emotion recognition in conversation (ERC) predicts an emo-
+tion for each utterance while accounting for dialogue history,
+speaker interaction, commonsense, and emotion transitions
+[1, 2, 3, 4]. Multimodal ERC additionally uses non-lexical
+evidence, most commonly speech. Its central difficulty is that
+evidence reliability varies by utterance: text may directly re-
+veal an emotion, vocal expression may disambiguate neutral
+wording, or neither modality may suffice without their inter-
+action. Consequently, the problem is not merely how to com-
+bine modalities, but which evidence path should drive each
+prediction.
+Many multimodal systems combine representations at
+predetermined stages or treat cross-modal interaction as uni-
+formly beneficial [5, 6]. This assumption can propagate noisy
+evidence, dilute an already sufficient unimodal cue, and fail to
+express which source should contribute most strongly when
+text and audio disagree. Strong pretrained encoders improve
+candidate representations but do not solve evidence selec-
+tion.
+We therefore formulate multimodal ERC as routing
+over competing decision sources.
+We propose ReH-FUSE (Reliability-Aware Hierarchical
+Fusion of Experts), comprising contextualized text, audio,
+and cross-modal predictors. Instead of a flat three-way gate,
+its router first models the relative preference between the
+unimodal experts and then balances their mixture against
+cross-modal interaction. This decomposition mirrors two dis-
+tinct questions: which unimodal source is more useful, and
+whether unimodal evidence is sufficient.
+Our contributions are threefold. First, we formulate mul-
+timodal ERC as instance-dependent routing over evidence
+sources with varying reliability.
+Second, we introduce a
+hierarchical decision-level router that separates unimodal
+competition from cross-modal selection.
+Third, repeated
+evaluations, matched architectural ablations, and gate anal-
+yses demonstrate the benefit of learned expert routing over
+uniform fusion.
+2. RELATED WORK
+Context-aware ERC models use recurrent state tracking,
+graph message passing, commonsense, and directed dia-
+logue structures to model speakers and emotion transitions
+[1, 2, 3, 4].
+Multimodal benchmarks such as IEMOCAP
+and MELD established the complementary roles of seman-
+tic and expressive cues [7, 8]; subsequent methods intro-
+duced graph interaction, hierarchical cross-attention, dis-
+entangled context-modality representations, and teacher-led
+fusion [5, 9, 10, 11].
+Adaptive expert models learn input-dependent compu-
+tation [12, 13, 14]. Gated multimodal units similarly mod-
+ulate modality contributions [6], while MiSTER-E applies
+decision-level MoE to ERC [15]. ReH-FUSE differs in factor-
+izing the routing decision: modality-specific dialogue mod-
+eling precedes cross-modal interaction, and text-versus-audio
+preference is separated from unimodal-versus-cross-modal
+selection. The gate can therefore be interpreted as structured
+competition among contextualized decision sources rather
+than adaptive feature interpolation.
+arXiv:2609.13857v1  [cs.LG]  12 Sep 2026
+
+
+Fig. 1. ReH-FUSE architecture with text, audio, and cross-
+modal experts followed by hierarchical decision routing.
+3. REH-FUSE
+3.1. Problem formulation
+Figure 1 summarizes the three expert paths and hierarchical
+decision router. Let a dialogue be D = {(ui, ai, si)}N
+i=1,
+where ui, ai, and si are the text, aligned audio, and speaker
+of utterance i. Given a context window
+Hi = {(uj, aj, sj)}i
+j=max(1,i−K),
+(1)
+the task is to predict yi ∈{1, . . . , C}. Three experts produce
+logits z(t)
+i , z(a)
+i
+, and z(c)
+i
+for text, audio, and cross-modal evi-
+dence. The routed prediction is
+zi =
+X
+e∈{t,a,c}
+g(e)
+i
+z(e)
+i ,
+X
+e
+g(e)
+i
+= 1.
+(2)
+The weights gi specify source contributions. Here, reliabil-
+ity denotes learned routing preference, not calibrated signal
+quality.
+3.2. Utterance encoding and context experts
+The text input concatenates the current utterance with at most
+four preceding turns using compact turn and local-speaker
+markers.
+Qwen2.5-7B encodes this sequence with LoRA
+adaptation [16, 17]. Audio is converted to mono at 16 kHz,
+truncated to 6 s on IEMOCAP or 8 s on MELD, and en-
+coded with Qwen2-Audio-7B [18]. For both modalities, a
+learned mixture of the top four hidden layers is pooled at
+the last valid step and projected to a shared hidden dimen-
+sion.
+Learned speaker embeddings are concatenated after
+projection.
+Before modalities interact, separate text and audio context
+experts process each dialogue sequence. Each expert com-
+bines multi-kernel temporal convolutions, a Transformer en-
+coder, and a bidirectional GRU with residual normalization:
+Ht = f (t)
+ctx(Xt),
+Ha = f (a)
+ctx(Xa).
+(3)
+This arrangement captures local patterns, longer dependen-
+cies, and conversational flow while preserving modality-
+specific evidence.
+3.3. Cross-modal expert
+The cross-modal branch applies attention in both directions.
+Text queries audio and audio queries text, after which an MLP
+fuses the original and attended sequences:
+eHt = Attn(Ht, Ha),
+eHa = Attn(Ha, Ht),
+(4)
+Hc = ffuse([Ht, Ha, eHt, eHa]).
+(5)
+A self-attention refinement block then yields the cross-modal
+representation. Separate classifiers map Ht, Ha, and Hc to
+the three expert logits in Eq. (2).
+3.4. Hierarchical decision routing
+The router consumes contextual representations and pre-
+softmax expert predictions. Its first-stage input is q(m)
+i
+=
+[Ht,i, Ha,i, z(t)
+i , z(a)
+i
+]. An MLP and softmax produce mi =
+[m(t)
+i , m(a)
+i
+], with m(t)
+i
++ m(a)
+i
+= 1.
+We form Hu,i =
+m(t)
+i Ht,i + m(a)
+i
+Ha,i and z(u)
+i
+= m(t)
+i z(t)
+i
++ m(a)
+i
+z(a)
+i
+. The
+second-stage input is q(f)
+i
+= [Hu,i, Hc,i, z(u)
+i
+, z(c)
+i ]. A sec-
+ond MLP and softmax produce fi = [f (u)
+i
+, f (c)
+i
+], which allo-
+cates weight between the unimodal mixture and cross-modal
+expert. Their structured three-way distribution is
+gi,base = [f (u)
+i
+m(t)
+i , f (u)
+i
+m(a)
+i
+, f (c)
+i
+].
+(6)
+Final weights are obtained by applying softmax to scaled log
+probabilities, with an optional global text-prior bias.
+The
+evaluated recipe does not append uncertainty statistics or en-
+gineered reliability features to q(m)
+i
+or q(f)
+i
+. In contrast to
+flat routing, Eq. (6) explicitly encodes the two decisions un-
+derlying evidence selection. Training uses focal loss [19] on
+the routed logits and an entropy regularizer that discourages
+premature gate collapse without forcing uniform routing.
+The factorization is deliberately imposed at the decision
+level. Feature gates may suppress a modality before it forms
+a contextualized prediction, whereas a flat decision gate
+must learn unimodal competition and cross-modal necessity
+jointly. ReH-FUSE preserves three complete hypotheses: mi
+describes modality preference and f (c)
+i
+describes demand for
+interaction.
+Soft weights keep every expert differentiable
+and express intermediate uncertainty rather than irreversible
+assignments.
+
+
+Table 1. Shared training and input configuration.
+Component
+Setting
+Text / audio backbone
+Qwen2.5-7B / Qwen2-Audio-7B
+Text adaptation
+LoRA
+Hidden-state aggregation
+Learned top-4 mixture
+Utterance pooling
+Last valid step
+Text length / history
+256 tokens / K = 4
+Audio duration
+6 s (IEMOCAP), 8 s (MELD)
+Batch / accumulation
+1 / 4
+Checkpoint criterion
+Validation W-F1
+4. EXPERIMENTS
+4.1. Datasets and protocol
+IEMOCAP contains dyadic interactions with six labels;
+MELD contains multi-party conversations with seven labels
+[7, 8]. We use their standard splits and select checkpoints by
+validation W-F1. Qwen2.5-7B and Qwen2-Audio-7B serve
+as the text and audio backbones, with a learned top-four layer
+mixture, last-step pooling, 256 text tokens, K = 4, batch size
+1, and gradient accumulation 4. Audio is truncated to 6 s
+for IEMOCAP and 8 s for MELD. Main results and matched
+IEMOCAP ablations are reported over three random seeds.
+Table 1 summarizes shared settings; only maximum audio
+duration differs between datasets. Text prompts expose no
+future utterances.
+Router targets are latent because no annotation identifies
+which expert to prefer. Initial preference may therefore re-
+flect logit scale rather than evidence quality. Warm-up estab-
+lishes usable experts before joint optimization; temperature
+controls routing sharpness and entropy regularization helps
+prevent premature gate collapse. Test metrics are not used for
+selection.
+4.2. Main results
+Table 2 compares ReH-FUSE with representative context-
+aware and multimodal fusion systems. ReH-FUSE achieves
+74.34% W-F1 on IEMOCAP, an absolute improvement of
+3.44 points over the strongest listed comparator. On MELD,
+it achieves 68.03% W-F1, remaining competitive with prior
+systems but below MiSTER-E.
+The controls answer complementary questions. Uniform
+averaging shows that three predictions without selection are
+insufficient. The adaptive flat gate isolates the smaller ben-
+efit of hierarchical factorization. Removing the cross-modal
+expert tests whether unimodal routing alone explains the re-
+sult and produces the largest loss.
+Single-path evaluation
+is not separately trained unimodal modeling because shared
+modules still receive the complete objective; the compari-
+son therefore concerns inference routes within one matched
+architecture.
+Table 2. Models are compared in weighted F1 (%) on IEMO-
+CAP and MELD. † denotes the second-best result.
+Method
+IEMOCAP MELD
+SMIN [20]
+70.5
+63.7
+HCAM [9]
+70.5
+65.8
+DF-ERC [10]
+69.5
+64.5
+Broad-Mamba [21]
+70.2
+65.6
+TelME [11]
+69.3
+67.2
+CFN-ESA [22]
+68.5
+65.9
+MiSTER-E [15]
+70.9†
+69.5
+ReH-FUSE
+74.34
+68.03†
+Table 3. Matched IEMOCAP architectural ablations (%).
+Configuration
+W-F1
+M-F1
+ReH-FUSE
+74.94
+73.53
+w/o hierarchical router
+74.36
+72.57
+Flat three-way gate
+74.60
+73.34
+Uniform expert average
+73.66
+71.70
+w/o cross-modal expert
+66.37
+63.32
+Text-only path
+74.57
+73.31
+Audio-only path
+74.42
+73.20
+Full-joint schedule
+71.34
+69.41
+4.3. Ablation and routing analysis
+Table 3 distinguishes expert availability from routing struc-
+ture on IEMOCAP. Uniform averaging loses 1.28 W-F1,
+while a flat gate narrows the gap to 0.34, indicating a modest
+benefit from hierarchical factorization. Removing the cross-
+modal branch causes the largest drop. Neither single path
+recovers the routed result, and full-joint training underper-
+forms the warm-up-then-joint schedule.
+Table 4 provides a behavioral check on the reliability in-
+terpretation. Cross-modal routing dominates on average, but
+weights vary by class. Among unimodal branches, audio out-
+weighs text for angry and happy utterances, whereas text out-
+weighs audio for excited utterances. Neutral, sad, and frus-
+trated receive the largest average cross-modal weights. Thus,
+routing varies across utterances and classes rather than col-
+lapsing to fixed fusion.
+4.4. Further analysis
+Table 5 shows that all standalone IEMOCAP experts improve
+after joint training. Cross-modal accuracy gains 30.14 points
+and remains strongest; text and audio gain 29.53 and 15.29
+points.
+A strong cross-modal expert does not imply unit
+routing weight: retaining unimodal paths can, in principle,
+preserve useful decisions when interaction is unnecessary or
+detrimental.
+
+
+Table 4. Mean IEMOCAP routing weights across three runs.
+Class
+Text
+Audio
+Cross
+Angry
+.13
+.21
+.66
+Excited
+.26
+.12
+.62
+Frustrated
+.12
+.12
+.76
+Happy
+.17
+.20
+.63
+Neutral
+.08
+.08
+.85
+Sad
+.10
+.14
+.76
+Overall
+.14
+.13
+.73
+Table 5. Standalone IEMOCAP expert accuracy (%).
+Checkpoint
+Text
+Audio
+Cross
+Warm-up
+33.29
+21.76
+44.27
+Joint training
+62.82
+37.05
+74.41
+Aggregate W-F1 can obscure whether gains extend be-
+yond frequent emotions. Table 6 shows that IEMOCAP is
+comparatively balanced: all classes exceed 60 F1, with sad
+and excited strongest and happy weakest. MELD presents a
+different failure mode. Neutral and joy remain strong, but
+rare fear and disgust reach only 25.5 and 37.2, and sadness
+also trails the aggregate result. The competitive MELD W-
+F1 should therefore not be interpreted as uniformly reliable
+recognition across labels.
+Figure 2 probes conversational-history sensitivity with
+fixed architecture. Removing history is harmful, but more is
+not monotonically better: K = 2 and K = 6 trail K = 4.
+The peak at moderate context suggests diminishing utility as
+irrelevant turns consume the fixed input budget.
+Taken together, the ablations separate expert diversity
+from routing structure. Uniform averaging tests a constant
+ensemble; the flat gate retains adaptive weighting but removes
+hierarchical factorization; and removing the cross-modal ex-
+pert tests unimodal routing alone.
+The respective deficits
+indicate benefits from adaptive weighting and cross-modal
+interaction, while the 0.34-point hierarchical advantage re-
+mains modest.
+Class-conditional routing is descriptive rather than causal:
+it shows variation across emotions, but not that larger weight
+identifies the objectively cleaner modality. Controlled degra-
+dation is needed to test whether operational reliability tracks
+signal quality.
+Together, these analyses qualify the reliability claim. Gate
+weights are learned proxies for trust, not calibrated measure-
+ments of modality quality, and may degrade under unobserved
+corruption or distribution shift.
+Table 6. Per-class F1 (%) from three-run analyses.
+Class
+IEMOCAP
+MELD
+Angry/anger
+68.7
+57.6
+Happy/joy
+61.5
+63.0
+Neutral
+76.7
+80.5
+Sad/sadness
+82.8
+44.1
+Frustrated
+71.1
+–
+Excited/surprise
+77.9
+62.0
+Disgust
+–
+37.2
+Fear
+–
+25.5
+Fig. 2. IEMOCAP sensitivity to the number K of preceding
+dialogue turns.
+5. LIMITATIONS
+Evidence is strongest on IEMOCAP; MELD analysis is less
+complete. Although the matched ablations use three seeds,
+the small hierarchical-versus-flat difference requires caution.
+Class-conditional gate averages do not establish causal corre-
+spondence to signal quality. Large backbones also confound
+representation strength with routing, and tests omit controlled
+missing-modality, acoustic-noise, and transcript-noise condi-
+tions.
+Graded corruption, missing-modality tests, cross-corpus
+transfer, and cost-matched backbones would help determine
+whether routing responds to degraded evidence rather than
+dataset-specific priors.
+6. CONCLUSION
+ReH-FUSE treats multimodal ERC as hierarchical routing
+over contextualized text, audio, and cross-modal decisions.
+Learned routing outperforms uniform averaging; hierarchical
+factorization modestly improves on a flat gate in matched
+IEMOCAP results. These results suggest adaptive selection
+offers flexibility when modality utility varies.
+The cross-
+modal ablation further indicates that routing complements,
+rather than replaces, explicit interaction between modalities.
+Future work should test calibration under distribution shift.
+
+
+7. COMPLIANCE WITH ETHICAL STANDARDS
+This study used the existing datasets and involved no new data col-
+lection from human participants. The datasets were used in accor-
+dance with their terms of use.
+8. ACKNOWLEDGMENT
+This work was supported by the NSTC, Taiwan (Grant NSTC 115-
+2221-E-011-151), and the Empower Vocational Education Research
+Center at NTUST under the MOE Higher Education Sprout Project.
+The authors thank the National Center for High-Performance Com-
+puting, Taiwan, for computational and storage resources.
+9. REFERENCES
+[1] Navonil Majumder, Soujanya Poria, Devamanyu Hazarika,
+Rada Mihalcea, Alexander Gelbukh, and Erik Cambria, “Dia-
+logueRNN: An attentive RNN for emotion detection in conver-
+sations,” in Proceedings of the AAAI Conference on Artificial
+Intelligence, 2019, vol. 33, pp. 6818–6825.
+[2] Deepanway Ghosal, Navonil Majumder, Soujanya Poria, Niy-
+ati Chhaya, and Alexander Gelbukh, “DialogueGCN: A graph
+convolutional neural network for emotion recognition in con-
+versation,” in Proceedings of the 2019 Conference on Empir-
+ical Methods in Natural Language Processing and the 9th In-
+ternational Joint Conference on Natural Language Processing
+(EMNLP-IJCNLP), 2019, pp. 154–164.
+[3] Deepanway Ghosal, Navonil Majumder, Alexander Gelbukh,
+Rada Mihalcea, and Soujanya Poria,
+“COSMIC: Common-
+sense knowledge for emotion identification in conversations,”
+in Findings of the Association for Computational Linguistics:
+EMNLP 2020, 2020, pp. 2470–2481.
+[4] Weizhou Shen, Siyue Wu, Yunyi Yang, and Xiaojun Quan,
+“Directed acyclic graph network for conversational emotion
+recognition,” in Proceedings of the 59th Annual Meeting of
+the Association for Computational Linguistics and the 11th In-
+ternational Joint Conference on Natural Language Processing
+(Volume 1: Long Papers), 2021, pp. 1551–1560.
+[5] Jingwen Hu, Yuchen Liu, Jinming Zhao, and Qin Jin,
+“MMGCN: Multimodal fusion via deep graph convolution net-
+work for emotion recognition in conversation,” in Proceedings
+of the 59th Annual Meeting of the Association for Computa-
+tional Linguistics and the 11th International Joint Conference
+on Natural Language Processing (Volume 1: Long Papers),
+2021, pp. 5666–5675.
+[6] John Arevalo, Thamar Solorio, Manuel Montes-y G´omez, and
+Fabio A. Gonz´alez, “Gated multimodal units for information
+fusion,” arXiv preprint arXiv:1702.01992, 2017.
+[7] Carlos
+Busso,
+Murtaza
+Bulut,
+Chi-Chun
+Lee,
+Abe
+Kazemzadeh, Emily Mower, Samuel Kim, Jeannette N.
+Chang, Sungbok Lee, and Shrikanth S. Narayanan, “IEMO-
+CAP: Interactive emotional dyadic motion capture database,”
+Language Resources and Evaluation, vol. 42, no. 4, pp.
+335–359, 2008.
+[8] Soujanya Poria, Devamanyu Hazarika, Navonil Majumder,
+Gautam Naik, Erik Cambria, and Rada Mihalcea, “MELD: A
+multimodal multi-party dataset for emotion recognition in con-
+versations,” in Proceedings of the 57th Annual Meeting of the
+Association for Computational Linguistics, 2019, pp. 527–536.
+[9] Soumya Dutta and Sriram Ganapathy, “Hcam – hierarchical
+cross attention model for multi-modal emotion recognition,”
+arXiv preprint arXiv:2304.06910, 2023.
+[10] Bobo Li, Hao Fei, Lizi Liao, Yu Zhao, Chong Teng, Tat-
+Seng Chua, Donghong Ji, and Fei Li,
+“Revisiting disen-
+tanglement and fusion on modality and context in conversa-
+tional multimodal emotion recognition,” in Proceedings of the
+31st ACM International Conference on Multimedia, 2023, pp.
+5923–5934.
+[11] Taeyang Yun, Hyunkuk Lim, Jeonghwan Lee, and Min Song,
+“TelME: Teacher-leading multimodal fusion network for emo-
+tion recognition in conversation,” in Proceedings of the 2024
+Conference of the North American Chapter of the Association
+for Computational Linguistics: Human Language Technolo-
+gies (Volume 1: Long Papers), Mexico City, Mexico, 2024, pp.
+82–95, Association for Computational Linguistics.
+[12] Robert A. Jacobs, Michael I. Jordan, Steven J. Nowlan, and
+Geoffrey E. Hinton, “Adaptive mixtures of local experts,” Neu-
+ral Computation, vol. 3, no. 1, pp. 79–87, 1991.
+[13] Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy
+Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean,
+“Outra-
+geously large neural networks: The sparsely-gated mixture-of-
+experts layer,” in International Conference on Learning Rep-
+resentations, 2017.
+[14] William Fedus, Barret Zoph, and Noam Shazeer,
+“Switch
+transformers: Scaling to trillion parameter models with simple
+and efficient sparsity,” Journal of Machine Learning Research,
+vol. 23, no. 120, pp. 1–39, 2022.
+[15] Soumya Dutta, Smruthi Balaji, and Sriram Ganapathy,
+“A
+mixture-of-experts model for multimodal emotion recognition
+in conversations,” Computer Speech & Language, vol. 100,
+2026, Art. no. 101965.
+[16] Qwen Team,
+“Qwen2.5 technical report,”
+arXiv preprint
+arXiv:2412.15115, 2024.
+[17] Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu,
+Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen, “LoRA:
+Low-rank adaptation of large language models,” in Interna-
+tional Conference on Learning Representations, 2022.
+[18] Yunfei Chu, Jin Xu, Qian Yang, Haojie Wei, Xipin Wei, Zhi-
+fang Guo, Yichong Leng, Yuanjun Lv, Jinzheng He, Junyang
+Lin, Chang Zhou, and Jingren Zhou, “Qwen2-Audio technical
+report,” arXiv preprint arXiv:2407.10759, 2024.
+[19] Tsung-Yi Lin, Priya Goyal, Ross Girshick, Kaiming He, and
+Piotr Doll´ar, “Focal loss for dense object detection,” in Pro-
+ceedings of the IEEE International Conference on Computer
+Vision, 2017, pp. 2999–3007.
+[20] Zheng Lian, Bin Liu, and Jianhua Tao,
+“SMIN: Semi-
+supervised multi-modal interaction network for conversational
+emotion recognition,” IEEE Transactions on Affective Com-
+puting, vol. 14, no. 3, pp. 2415–2429, 2023.
+[21] Yuntao Shou, Tao Meng, Wei Ai, and Keqin Li, “Revisiting
+multi-modal emotion learning with broad state space models
+and probability-guidance fusion,” in Machine Learning and
+Knowledge Discovery in Databases: Research Track. 2025,
+Lecture Notes in Computer Science, pp. 509–525, Springer
+Nature Switzerland.
+[22] Jiang Li, Xiaoping Wang, Yingjian Liu, and Zhigang Zeng,
+“CFN-ESA: A cross-modal fusion network with emotion-shift
+awareness for dialogue emotion recognition,” IEEE Transac-
+tions on Affective Computing, vol. 15, no. 4, pp. 1919–1933,
+2024.

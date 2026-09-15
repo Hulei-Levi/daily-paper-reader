@@ -1,0 +1,1887 @@
+Mixture-of-Experts Language Models Can Be Strong and Efficient
+Retrievers
+Anubhav Shrestha1†, Safal Shrestha1, Minwu Kim1, Torsten Suel2, Keith Ross1
+1New York University Abu Dhabi
+2New York University
+Abstract
+Recent work has shown that fine-tuning
+decoder-only large language models (LLMs)
+for retrieval yields strong first-stage retriev-
+ers, with effectiveness improving as backbones
+grow in size. However, every query and docu-
+ment must pass through the full model, so en-
+coding cost increases with model size. Mixture-
+of-Experts (MoE) LLMs activate only a subset
+of parameters per token and are widely used to
+scale generative models, yet remain underex-
+plored as retrievers. We systematically study
+MoE backbones for retrieval by training MoE
+and dense LLMs from several families using
+the same procedure, evaluating them across
+diverse datasets, and measuring query encod-
+ing time under the same serving configuration.
+We show that MoE retrievers outperform dense
+retrievers with comparable active parameter
+counts by up to 3.0 nDCG@10 points on BEIR.
+One of our strongest MoE retrievers matches
+an 8B dense retriever with 59% fewer active pa-
+rameters and 18% lower query encoding time.
+We further show that the number of experts
+used for query encoding can be reduced with-
+out retraining or re-indexing, retaining more
+than 99% of retrieval effectiveness while reduc-
+ing query encoding time by up to 26%. Recent
+rerankers provide only modest additional gains
+over strong MoE first stages, which often match
+or exceed the reranked configurations we eval-
+uate. Together, these results show that MoE
+LLMs can be strong and efficient first-stage
+retrievers.
+1
+Introduction
+Information retrieval (IR) identifies documents rel-
+evant to a query and is a core component of web
+search, open-domain question answering, fact veri-
+fication, and retrieval-augmented generation (Ba-
+jaj et al., 2016; Chen et al., 2017; Thorne et al.,
+2018; Lewis et al., 2020). Sparse retrievers such
+†Corresponding author: anubhav.shrestha@nyu.edu
+0
+200
+400
+600
+800
+1000
+1200
+1400
+Inference time (µs / query)
+56
+57
+58
+59
+60
+61
+62
+63
+Avg. BEIR-13 nDCG@10
+Dense retriever
+MoE retriever
+OLMo-1B
+OLMo-7B
+LFM2-1.2B
+LFM2-2.6B
+Qwen3-4B
+Qwen3-8B
+DeepSeek-7B
+OLMoE-A1.1B
+LFM2-A1.6B
+DS-V2-A2.0B
+Qwen3-MoE-A3.1B
+Figure 1: Effectiveness–efficiency trade-off for MoE
+(⋆) and dense (•) LLM retrievers. Each point shows a
+model’s average BEIR-13 nDCG@10 against its query
+inference time. Arrows connect each MoE retriever to
+the larger dense model of its family: MoE retrievers
+reach comparable or higher effectiveness than dense
+models that have 1.6 to 6.4 times more active parameters
+while reducing query inference time by 19% to 78%.
+MoE retrievers consistently lie near the Pareto frontier
+(shaded).
+as BM25 rank documents by term overlap, while
+learned sparse methods such as SPLADE expand
+and reweight terms to reduce vocabulary mismatch
+(Robertson and Zaragoza, 2009; Formal et al.,
+2021). Dense retrievers instead encode queries
+and documents into vector representations and rank
+them by similarity (Karpukhin et al., 2020), and
+have become a strong approach to first-stage re-
+trieval (Izacard et al., 2022; Wang et al., 2022; Xiao
+et al., 2024).
+Decoder-only LLMs have recently become
+strong dense-retrieval backbones.
+RepLLaMA
+showed that these models can be fine-tuned as bi-
+encoders (Ma et al., 2024), and subsequent work
+has improved the training data, objectives, and ar-
+chitectures used to adapt LLMs for retrieval (Wang
+et al., 2024; BehnamGhader et al., 2024; Lee et al.,
+2025a; Zhang et al., 2025). Across several model
+families, larger backbones generally yield stronger
+1
+arXiv:2609.13486v1  [cs.IR]  11 Sep 2026
+
+
+retrievers (Ni et al., 2022; Zhang et al., 2025; Xu
+et al., 2026b). This scaling, however, increases en-
+coding cost. Documents can be encoded offline, but
+every query must still pass through the full back-
+bone (Ma et al., 2026), making query encoding cost
+an increasingly important concern for LLM-based
+retrieval (Abdallah et al., 2026; Lei et al., 2025).
+MoE architectures offer a natural alternative to
+dense scaling. By routing each token to a small
+subset of experts, they allow total model capac-
+ity to grow without activating all parameters for
+every token (Lepikhin et al., 2021; Fedus et al.,
+2022).
+MoE backbones now appear in several
+prominent open-weight LLM families, including
+Mixtral, DeepSeek, OLMoE, and Qwen3 (Jiang
+et al., 2024; DeepSeek-AI, 2024b; Muennighoff
+et al., 2025a; Yang et al., 2025). However, public
+evidence for using recent pretrained MoE LLM
+backbones as first-stage retrievers remains limited.
+Nomic Embed v2 trains a purpose-built, BERT-
+scale MoE encoder specifically for text embedding
+(Nussbaum and Duderstadt, 2025), while GritLM
+evaluates a single Mixtral-based model under a
+joint generative and embedding objective and re-
+ports lower retrieval effectiveness than its dense
+counterpart (Muennighoff et al., 2025b). Propri-
+etary MoE embedding models have also been re-
+leased, but provide few public details about their
+architectures or measured efficiency (Liu, 2026).
+Existing evidence is therefore narrow and mixed,
+leaving it unclear whether recent pretrained MoE
+LLMs can be competitive first-stage retrievers.
+This motivates our central question: can pre-
+trained MoE LLMs outperform dense retrievers at
+comparable active parameter counts while match-
+ing larger dense retrievers at lower query encoding
+cost? The answer does not directly follow from
+generative-model results. Retrieval requires encod-
+ing an entire sequence into a single representation
+rather than predicting the next token, so routing
+patterns learned during language-model pretrain-
+ing may not transfer directly to retrieval. Moreover,
+active parameter count alone does not determine
+query encoding cost, which also depends on model
+depth, how many experts are activated across a
+batch, and the serving configuration (Chu et al.,
+2025).
+To answer this question, we conduct a controlled
+study of MoE backbones for retrieval. We train
+MoE and dense LLMs from several families using
+the same training procedure, compare each MoE re-
+triever on BEIR (Thakur et al., 2021) with a dense
+model from the same family with a comparable
+active parameter count (its active-matched control),
+and measure query and document encoding time
+under the same hardware and serving configura-
+tion. Across model families, MoE retrievers outper-
+form their active-matched controls and can match
+larger dense retrievers at lower query encoding cost.
+Figure 1 summarizes this effectiveness–efficiency
+trade-off. Our contributions are as follows:
+• We present a controlled comparison of MoE
+and dense LLM backbones as first-stage re-
+trievers. Across several model families, MoE
+retrievers outperform dense counterparts with
+comparable active parameter counts by 1.4–
+3.0 nDCG@10 points on BEIR-13.
+• We show that MoE retrievers can match
+larger dense retrievers at lower encoding cost.
+Qwen3-MoE matches Qwen3-8B with 59%
+fewer active parameters and 18% lower query
+encoding time.
+• We show that the number of experts used for
+query encoding can be reduced without re-
+training or re-indexing. With half as many
+experts per query token, an MoE retriever
+activates 19% fewer parameters and reduces
+query encoding time by 26%, while retaining
+more than 99% of its effectiveness.
+• We show that recent rerankers yield limited
+gains over strong MoE first stages. Rerank-
+ing the top 200 adds at most 2.2 nDCG@10
+points, while the two strongest MoE retriev-
+ers without reranking match or exceed every
+reranked configuration we evaluate.
+Together, these results show that pretrained MoE
+LLMs can provide a strong and efficient alternative
+to dense LLMs for first-stage retrieval.
+2
+Related Work
+LLM-based dense retrieval.
+RepLLaMA estab-
+lished a practical recipe for adapting decoder-only
+LLMs into bi-encoders (Ma et al., 2024), and sub-
+sequent work explored LLM-generated training
+data (Wang et al., 2024), bidirectional attention
+(BehnamGhader et al., 2024), latent-attention pool-
+ing (Lee et al., 2025a), and multi-stage training
+(Zhang et al., 2025). Across GTR and Qwen3 Em-
+bedding, larger backbones generally yield stronger
+dense retrievers (Ni et al., 2022; Zhang et al., 2025).
+2
+
+
+A parallel line of work reduces query encoding
+cost through distillation or structural compression
+of dense retrievers (Wang and Hong, 2023; Cohen
+et al., 2024; Ma et al., 2026; Lei et al., 2025). EffiR,
+for example, reduces model depth and MLP width
+before retrieval fine-tuning (Lei et al., 2025). We
+study a complementary source of efficiency already
+present in pretrained MoE backbones, comparing
+them with dense backbones under the same training
+procedure and serving configuration.
+MoE backbones for retrieval.
+Existing work on
+MoE architectures for retrieval spans several dis-
+tinct settings. Nomic Embed v2 trains a purpose-
+built, BERT-scale MoE encoder for text embedding
+(Nussbaum and Duderstadt, 2025), while GritLM
+evaluates a single Mixtral-based model under a
+joint generative and embedding objective and re-
+ports lower MTEB retrieval effectiveness than its
+dense 7B counterpart (Muennighoff et al., 2025b).
+Voyage AI has released proprietary MoE embed-
+ding models, but provides few public details about
+their architectures or measured efficiency (Liu,
+2026). MoEE (Li and Zhou, 2025) instead uses the
+routing weights of a frozen MoE, alone or together
+with its hidden states, to construct training-free
+embeddings without fine-tuning the backbone for
+retrieval. Concurrent work on Qwen3 MoE stud-
+ies a cross-encoder reranker rather than first-stage
+retrieval (Xu et al., 2026a). Other work uses “mix-
+ture of experts” for added expert modules, task- or
+domain-specific experts, routed adapters, or mix-
+tures of whole retrievers (Sokli et al., 2025; Cheng
+et al., 2023; Romero Calvo et al., 2025; Kasela
+et al., 2024; Lee et al., 2025b; Kalra et al., 2025);
+these approaches introduce or compose expert com-
+ponents for retrieval rather than studying pretrained
+MoE LLM backbones directly as first-stage retriev-
+ers. We instead study pretrained MoE LLMs from
+five families, with controlled comparisons against
+active-matched dense models within three fami-
+lies under the same training procedure and serving
+configuration.
+Inference-time expert reduction.
+Prior work on
+generative MoE models has explored reducing ex-
+pert computation after training through expert skip-
+ping (Lu et al., 2024; Zhong et al., 2024) or budget
+allocation (Liu et al., 2026). Retrieval creates a
+different asymmetric setting because queries and
+documents are encoded independently: the num-
+ber of experts used for query encoding can be re-
+duced while leaving the corpus index unchanged.
+We study this query-side reduction across multiple
+pretrained MoE backbones and measure its effect
+on both retrieval effectiveness and query encoding
+time.
+3
+Training LLM Retrievers
+Given a query Q and a corpus of documents C,
+first-stage retrieval aims to rank documents by their
+relevance to Q and return the highest-scoring can-
+didates. We follow the standard dense bi-encoder
+formulation, in which queries and documents are
+encoded independently and ranked by the similar-
+ity of their vector representations (Karpukhin et al.,
+2020).
+3.1
+Adapting LLMs for Retrieval
+Dense retrievers have traditionally been built on
+bidirectional encoders such as BERT, which attend
+over the whole input and use the representation of a
+prepended [CLS] token as the embedding (Devlin
+et al., 2019; Karpukhin et al., 2020). Decoder-
+only LLMs are instead unidirectional: each token
+attends only to the tokens before it, so a prepended
+token would see none of the input, and only the
+final token has seen all of it. Following RepLLaMA
+(Ma et al., 2024), we therefore append an end-of-
+sequence token to each query and document and
+take the final-layer hidden state of that token as the
+representation of the whole input,
+VX = Decoder(X ⟨eos⟩)[−1],
+where Decoder(·) returns the final-layer represen-
+tation of each input token and [−1] selects the end-
+of-sequence token. Here, X can be either a query
+Q or a document D. We L2-normalize the repre-
+sentations and score a document against a query by
+the dot product Sim(Q, D) = V⊤
+QVD.
+3.2
+Training Objective
+Given a query Q, a relevant document D+, and
+a set of negative documents {D−
+i }, we train the
+retriever with the InfoNCE loss
+L(Q, D+, {D−
+i }) = −log p(D = D+ | Q)
+= −log
+eSim(Q,D+)/τ
+eSim(Q,D+)/τ + P
+i eSim(Q,D−
+i )/τ .
+Here, τ is a temperature parameter. The negatives
+combine hard negatives, which are non-relevant
+documents paired with Q in the training collection,
+3
+
+
+and in-batch negatives, which are documents as-
+sociated with the other queries in the same batch
+(Karpukhin et al., 2020; Ma et al., 2024). We use
+the same bi-encoder formulation and training ob-
+jective for all dense and MoE backbones.
+4
+Experimental Setup
+Model Backbones.
+We study MoE and dense
+decoder-only LLMs from five families: OLMo
+(Groeneveld et al., 2024; Muennighoff et al.,
+2025a), LFM2 (Liquid AI, 2025), Qwen3 (Yang
+et al., 2025), DeepSeek (DeepSeek-AI, 2024a,b),
+and Gemma (Gemma Team, 2025, 2026). Our
+primary comparisons pair OLMoE-1B-7B, LFM2-
+8B-A1B, and Qwen3-30B-A3B with dense models
+from the same family having similar active param-
+eter counts, which we call active-matched dense
+controls. We also include larger dense models from
+these families as reference points. DeepSeek-V2-
+Lite and Gemma-4 26B-A4B are additional MoE
+backbones, but their dense comparisons differ in
+model generation or architecture and are therefore
+treated as descriptive rather than controlled. Fur-
+ther model details are provided in Appendix A.1.
+Training Data.
+We train all retrievers on the re-
+cently released RLHN dataset (Thakur et al., 2025).
+RLHN is a lite version of the larger BGE retrieval
+training mixture (Li et al., 2025) and uses LLM
+judgments to identify and relabel false hard nega-
+tives, yielding cleaner training supervision. It has
+been reported to improve retrieval effectiveness
+while reducing training cost (Thakur et al., 2025;
+Xu et al., 2026b).
+Implementation Details.
+We train all retrievers
+in Tevatron (Gao et al., 2023) using LoRA (Hu
+et al., 2022). For MoE backbones, the adapters
+cover the expert parameters while the pretrained
+routers remain frozen, as keeping them frozen was
+more effective in preliminary experiments (see Ap-
+pendix A.3). Each query is paired with one rele-
+vant document and 15 hard negatives; with a global
+batch size of 32, each query is contrasted against
+512 candidate documents. Queries and documents
+are truncated to 192 tokens during training, and we
+use temperature τ = 0.01, bf16 precision, and gra-
+dient checkpointing. Full training configurations
+are provided in Appendix A.2.
+Evaluation.
+We evaluate with exact search on
+13 BEIR datasets (Thakur et al., 2021) and report
+nDCG@10. Queries and documents are truncated
+to 512 tokens at evaluation time.
+5
+Are MoE Backbones Effective
+Retrievers?
+We first examine whether pretrained MoE back-
+bones are effective for first-stage retrieval. Table 1
+reports nDCG@10 on 13 BEIR datasets, with re-
+trievers grouped by model family. For each con-
+trolled family, we compare the MoE retriever with
+an active-matched dense control and a larger dense
+model from the same family, using the training
+procedure described in Sections 3 and 4.
+MoE Retrievers Outperform Active-Matched
+Dense Controls
+Across all three controlled fam-
+ilies, the MoE retriever outperforms its active-
+matched dense control. OLMo-MoE improves the
+BEIR-13 average from 56.6 to 59.6 nDCG@10,
+a gain of 3.0 points (5.3% relative). LFM2-MoE
+improves over LFM2-1.2B by 1.7 points (2.9%),
+while Qwen3-MoE improves over Qwen3-4B by
+1.4 points (2.3%). Gemma shows a similar gain
+at nearly identical active parameter counts, with
+Gemma-4-MoE reaching 62.5 compared with 60.6
+for Gemma-3-4B (3.0% relative).
+The improvements are also consistent across
+datasets. The MoE retriever outperforms its active-
+matched dense control on 11 of 13 datasets for
+OLMo, 10 of 13 for LFM2, and 9 of 13 for
+Qwen3. Across these comparisons, the gains occur
+at comparable active parameter counts: OLMo-1B
+and OLMo-MoE both activate 1.28B parameters,
+LFM2-MoE activates 1.56B compared with 1.17B
+for LFM2-1.2B, Qwen3-MoE activates 3.35B com-
+pared with 4.02B for Qwen3-4B, and the two
+Gemma models activate 3.82B and 3.88B.
+MoE Retrievers Are Competitive with Larger
+Dense Models
+The MoE retrievers also match
+or exceed larger dense models from the same fam-
+ilies while activating substantially fewer parame-
+ters. OLMo-MoE exceeds OLMo-7B by 1.0 point
+(59.6 vs. 58.6) with 5.4× fewer active parame-
+ters, while LFM2-MoE exceeds LFM2-2.6B by
+1.1 points (59.4 vs. 58.3) with 1.6× fewer. Qwen3-
+MoE reaches 62.3, essentially matching Qwen3-8B
+at 62.4 with 59% fewer active parameters.
+The descriptive DeepSeek comparison shows the
+same pattern: DeepSeek-MoE exceeds DeepSeek-
+7B by 0.7 points (60.6 vs. 59.9) with 2.6× fewer
+active parameters. Gemma-4-MoE is the strongest
+4
+
+
+Table 1: BEIR-13 effectiveness (nDCG@10) of dense and MoE retrievers trained with the same procedure, grouped
+by model family; † marks the MoE retrievers. Active is the active parameter count in billions. Bold marks the best
+average within each family; for each MoE retriever, the parentheses give its relative improvement over the family’s
+active-matched dense control and larger dense model, in that order, with – where the family has no such model.
+Family
+Model
+Active
+Arg Clm DBP FEV FiQ Hot NFC NQ Quo SCI ScF TRC Tou
+Average
+OLMo-1B
+1.28
+57.9 37.5 42.5 88.0 44.3 77.1 37.2 62.1 83.8 24.3 75.5
+80.0 26.2
+56.6
+OLMo
+OLMo-MoE-A1B†
+1.28
+74.9 38.3 46.2 89.7 48.4 79.6 41.1 66.7 82.6 26.1 76.3
+80.4 24.7
+59.6 (+5.3%, +1.7%)
+OLMo-7B
+6.89
+61.7 36.4 46.8 89.0 56.1 81.9 39.4 65.9 87.4 27.8 77.5
+68.6 23.8
+58.6
+LFM2-1.2B
+1.17
+67.5 36.5 44.6 87.2 43.9 74.9 38.9 62.6 80.2 24.3 72.9
+84.6 31.8
+57.7
+LFM2
+LFM2-MoE-A1B†
+1.56
+73.9 39.8 46.5 87.5 46.3 77.3 40.6 66.4 78.2 26.7 77.5
+82.0 29.1
+59.4 (+2.9%, +1.9%)
+LFM2-2.6B
+2.57
+69.0 39.1 44.3 86.1 46.7 76.9 39.8 65.8 76.6 26.5 74.6
+84.5 27.4
+58.3
+Qwen3-4B
+4.02
+74.3 42.4 48.0 89.4 52.3 80.6 39.3 67.7 83.5 28.8 74.4
+83.9 27.2
+60.9
+Qwen3
+Qwen3-MoE-A3B†
+3.35
+78.7 41.8 48.6 90.4 57.1 83.7 42.0 70.8 80.5 32.2 77.3
+83.6 23.4
+62.3 (+2.3%, -0.2%)
+Qwen3-8B
+8.19
+74.3 41.7 51.6 91.3 58.3 83.1 40.9 70.3 81.3 29.7 75.0
+87.3 26.7
+62.4
+DeepSeek DeepSeek-MoE-A2B† 2.66
+75.0 42.3 47.2 89.7 53.3 81.7 41.5 67.2 85.1 27.3 76.6
+79.0 21.5
+60.6 (–, +1.2%)
+DeepSeek-7B
+6.91
+70.6 41.4 47.0 89.4 49.7 78.4 39.4 65.4 83.9 25.4 74.7
+84.6 28.4
+59.9
+Gemma
+Gemma-3-4B
+3.88
+78.0 41.6 48.7 89.0 51.6 81.4 41.7 68.0 82.5 27.5 74.8
+80.2 22.9
+60.6
+Gemma-4-MoE-A4B† 3.82
+82.0 43.0 49.2 90.8 55.4 85.0 42.1 70.4 85.0 30.4 78.8
+79.5 20.3
+62.5 (+3.0%, –)
+retriever overall at 62.5 nDCG@10. Overall, the
+MoE retrievers match or exceed dense models that
+have 1.6–5.4× as many active parameters. We next
+examine whether these reductions in active param-
+eters translate into lower query encoding cost.
+6
+Are MoE Retrievers Efficient?
+Section 5 showed that MoE retrievers can match
+or exceed larger dense retrievers while activating
+substantially fewer parameters. Active parameter
+count, however, does not directly determine infer-
+ence cost, which also depends on model architec-
+ture and the serving configuration. We therefore
+measure both query and document encoding time
+directly.
+We measure query encoding time on 1,000
+queries from the Natural Questions (NQ) dataset
+in BEIR at batch size 128, and document encoding
+time on 1,000 documents from the NQ corpus at
+batch size 64, both on a single NVIDIA H100 GPU.
+Models are evaluated in bf16 using Hugging Face
+Transformers with torch.compile, with MoE re-
+trievers using their trained number of experts. Ta-
+ble 2 reports encoding time in microseconds per
+query and document; additional timing and serving
+details are provided in Appendix A.5.
+MoE Retrievers Are Cheaper Than the Larger
+Dense Models They Match.
+The MoE retriev-
+ers consistently require less encoding time than
+the larger dense models with comparable effective-
+ness. OLMo-MoE reduces query encoding time
+from 1,168 to 316 µs, a 3.7× reduction, and doc-
+Table 2: Query and document encoding time on a single
+NVIDIA H100 GPU, with the BEIR-13 nDCG@10
+average of Table 1 for reference. MoE rows (†) use
+their trained expert count. Active is the active parameter
+count in billions. Bold denotes the highest nDCG@10
+and the lowest time within each family. Parentheses
+compare each MoE retriever with its active-matched
+dense control and larger dense reference, respectively
+(↑faster, ↓slower).
+Model
+Active nDCG@10
+µs/q
+µs/d
+OLMo-1B
+1.28
+56.6
+201
+2,455
+OLMo-MoE-A1B†
+1.28
+59.6
+316 (↓1.6×, ↑3.7×)
+3,451 (↓1.4×, ↑4.1×)
+OLMo-7B
+6.89
+58.6
+1,168
+14,104
+LFM2-1.2B
+1.17
+57.7
+204
+2,350
+LFM2-MoE-A1B†
+1.56
+59.4
+374 (↓1.8×, ↑1.2×)
+3,837 (↓1.6×, ↑1.4×)
+LFM2-2.6B
+2.57
+58.3
+460
+5,330
+Qwen3-4B
+4.02
+60.9
+702
+8,873
+Qwen3-MoE-A3B†
+3.35
+62.3
+1,037 (↓1.5×, ↑1.2×) 11,050 (↓1.2×, ↑1.4×)
+Qwen3-8B
+8.19
+62.4
+1,271
+15,798
+DeepSeek-MoE-A2B† 2.66
+60.6
+587 (–, ↑1.8×)
+6,402 (–, ↑2.2×)
+DeepSeek-7B
+6.91
+59.9
+1,078
+14,124
+Gemma-3-4B
+3.88
+60.6
+619
+7,117
+Gemma-4-MoE-A4B† 3.82
+62.5
+1,115 (↓1.8×, –)
+12,658 (↓1.8×, –)
+ument encoding time from 14,104 to 3,451 µs, a
+4.1× reduction, relative to OLMo-7B. LFM2-MoE
+is 1.2× faster for query encoding and 1.4× faster
+for document encoding than LFM2-2.6B. Qwen3-
+MoE, which essentially matches Qwen3-8B in re-
+trieval effectiveness, reduces query encoding time
+from 1,271 to 1,037 µs and document encoding
+time from 15,798 to 11,050 µs. The descriptive
+DeepSeek comparison shows the same pattern,
+with DeepSeek-MoE reducing query and document
+encoding time by 1.8× and 2.2×, respectively.
+MoE retrievers are, however, slower than their
+5
+
+
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+Query-side active parameters (billions)
+0
+10
+20
+30
+40
+50
+60
+Avg. BEIR-13 nDCG@10
+k=1
+k=2
+k=4
+k=6 k=8
+k=1
+k=2
+k=3
+k=4
+k=1
+k=2
+k=4
+k=6
+k=8
+k=1
+k=2
+k=4
+k=6
+OLMo-MoE
+LFM2-MoE
+Qwen3-MoE
+DeepSeek-MoE
+0
+200
+400
+600
+800
+1000
+1200
+1400
+Inference time (µs / query)
+56
+57
+58
+59
+60
+61
+62
+63
+Avg. BEIR-13 nDCG@10
+Dense retriever
+MoE, trained experts
+MoE, reduced experts
+OLMo-1B
+OLMo-7B
+LFM2-1.2B
+LFM2-2.6B
+Qwen3-8B
+DeepSeek-7B
+k=6
+OLMo-MoE
+k=3
+LFM2-MoE
+k=6
+Qwen3-MoE
+k=3
+DeepSeek-MoE
+Figure 2: Query-side expert reduction. (a) Average BEIR-13 nDCG@10 against active query parameters as the query
+expert count k is reduced below the trained count (▲) with the corpus index fixed. (b) The effectiveness–efficiency
+view of Figure 1, with each MoE retriever at its trained expert count (▲) and selected reduced query expert count
+(⋆), joined by an arrow; dense retrievers (•) and the Pareto frontier (shaded) are as in Figure 1.
+active-matched dense controls while achieving
+higher retrieval effectiveness.
+Across OLMo,
+LFM2, and Qwen3, the MoE models require 1.5–
+1.8× more query encoding time despite having
+comparable active parameter counts, and document
+encoding shows the same broad pattern. Gemma
+similarly requires more encoding time than its
+active-scale dense comparison. These results rein-
+force that active parameter count alone is not a reli-
+able proxy for runtime. Instead, the efficiency ad-
+vantage of MoE backbones emerges when compar-
+ing models at similar retrieval effectiveness: they
+can match substantially larger dense retrievers at
+lower query and document encoding cost.
+Figure 1 summarizes the overall effectiveness–
+efficiency trade-off and also includes selected MoE
+retrievers at reduced query expert counts. As we
+show next, reducing the number of query-side ex-
+perts can further lower encoding cost without re-
+training or re-indexing, while largely preserving
+retrieval effectiveness.
+7
+Can MoE Retrievers Use Fewer Experts
+at Query Time?
+Section 6 showed that MoE retrievers can match
+larger dense retrievers at lower encoding cost,
+while remaining slower than their active-matched
+dense controls. We therefore ask whether query
+encoding can be made cheaper still. MoE back-
+bones are trained with a fixed number of experts
+selected per token, which we call the trained ex-
+pert count. Because queries and documents are
+encoded independently, we can reduce the number
+of experts used for query encoding after training
+while leaving the corpus index unchanged. This
+requires neither retraining nor re-indexing.
+For each MoE retriever, we re-encode only the
+queries with a smaller expert count k and search
+the unchanged corpus index built at the trained
+count. Query encoding time is measured as in
+Section 6. Figure 2(a) shows how BEIR-13 effec-
+tiveness changes as k is reduced for OLMo-MoE,
+LFM2-MoE, Qwen3-MoE, and DeepSeek-MoE,
+while Figure 2(b) places selected reduced-expert
+settings in the effectiveness–efficiency plane of Fig-
+ure 1. Detailed per-dataset results and query encod-
+ing times for additional query expert counts, includ-
+ing Gemma-4-MoE, are provided in Appendix A.4.
+Table 3: Query-side expert reduction. We report the
+smallest query expert count retaining at least 99% of
+trained-count BEIR-13 nDCG@10, except for LFM2-
+MoE, for which we use one fewer expert. Reductions
+in active query parameters and query encoding time are
+relative to the trained count.
+Model
+k
+Active ↓
+nDCG@10 retained
+Query time ↓
+OLMo-MoE-A1B
+8 →6
+15.7%
+99.5%
+17.5%
+LFM2-MoE-A1B
+4 →3
+15.5%
+98.4%
+14.7%
+Qwen3-MoE-A3B
+8 →6
+13.5%
+99.4%
+19.4%
+DeepSeek-MoE-A2B
+6 →3
+25.4%
+99.4%
+21.0%
+Gemma-4-MoE-A4B
+8 →4
+18.7%
+99.2%
+26.2%
+MoE Retrievers Preserve Effectiveness with
+Fewer Query Experts at Lower Cost.
+Table 3
+reports, for each MoE retriever, the smallest query
+expert count that retains at least 99% of its trained-
+count effectiveness, except LFM2-MoE, for which
+we use one fewer expert than its trained count of
+four. OLMo-MoE, Qwen3-MoE, DeepSeek-MoE,
+and Gemma-4-MoE retain 99.2–99.5% of their
+6
+
+
+BEIR-13 nDCG@10 while activating 13.5–25.4%
+fewer parameters per query and reducing query en-
+coding time by 17.5–26.2%. LFM2-MoE retains
+98.4% of its effectiveness while reducing query
+encoding time by 14.7%. Figure 2(a) shows that
+effectiveness generally degrades gradually under
+moderate reductions in k, with sharper losses only
+at the smallest expert counts.
+Figure 2(b) places these settings on the
+effectiveness–efficiency plane of Figure 1. The
+reduced settings move toward lower query encod-
+ing time with little loss in effectiveness, narrowing
+the efficiency gap to the active-matched dense con-
+trols while remaining competitive with the larger
+dense models. OLMo-MoE at k = 6 reaches 59.3
+nDCG@10 at 261 µs per query, compared with
+58.6 at 1,168 µs for OLMo-7B, a 4.5× reduction
+in query encoding time. Qwen3-MoE at k = 6
+remains within 0.5 points of Qwen3-8B while re-
+ducing query encoding time from 1,271 to 835 µs.
+Because only query-side routing is changed, these
+savings require neither retraining nor rebuilding the
+corpus index.
+8
+Do Strong MoE Retrievers Still Benefit
+from Reranking?
+Two-stage retrieval pipelines commonly use a fast
+first-stage retriever to generate a candidate set and
+a more expensive reranker to refine the ranking.
+We ask whether such reranking still provides mean-
+ingful gains when the first-stage MoE retriever is
+already strong. For each MoE retriever, we rerank
+its top 200 documents with three released pointwise
+rerankers: mxbai-rerank-large-v2 (Li et al., 2026),
+Qwen3-Reranker-0.6B (Zhang et al., 2025), and
+the older RankLLaMA-v1-7B (Ma et al., 2024),
+and report nDCG@10 in Table 4.
+Table 4: Reranking the top 200 documents of each
+MoE first stage with three released pointwise rerankers
+(BEIR-13 nDCG@10). None is the unreranked first
+stage; parentheses give the relative change from it.
+First stage
+None
+mxbai-v2 Qwen3-0.6B RankLLaMA-v1-7B
+LFM2-MoE-A1B
+59.4 61.4 (+3.4%)
+60.4 (+1.7%)
+55.1 (-7.2%)
+OLMo-MoE-A1B
+59.6 61.8 (+3.7%)
+60.3 (+1.2%)
+55.5 (-7.0%)
+DeepSeek-MoE-A2B
+60.6 61.5 (+1.5%)
+60.4 (-0.3%)
+55.4 (-8.5%)
+Qwen3-MoE-A3B
+62.3
+61.9 (-0.6%)
+60.6 (-2.7%)
+55.5 (-10.9%)
+Gemma-4-MoE-A4B
+62.5
+61.4 (-1.6%)
+60.6 (-3.0%)
+55.1 (-11.8%)
+Reranking Provides Limited Gains over Strong
+MoE First Stages.
+The benefit of reranking de-
+creases as the first-stage retriever becomes stronger.
+mxbai-rerank-large-v2 improves the three weaker
+MoE first stages by 0.9–2.2 nDCG@10 points,
+with the largest gain on OLMo-MoE, but reduces
+Qwen3-MoE and Gemma-4-MoE by 0.4 and 1.0
+points, respectively. Qwen3-Reranker-0.6B pro-
+vides smaller gains, adding at most 1.0 point and
+also reducing the effectiveness of the two strongest
+first stages. The older RankLLaMA-v1-7B reduces
+effectiveness for every MoE retriever we evaluate.
+Most notably, the two strongest MoE first stages
+remain competitive with every two-stage configu-
+ration without using a reranker: Qwen3-MoE and
+Gemma-4-MoE reach 62.3 and 62.5 nDCG@10, re-
+spectively, matching or exceeding the best reranked
+result. These results do not imply that reranking
+is generally ineffective; they are limited to three
+released pointwise rerankers and a reranking depth
+of 200. Rather, they show that as the first-stage
+retriever becomes stronger, the additional effective-
+ness provided by reranking can become small or
+even negative.
+9
+Discussion
+Our results show that active parameter count alone
+does not explain retrieval effectiveness for MoE
+backbones. Across several model families, MoE
+retrievers outperform dense controls with similar
+active parameter counts, suggesting that the larger
+pretrained capacity of MoE models remains use-
+ful after retrieval fine-tuning. These comparisons
+should not be interpreted as isolating sparse routing
+itself as the cause of the gains, since the MoE and
+dense backbones also differ in total model capacity.
+Nevertheless, the consistent gains across multiple
+families indicate that the result is not specific to a
+single architecture.
+Active parameter count is also not a direct mea-
+sure of inference cost. The MoE retrievers are
+slower than their active-matched dense controls,
+but can be substantially faster than larger dense re-
+trievers with similar effectiveness. Runtime there-
+fore depends on the architecture and serving con-
+figuration in addition to the number of active pa-
+rameters. Query-side expert reduction provides
+another way to lower online encoding cost without
+retraining or re-indexing, although the best expert
+count depends on the backbone and does not re-
+duce the memory required to store the full model.
+Finally, our reranking results suggest that stronger
+first-stage retrievers can reduce the benefit of a
+second stage, although this result is limited to the
+rerankers and candidate depth evaluated here.
+7
+
+
+10
+Conclusion
+We systematically studied pretrained MoE LLMs
+as first-stage retrievers. Across several model fam-
+ilies, MoE retrievers outperform active-matched
+dense controls and can match substantially larger
+dense retrievers at lower encoding cost. We further
+show that the query expert count can be reduced af-
+ter training without re-indexing, preserving nearly
+all retrieval effectiveness while lowering query en-
+coding cost. Recent pointwise rerankers provide
+limited gains over the strongest MoE first stages
+and can even reduce their effectiveness. Together,
+these results show that pretrained MoE backbones
+are a strong and efficient alternative to dense LLMs
+for first-stage retrieval.
+Limitations
+Our efficiency results focus on encoding cost rather
+than memory or index footprint. MoE models have
+substantially larger total parameter counts than
+their active parameter counts, although recent serv-
+ing systems can reduce GPU memory requirements
+through expert offloading and caching (Xue et al.,
+2024; He et al., 2026; Kamahori et al., 2025). We
+do not evaluate such memory-aware serving strate-
+gies. We also do not evaluate index size or approx-
+imate nearest-neighbor search cost, which depend
+on embedding dimensionality and index configura-
+tion rather than model active parameter count and
+can differ across backbones. The query-side expert
+reduction also depends on the backbone. Differ-
+ent MoE models tolerate different reductions in
+the number of experts before retrieval effectiveness
+degrades, so the reduced expert count must be se-
+lected separately for each architecture. Finally, our
+reranking study is limited to three released point-
+wise rerankers at a candidate depth of 200. The
+results therefore show that these rerankers provide
+limited gains over our strongest MoE first stages,
+but do not imply that reranking more generally is
+unnecessary.
+References
+Abdelrahman Abdallah, Jamie Holdcroft, Mohammed
+Ali, and Adam Jatowt. 2026. Are LLM-based retriev-
+ers worth their cost? an empirical study of efficiency,
+robustness, and reasoning overhead. In Proceedings
+of the 49th International ACM SIGIR Conference on
+Research and Development in Information Retrieval
+(SIGIR 2026). To appear.
+Payal Bajaj, Daniel Campos, Nick Craswell, Li Deng,
+Jianfeng Gao, Xiaodong Liu, Rangan Majumder, An-
+drew McNamara, Bhaskar Mitra, Tri Nguyen, Mir
+Rosenberg, Xia Song, Alina Stoica, Saurabh Tiwary,
+and Tong Wang. 2016.
+MS MARCO: A human
+generated MAchine reading COmprehension dataset.
+arXiv preprint arXiv:1611.09268.
+Parishad BehnamGhader, Vaibhav Adlakha, Marius
+Mosbach, Dzmitry Bahdanau, Nicolas Chapados, and
+Siva Reddy. 2024. LLM2Vec: Large language mod-
+els are secretly powerful text encoders. In First Con-
+ference on Language Modeling (COLM).
+Danqi Chen, Adam Fisch, Jason Weston, and Antoine
+Bordes. 2017. Reading Wikipedia to answer open-
+domain questions. In Proceedings of the 55th Annual
+Meeting of the Association for Computational Lin-
+guistics (Volume 1: Long Papers), pages 1870–1879.
+Association for Computational Linguistics.
+Hao Cheng, Hao Fang, Xiaodong Liu, and Jianfeng
+Gao. 2023. Task-aware specialization for efficient
+and robust dense retrieval for open-domain question
+answering. In Proceedings of the 61st Annual Meet-
+ing of the Association for Computational Linguistics
+(Volume 2: Short Papers), pages 1864–1875.
+Kexin Chu, Dawei Xiang, Zixu Shen, Yiwei Yang,
+Zecheng Liu, and Wei Zhang. 2025. Dynamic expert
+quantization for scalable mixture-of-experts infer-
+ence. Preprint, arXiv:2511.15015.
+Nachshon Cohen, Yaron Fairstein, and Guy Kushilevitz.
+2024. Extremely efficient online query encoding
+for dense retrieval. In Findings of the Association
+for Computational Linguistics: NAACL 2024, pages
+43–50.
+DeepSeek-AI. 2024a. DeepSeek LLM: Scaling open-
+source language models with longtermism. arXiv
+preprint arXiv:2401.02954.
+DeepSeek-AI. 2024b. DeepSeek-V2: A strong, eco-
+nomical, and efficient mixture-of-experts language
+model. arXiv preprint arXiv:2405.04434.
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and
+Kristina Toutanova. 2019. BERT: Pre-training of
+deep bidirectional transformers for language under-
+standing. In Proceedings of the 2019 Conference of
+the North American Chapter of the Association for
+Computational Linguistics: Human Language Tech-
+nologies, Volume 1 (Long and Short Papers), pages
+4171–4186.
+William Fedus, Barret Zoph, and Noam Shazeer. 2022.
+Switch transformers: Scaling to trillion parameter
+models with simple and efficient sparsity. Journal of
+Machine Learning Research, 23(120):1–39.
+Thibault Formal, Benjamin Piwowarski, and Stéphane
+Clinchant. 2021. SPLADE: Sparse lexical and ex-
+pansion model for first stage ranking. In Proceedings
+of the 44th International ACM SIGIR Conference on
+Research and Development in Information Retrieval,
+pages 2288–2292.
+8
+
+
+Luyu Gao, Xueguang Ma, Jimmy Lin, and Jamie Callan.
+2023. Tevatron: An efficient and flexible toolkit for
+neural retrieval. In Proceedings of the 46th Inter-
+national ACM SIGIR Conference on Research and
+Development in Information Retrieval, pages 3120–
+3124. ACM.
+Gemma Team. 2025. Gemma 3 technical report. arXiv
+preprint arXiv:2503.19786.
+Gemma Team. 2026. Gemma 4 technical report. arXiv
+preprint arXiv:2607.02770.
+Dirk Groeneveld, Iz Beltagy, Evan Walsh, Akshita
+Bhagia, Rodney Kinney, Oyvind Tafjord, Ananya
+Jha, Hamish Ivison, Ian Magnusson, Yizhong Wang,
+Shane Arora, David Atkinson, Russell Authur, Khy-
+athi Chandu, Arman Cohan, Jennifer Dumas, Yanai
+Elazar, Yuling Gu, Jack Hessel, and 24 others. 2024.
+OLMo: Accelerating the science of language models.
+In Proceedings of the 62nd Annual Meeting of the
+Association for Computational Linguistics (Volume
+1: Long Papers), pages 15789–15809. Association
+for Computational Linguistics.
+Xin He, Shunkang Zhang, Kaijie Tang, Shaohuai Shi,
+Yuxin Wang, Zihao Zeng, Zhenheng Tang, Xiaowen
+Chu, Haiyan Yin, Ivor W. Tsang, and Yew Soon
+Ong. 2026. ExpertFlow: Efficient mixture-of-experts
+inference via predictive expert caching and token
+scheduling. In Proceedings of the 63rd ACM/IEEE
+Design Automation Conference (DAC).
+Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan
+Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and
+Weizhu Chen. 2022. LoRA: Low-rank adaptation of
+large language models. In The Tenth International
+Conference on Learning Representations (ICLR).
+Gautier Izacard, Mathilde Caron, Lucas Hosseini, Sebas-
+tian Riedel, Piotr Bojanowski, Armand Joulin, and
+Edouard Grave. 2022. Unsupervised dense informa-
+tion retrieval with contrastive learning. Transactions
+on Machine Learning Research.
+Albert Q. Jiang, Alexandre Sablayrolles, Antoine Roux,
+et al. 2024.
+Mixtral of experts.
+arXiv preprint
+arXiv:2401.04088.
+Jushaan Singh Kalra, Xinran Zhao, To Eun Kim, Fengyu
+Cai, Fernando Diaz, and Tongshuang Wu. 2025.
+MoR: Better handling diverse queries with a mixture
+of sparse, dense, and human retrievers. In Proceed-
+ings of the 2025 Conference on Empirical Methods in
+Natural Language Processing, pages 11971–11990.
+Keisuke Kamahori, Tian Tang, Yile Gu, Kan Zhu, and
+Baris Kasikci. 2025. Fiddler: CPU-GPU orchestra-
+tion for fast inference of mixture-of-experts models.
+In The Thirteenth International Conference on Learn-
+ing Representations (ICLR 2025).
+Vladimir Karpukhin, Barlas O˘guz, Sewon Min, Patrick
+Lewis, Ledell Wu, Sergey Edunov, Danqi Chen, and
+Wen-tau Yih. 2020. Dense passage retrieval for open-
+domain question answering. In Proceedings of the
+2020 Conference on Empirical Methods in Natural
+Language Processing (EMNLP), pages 6769–6781.
+Association for Computational Linguistics.
+Pranav Kasela, Gabriella Pasi, Raffaele Perego, and
+Nicola Tonellotto. 2024.
+DESIRE-ME: Domain-
+enhanced supervised information retrieval using
+mixture-of-experts. In Advances in Information Re-
+trieval: 46th European Conference on Information
+Retrieval (ECIR 2024), Part II, Lecture Notes in Com-
+puter Science, pages 111–125. Springer.
+Chankyu Lee, Rajarshi Roy, Mengyao Xu, Jonathan
+Raiman, Mohammad Shoeybi, Bryan Catanzaro, and
+Wei Ping. 2025a. NV-Embed: Improved techniques
+for training LLMs as generalist embedding models.
+In The Thirteenth International Conference on Learn-
+ing Representations (ICLR).
+Hyunji Lee, Luca Soldaini, Arman Cohan, Minjoon Seo,
+and Kyle Lo. 2025b. RouterRetriever: Routing over
+a mixture of expert embedding models. Proceedings
+of the AAAI Conference on Artificial Intelligence,
+39(11):11995–12003.
+Yibin Lei, Shwai He, Ang Li, and Andrew Yates. 2025.
+Making large language models efficient dense retriev-
+ers. Preprint, arXiv:2512.20612.
+Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu,
+Dehao Chen, Orhan Firat, Yanping Huang, Maxim
+Krikun, Noam Shazeer, and Zhifeng Chen. 2021.
+GShard: Scaling giant models with conditional com-
+putation and automatic sharding. In International
+Conference on Learning Representations (ICLR).
+Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio
+Petroni, Vladimir Karpukhin, Naman Goyal, Hein-
+rich Küttler, Mike Lewis, Wen-tau Yih, Tim Rock-
+täschel, Sebastian Riedel, and Douwe Kiela. 2020.
+Retrieval-augmented generation for knowledge-
+intensive NLP tasks. In Advances in Neural Informa-
+tion Processing Systems 33 (NeurIPS).
+Chaofan Li, Minghao Qin, Shitao Xiao, Jianlyu Chen,
+Kun Luo, Defu Lian, Yingxia Shao, and Zheng Liu.
+2025. Making text embedders few-shot learners. In
+The Thirteenth International Conference on Learning
+Representations (ICLR).
+Xianming Li, Aamir Shakir, Rui Huang, Julius Lipp,
+Benjamin Clavié, and Jing Li. 2026.
+ProRank:
+Prompt warmup via reinforcement learning for small
+language models reranking. In Findings of the As-
+sociation for Computational Linguistics: ACL 2026,
+pages 1026–1037. Association for Computational
+Linguistics.
+Ziyue Li and Tianyi Zhou. 2025.
+Your mixture-of-
+experts LLM is secretly an embedding model For
+Free. In The Thirteenth International Conference on
+Learning Representations (ICLR). Oral.
+Liquid AI. 2025. LFM2 technical report. arXiv preprint
+arXiv:2511.23404.
+9
+
+
+Baihui Liu, Kaiyuan Tian, Wei Wang, Zhaoning Zhang,
+Linbo Qiao, and Dongsheng Li. 2026. Alloc-MoE:
+Budget-aware expert activation allocation for effi-
+cient mixture-of-experts inference. In Proceedings
+of the 64th Annual Meeting of the Association for
+Computational Linguistics (Volume 1: Long Papers),
+pages 9653–9667. Association for Computational
+Linguistics.
+Hong Liu. 2026.
+Breaking the dense ceiling: How
+voyage-4-large uses MoE to scale. Voyage AI blog.
+Accessed 2026-09-04.
+Xudong Lu, Qi Liu, Yuhui Xu, Aojun Zhou, Siyuan
+Huang, Bo Zhang, Junchi Yan, and Hongsheng Li.
+2024. Not all experts are equal: Efficient expert
+pruning and skipping for mixture-of-experts large
+language models. In Proceedings of the 62nd Annual
+Meeting of the Association for Computational Lin-
+guistics (Volume 1: Long Papers), pages 6159–6172.
+Association for Computational Linguistics.
+Guangyuan Ma, Yongliang Ma, Xuanrui Gou, Zhenpeng
+Su, Ming Zhou, and Songlin Hu. 2026. LightRe-
+triever: A LLM-based text retrieval architecture with
+extremely faster query inference. In The Fourteenth
+International Conference on Learning Representa-
+tions (ICLR 2026).
+Xueguang Ma, Liang Wang, Nan Yang, Furu Wei, and
+Jimmy Lin. 2024. Fine-tuning LLaMA for multi-
+stage text retrieval. In Proceedings of the 47th Inter-
+national ACM SIGIR Conference on Research and
+Development in Information Retrieval, pages 2421–
+2425. ACM.
+Niklas Muennighoff, Luca Soldaini, Dirk Groeneveld,
+et al. 2025a. OLMoE: Open mixture-of-experts lan-
+guage models. In The Thirteenth International Con-
+ference on Learning Representations (ICLR).
+Niklas Muennighoff, Hongjin Su, Liang Wang, Nan
+Yang, Furu Wei, Tao Yu, Amanpreet Singh, and
+Douwe Kiela. 2025b. Generative representational
+instruction tuning. In The Thirteenth International
+Conference on Learning Representations (ICLR).
+Jianmo Ni, Chen Qu, Jing Lu, Zhuyun Dai, Gustavo
+Hernandez Abrego, Ji Ma, Vincent Zhao, Yi Luan,
+Keith Hall, Ming-Wei Chang, and Yinfei Yang. 2022.
+Large dual encoders are generalizable retrievers. In
+Proceedings of the 2022 Conference on Empirical
+Methods in Natural Language Processing, pages
+9844–9855. Association for Computational Linguis-
+tics.
+Zach Nussbaum and Brandon Duderstadt. 2025. Train-
+ing sparse mixture of experts text embedding models.
+arXiv preprint arXiv:2502.07972.
+Stephen Robertson and Hugo Zaragoza. 2009.
+The
+probabilistic relevance framework: BM25 and be-
+yond. Foundations and Trends in Information Re-
+trieval, 3(4):333–389.
+Miguel Romero Calvo, Shuoyang Ding, Corey D. Bar-
+rett, Georgiana Dinu, and George Karypis. 2025. Be-
+yond instruction-conditioning, MoTE: Mixture of
+task experts for multi-task embedding models. In
+Findings of the Association for Computational Lin-
+guistics: ACL 2025, pages 22731–22746.
+Effrosyni Sokli, Pranav Kasela, Georgios Peikos, and
+Gabriella Pasi. 2025. Mixture of experts approaches
+in dense retrieval tasks. In Proceedings of the 2025
+IEEE/WIC International Conference on Web Intelli-
+gence and Intelligent Agent Technology (WI-IAT).
+Nandan Thakur, Nils Reimers, Andreas Rücklé, Ab-
+hishek Srivastava, and Iryna Gurevych. 2021. BEIR:
+A heterogeneous benchmark for zero-shot evaluation
+of information retrieval models. In Proceedings of
+the Neural Information Processing Systems Track on
+Datasets and Benchmarks.
+Nandan Thakur, Crystina Zhang, Xueguang Ma, and
+Jimmy Lin. 2025. Hard negatives, hard lessons: Re-
+visiting training data quality for robust information
+retrieval with LLMs. In Findings of the Association
+for Computational Linguistics: EMNLP 2025, pages
+9064–9083, Suzhou, China. Association for Compu-
+tational Linguistics.
+James
+Thorne,
+Andreas
+Vlachos,
+Christos
+Christodoulopoulos,
+and
+Arpit
+Mittal.
+2018.
+FEVER: a large-scale dataset for fact extraction
+and VERification.
+In Proceedings of the 2018
+Conference of the North American Chapter of the
+Association for Computational Linguistics: Human
+Language Technologies, Volume 1 (Long Papers),
+pages 809–819. Association for Computational
+Linguistics.
+Liang Wang, Nan Yang, Xiaolong Huang, Binx-
+ing Jiao, Linjun Yang, Daxin Jiang, Rangan Ma-
+jumder, and Furu Wei. 2022. Text embeddings by
+weakly-supervised contrastive pre-training. Preprint,
+arXiv:2212.03533.
+Liang Wang, Nan Yang, Xiaolong Huang, Linjun Yang,
+Rangan Majumder, and Furu Wei. 2024. Improv-
+ing text embeddings with large language models. In
+Proceedings of the 62nd Annual Meeting of the As-
+sociation for Computational Linguistics (Volume 1:
+Long Papers), pages 11897–11916. Association for
+Computational Linguistics.
+Yuxuan Wang and Lyu Hong. 2023. Query encoder dis-
+tillation via embedding alignment is a strong baseline
+method to boost dense retriever online efficiency. In
+Proceedings of the Fourth Workshop on Simple and
+Efficient Natural Language Processing (SustaiNLP),
+pages 290–298. Association for Computational Lin-
+guistics.
+Shitao Xiao, Zheng Liu, Peitian Zhang, Niklas Muen-
+nighoff, Defu Lian, and Jian-Yun Nie. 2024. C-pack:
+Packed resources for general chinese embeddings. In
+Proceedings of the 47th International ACM SIGIR
+Conference on Research and Development in Infor-
+mation Retrieval, pages 641–649. ACM.
+10
+
+
+Zhichao Xu, Xueguang Ma, Shengyao Zhuang, Luyu
+Gao, Wenqian Ye, Yu Wang, Jamie Callan, and
+Jimmy Lin. 2026a. Tevatron meets megatron: Expert-
+parallel LLM reranker training on an academic bud-
+get. arXiv preprint arXiv:2608.00916.
+Zhichao Xu, Shengyao Zhuang, Crystina Zhang,
+Xueguang Ma, Yijun Tian, Maitrey Mehta, Jimmy
+Lin, and Vivek Srikumar. 2026b.
+LACONIC:
+Dense-level effectiveness for scalable sparse re-
+trieval via a two-phase training curriculum. Preprint,
+arXiv:2601.01684. To appear at SIGIR 2026.
+Leyang Xue, Yao Fu, Zhan Lu, Luo Mai, and Mahesh
+Marina. 2024. MoE-infinity: Efficient MoE infer-
+ence on personal machines with sparsity-aware ex-
+pert cache. Preprint, arXiv:2401.14361.
+An Yang, Anfeng Li, Baosong Yang, et al. 2025. Qwen3
+technical report. arXiv preprint arXiv:2505.09388.
+Yanzhao Zhang, Mingxin Li, Dingkun Long, Xin Zhang,
+Huan Lin, Baosong Yang, Pengjun Xie, An Yang,
+Dayiheng Liu, Junyang Lin, Fei Huang, and Jingren
+Zhou. 2025. Qwen3 embedding: Advancing text
+embedding and reranking through foundation models.
+Preprint, arXiv:2506.05176.
+Shuzhang Zhong, Ling Liang, Yuan Wang, Runsheng
+Wang, Ru Huang, and Meng Li. 2024. AdapMoE:
+Adaptive sensitivity-based expert gating and manage-
+ment for efficient MoE inference. In Proceedings
+of the 43rd IEEE/ACM International Conference on
+Computer-Aided Design (ICCAD).
+11
+
+
+A
+Appendix
+A.1
+Model Backbones
+Table 5 summarizes the backbones used in our experiments, including their released checkpoints, total and
+active parameter counts, and the routing configuration of each MoE model. OLMo, LFM2, and Qwen3
+form our controlled comparisons: within each family, the MoE model is compared with a dense model at
+a comparable active parameter count and with a larger dense reference. DeepSeek and Gemma are treated
+as descriptive comparisons because the available dense models differ in model generation or architecture.
+DeepSeek-V2-Lite selects 6 of 64 routed experts per token in addition to two shared experts. Gemma-
+3-4B is a multimodal checkpoint of which only the text tower is used for retrieval, while Gemma-4-MoE
+applies a dense feed-forward block alongside its routed experts; both are reflected in the reported active
+parameter counts. Tied input and output embeddings are counted once.
+Because we use the final hidden state directly as the retrieval embedding, the embedding dimensionality
+equals the backbone hidden size reported in Table 5. This dimension affects index storage and approximate
+nearest-neighbor search cost independently of the model’s active parameter count: the MoE retrievers
+embed in 2,048 dimensions (2,816 for Gemma-4-MoE), whereas the 7B and 8B dense models embed in
+4,096.
+Table 5: Backbones used in our experiments. Experts gives the number of routed experts and the number selected
+per token. Shared or other always-active components are included in the reported active parameter counts. Parameter
+counts are in billions. Dim. is the hidden size of the backbone, which equals the embedding dimension.
+Model
+Checkpoint
+Experts (total / active)
+Total (B)
+Active (B)
+Dim.
+OLMo-1B
+allenai/OLMo-1B-0724-hf
+–
+1.28
+1.28
+2,048
+OLMo-MoE-A1B
+allenai/OLMoE-1B-7B-0125
+64 / 8
+6.92
+1.28
+2,048
+OLMo-7B
+allenai/OLMo-7B-0724-hf
+–
+6.89
+6.89
+4,096
+LFM2-1.2B
+LiquidAI/LFM2-1.2B
+–
+1.17
+1.17
+2,048
+LFM2-MoE-A1B
+LiquidAI/LFM2-8B-A1B
+32 / 4
+8.34
+1.56
+2,048
+LFM2-2.6B
+LiquidAI/LFM2-2.6B
+–
+2.57
+2.57
+2,048
+Qwen3-4B
+Qwen/Qwen3-4B
+–
+4.02
+4.02
+2,560
+Qwen3-MoE-A3B
+Qwen/Qwen3-30B-A3B
+128 / 8
+30.53
+3.35
+2,048
+Qwen3-8B
+Qwen/Qwen3-8B
+–
+8.19
+8.19
+4,096
+DeepSeek-MoE-A2B
+deepseek-ai/DeepSeek-V2-Lite
+64 / 6 (+2 shared)
+15.71
+2.66
+2,048
+DeepSeek-7B
+deepseek-ai/deepseek-llm-7b-base
+–
+6.91
+6.91
+4,096
+Gemma-3-4B
+google/gemma-3-4b-pt
+–
+4.30
+3.88
+2,560
+Gemma-4-MoE-A4B
+google/gemma-4-26B-A4B
+128 / 8
+25.81
+3.82
+2,816
+A.2
+Training Configuration
+Tables 6 and 7 summarize the shared training configuration and model-specific LoRA settings, respectively.
+All retrievers are trained on the RLHN dataset.1 LoRA adapters are applied to the query, key, value, and
+output projections in attention layers and to the up, gate, and down projections in feed-forward layers,
+including the experts of MoE layers. Embeddings, normalization layers, and MoE router weights remain
+frozen. LoRA dropout is zero for all models.
+1https://huggingface.co/datasets/rlhn/rlhn-680K
+12
+
+
+Table 6: Training configuration shared across all retrievers.
+Setting
+Value
+Optimizer
+AdamW
+Learning rate
+1 × 10−4
+Warmup
+5%
+Learning-rate schedule
+Linear decay to zero
+Maximum query length
+192
+Maximum document length
+192
+Hard negatives per query
+15
+Global batch size
+32
+Temperature τ
+0.01
+Precision
+bf16
+Gradient checkpointing
+Yes
+Table 7: Model-specific LoRA settings and number of training epochs.
+Model
+LoRA r
+LoRA α
+Epochs
+OLMo-1B
+32
+64
+2
+OLMo-MoE-A1B
+16
+32
+1
+OLMo-7B
+16
+32
+1
+LFM2-1.2B
+32
+64
+2
+LFM2-MoE-A1B
+16
+32
+1
+LFM2-2.6B
+32
+64
+2
+Qwen3-4B
+32
+64
+2
+Qwen3-MoE-A3B
+16
+32
+1
+Qwen3-8B
+16
+32
+1
+DeepSeek-MoE-A2B
+16
+32
+1
+DeepSeek-7B
+16
+32
+1
+Gemma-3-4B
+32
+64
+2
+Gemma-4-MoE-A4B
+16
+32
+1
+A.3
+Router Fine-Tuning
+In our main experiments, the pretrained MoE routers remain frozen during retrieval fine-tuning. We
+additionally test updating the router weights together with the LoRA adapters for OLMo-MoE, comparing
+two otherwise identical runs with frozen and fine-tuned routers.
+In this ablation, fine-tuning the routers reduces the BEIR-13 average from 59.6 to 58.8 nDCG@10.
+Based on this result, we keep the pretrained routers frozen for all MoE retrievers in our main experiments.
+13
+
+
+Frozen routers
+Fine-tuned routers
+OLMo-MoE
+56
+57
+58
+59
+60
+61
+Avg. BEIR-13 nDCG@10
+59.6
+58.8
+Figure 3: Effect of router fine-tuning for OLMo-MoE on BEIR-13 nDCG@10. The pretrained routers are either
+frozen or updated together with the LoRA adapters during retrieval fine-tuning.
+A.4
+Expert-Count Sweeps
+Table 8 reports per-dataset results for the query-side expert-count settings considered in our analysis. For
+each MoE retriever, the corpus index is built once using the trained expert count, and only the number of
+experts used to encode queries is changed. We include the trained setting, the reduced settings highlighted
+in Section 7, and more aggressive reductions to show how the effect of query-side expert reduction varies
+across datasets.
+The corresponding active query parameter counts, BEIR-13 averages, and query encoding times
+are summarized in Table 9. These results show that moderate reductions in the query expert count
+generally preserve most retrieval effectiveness, while more aggressive reductions lead to larger and more
+model-dependent losses.
+Table 8: Per-dataset BEIR nDCG@10 for the five MoE retrievers at different query expert counts k, with the
+BEIR-13 average (Avg.). The corpus index remains fixed at the trained expert count, and only query encoding is
+changed.
+Model
+k
+Arg Clm DBP FEV
+FiQ
+Hot NFC
+NQ Quo
+SCI
+ScF TRC
+Tou Avg.
+OLMo-MoE-A1B
+8 (trained) 74.8 38.3
+46.1
+89.7 48.3 79.6
+41.0 66.7 82.6 26.2 76.3
+80.7 24.4
+59.6
+6
+73.7 38.6
+46.1
+89.6 48.3 79.1
+40.8 66.6 82.7 25.9 76.3
+79.8 23.4
+59.3
+4
+71.9 38.3
+45.2
+88.7 47.0 77.5
+40.6 65.4 82.7 25.6 77.4
+78.1 24.9
+58.7
+1
+56.6 29.6
+34.7
+70.1 25.3 50.5
+34.4 43.6 77.5 17.1 67.3
+65.0 14.8
+45.1
+LFM2-MoE-A1B
+4 (trained) 73.9 39.8
+46.5
+87.5 46.3 77.3
+40.6 66.4 78.2 26.7 77.5
+82.0 29.1
+59.4
+3
+73.9 40.4
+45.5
+87.0 44.9 75.6
+39.8 64.9 78.3 26.3 77.2
+80.7 25.2
+58.4
+2
+71.0 39.9
+43.4
+85.2 38.3 70.5
+37.4 61.0 78.0 24.6 76.2
+76.7 19.3
+55.5
+1
+2.7 23.6
+19.2
+57.7
+4.3 35.2
+27.1 24.2 43.9
+6.8 46.2
+43.1
+4.1
+26.0
+Qwen3-MoE-A3B
+8 (trained) 78.8 41.8
+48.6
+90.4 57.2 83.8
+42.0 70.8 80.6 32.1 77.2
+83.4 23.5
+62.3
+6
+78.6 41.3
+48.4
+90.0 56.1 83.0
+41.5 70.0 80.2 32.1 77.0
+83.2 23.5
+61.9
+4
+78.2 40.8
+47.3
+89.0 54.2 80.8
+40.3 68.4 79.8 31.1 76.0
+82.5 23.2
+60.9
+1
+0.6
+0.2
+0.4
+1.2
+0.0
+0.3
+7.0
+0.4
+1.1
+2.1
+5.8
+2.4
+0.0
+1.7
+DeepSeek-MoE-A2B 6 (trained) 75.0 42.3
+47.2
+89.7 53.3 81.7
+41.5 67.2 85.1 27.3 76.6
+79.0 21.5
+60.6
+4
+74.2 41.8
+47.0
+89.8 52.8 81.4
+41.9 67.0 85.2 27.0 76.5
+78.6 21.3
+60.3
+3
+73.5 41.3
+47.2
+89.8 52.3 80.8
+41.7 66.6 85.1 26.8 76.1
+79.6 22.0
+60.2
+1
+68.0 38.8
+43.5
+85.6 50.0 74.5
+38.9 63.3 85.0 24.8 74.9
+74.6 22.3
+57.3
+Gemma-4-MoE-A4B 8 (trained) 82.0 43.0
+49.2
+90.8 55.4 85.0
+42.1 70.4 85.0 30.4 78.8
+79.5 20.3
+62.5
+6
+82.0 43.3
+48.8
+90.5 54.8 84.8
+41.6 70.1 84.9 30.3 78.3
+79.9 20.2
+62.3
+4
+81.9 43.8
+48.7
+90.1 53.4 84.1
+41.5 69.4 84.8 29.6 78.1
+79.5 20.4
+62.0
+1
+69.5 40.2
+41.2
+84.0 36.4 71.7
+36.7 59.0 81.2 24.2 71.5
+77.5 20.3
+54.9
+14
+
+
+Table 9: Active query parameters, BEIR-13 nDCG@10, and query encoding time for the settings of Table 8. Active
+↓and Query time ↓are reductions relative to the trained expert count, and Retained is nDCG@10 relative to the
+trained count. Query encoding time is measured on one H100 at batch size 128, as in Section 6.
+Model
+k
+Active (B)
+Active ↓
+nDCG@10
+Retained
+µs/q
+Query time ↓
+OLMo-MoE-A1B
+8 (trained)
+1.28
+–
+59.6
+100.0%
+316
+–
+6
+1.08
+15.7%
+59.3
+99.5%
+261
+17.5%
+4
+0.88
+31.4%
+58.7
+98.5%
+216
+31.6%
+1
+0.58
+55.0%
+45.1
+75.7%
+141
+55.3%
+LFM2-MoE-A1B
+4 (trained)
+1.56
+–
+59.4
+100.0%
+374
+–
+3
+1.32
+15.5%
+58.4
+98.4%
+319
+14.7%
+2
+1.07
+31.1%
+55.5
+93.5%
+285
+23.9%
+1
+0.83
+46.7%
+26.0
+43.8%
+228
+39.0%
+Qwen3-MoE-A3B
+8 (trained)
+3.35
+–
+62.3
+100.0%
+1,037
+–
+6
+2.90
+13.5%
+61.9
+99.4%
+835
+19.4%
+4
+2.45
+27.0%
+60.9
+97.7%
+716
+30.9%
+1
+1.77
+47.3%
+1.7
+2.7%
+510
+50.9%
+DeepSeek-MoE-A2B
+6 (trained)
+2.66
+–
+60.6
+100.0%
+587
+–
+4
+2.21
+16.9%
+60.3
+99.6%
+505
+14.0%
+3
+1.99
+25.4%
+60.2
+99.4%
+464
+21.0%
+1
+1.54
+42.2%
+57.3
+94.5%
+353
+39.9%
+Gemma-4-MoE-A4B
+8 (trained)
+3.82
+–
+62.5
+100.0%
+1,115
+–
+6
+3.47
+9.3%
+62.3
+99.7%
+934
+16.2%
+4
+3.11
+18.7%
+62.0
+99.2%
+822
+26.2%
+1
+2.57
+32.7%
+54.9
+87.9%
+618
+44.5%
+A.5
+Efficiency Details
+All encoding-time measurements use the same harness and serving configuration described in Section 6.
+We sample 1,000 queries and 1,000 documents once from the BEIR Natural Questions dataset using a
+fixed seed and process them exactly as in retrieval evaluation, including the same input format, appended
+end-of-sequence token, and truncation to 512 tokens. Tokenization and data loading are excluded from
+the timed region.
+Before timing, we perform one warm-up pass to trigger torch.compile and other one-time initializa-
+tion overheads. We then run five timed passes over the full sample, synchronizing GPU execution before
+and after each pass, and report the median. Query encoding is measured at batch size 128 and document
+encoding at batch size 64. The reported microseconds per query and per document reflect amortized
+batched encoding time.
+15
