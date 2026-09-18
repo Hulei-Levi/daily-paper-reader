@@ -1,0 +1,718 @@
+Title: OceanMoE: Structured Conditional Sparse Computation for Long-Horizon Multivariate Ocean Forecasting
+
+URL Source: https://arxiv.org/pdf/2609.19768v1
+
+Published Time: Fri, 18 Sep 2026 00:41:47 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+# OCEAN MOE: S TRUCTURED CONDITIONAL SPARSE 
+
+# COMPUTATION FOR LONG -H ORIZON MULTIVARIATE OCEAN 
+
+# FORECASTING 
+
+A P REPRINT 
+
+Yishun Zhu 1,* Jian Wang 2,* 
+
+> 1
+
+Hangzhou Institute for Advanced Study, University of the Chinese Academy of Sciences 
+
+Zhejiang, China 
+
+> 2
+
+Computer Network Information Center, Chinese Academy of Sciences Beijing, China 
+
+> *
+
+Equal contribution September 18, 2026 
+
+## ABSTRACT 
+
+Multivariate ocean forecasting must exploit shared evolution in a coupled ocean system while adapting to the heterogeneous statistical and dynamical characteristics of different prediction variables and locations. Fully shared models may lack the flexibility to handle this heterogeneity, whereas fully independent models discard the common ocean context shared across variables. The key question is how to retain shared context in a unified model while allowing computation to specialize according to the prediction target and local state. We propose OceanMoE, a structured conditional sparse Mixture-of-Experts framework that combines sharing and specialization for multivariate ocean forecasting. OceanMoE fuses cross-variable information to construct target-specific local representations and uses them to perform content-conditioned sparse routing at each spatial location, with the number of active experts adapted to router confidence. In the decoder, routing is augmented with a learned geographic bias parameterized by spherical-harmonic spatial bases, while shared residual and seasonal pathways provide common cross-variable and month-dependent context. Experiments on long-horizon autoregressive ORAS5 forecasting show that OceanMoE lowers aggregate forecasting error in both evaluated settings and maintains lower geometric-mean normalized RMSE than the corresponding baselines over most later rollout months. Routing analyses further show that expert allocation varies with prediction targets and spatial locations. These results support structured conditional computation as a modeling strategy for balancing shared ocean context with adaptive specialization. 
+
+Keywords Multivariate Ocean Forecasting · Mixture-of-Experts · Conditional Computation · Long-Horizon Prediction 
+
+## 1 Introduction 
+
+Data-driven forecasting is becoming an important approach to modeling complex Earth systems. Recent neural forecasting systems trained from reanalysis data can efficiently predict many interacting atmospheric and oceanic fields across timescales ranging from medium-range weather to multi-year ocean variability [Lam et al., 2023, Guo et al., 2025, Cui et al., 2025]. Multivariate modeling is particularly relevant to the ocean: temperature, salinity, velocity, sea surface height, and surface fluxes are coupled through large-scale circulation, air–sea exchange, and the evolving ocean state. A unified model can therefore exploit these couplings by learning a common representation of the evolving ocean context. Shared physical context, however, does not make ocean variables homogeneous prediction tasks. They differ in spatial structure, temporal scale, variation magnitude, and forecasting difficulty, motivating variable-aware representations in Earth-system models [Nguyen et al., 2023, Guo et al., 2025]. Moreover, the evolution of a given variable depends on arXiv:2609.19768v1 [cs.LG] 17 Sep 2026 OceanMoE A P REPRINT 
+
+both its local state and its geographic setting. A shared backbone promotes information exchange by reusing the same parameterized computation across prediction targets and spatial locations, but it does not explicitly allocate different computation to targets and local states with different needs. At the other extreme, training an independent model for each variable increases specialization but fragments information that should remain shared within the coupled system. These two extremes expose the missing capability in multivariate ocean forecasting: a model should determine what context remains shared and where computation changes with the prediction conditions. Mixture-of-Experts (MoE) models provide conditional computation by routing each representation through a sparse subset of expert parameters, and have commonly been used to increase model capacity without a proportional increase in computation per example [Shazeer et al., 2017, Fedus et al., 2022]. Multi-task MoEs further coordinate common and task-specific parameters through a shared expert pool and task-dependent gates [Ma et al., 2018]. Sparse capacity or task-level routing alone, however, does not fully express the sharing–specialization structure of ocean fields. The routing conditions must also reflect the prediction target, local content, and geographic setting, while explicit shared pathways preserve information that should not be partitioned among experts. Following this principle, we propose OceanMoE , a structured conditional sparse MoE framework for multivariate ocean forecasting. For each prediction target, OceanMoE fuses cross-variable features under target conditioning to form target-specific local representations. The encoder then selects sparse experts at each spatial location according to the local content state, making the expert combination depend on the current prediction needs rather than a predefined variable grouping. In the decoder, a learned geographic routing bias parameterized by spherical-harmonic spatial bases introduces stable spatial structure into expert selection, while the cumulative router confidence determines how many experts are active at each position. Shared residual and seasonal pathways carry common cross-variable and month-dependent context alongside the specialized expert computation. We evaluate OceanMoE through 60-month autoregressive forecasts on the ORAS5 ocean reanalysis [Zuo et al., 2019], covering a standard six-variable task and an extended ten-variable task. The two settings compare OceanMoE with a reproduced ORCA-DL model and an ORCA-DL-Expanded baseline with matched input and output spaces, respectively. OceanMoE lowers aggregate forecasting error in both settings, improves performance across most evaluated regions, and maintains lower geometric-mean normalized RMSE than the corresponding baselines over most later rollout months. Routing diagnostics further show that expert allocation changes with prediction targets and spatial locations, consistent with condition-dependent computation. The main contributions of this work are summarized as follows: • We formulate multivariate ocean forecasting as a balance between shared context and conditionally specialized computation, shifting the design question from whether to share to what to share and where to specialize. • We introduce OceanMoE, which combines target-specific representations, content-conditioned per-position sparse routing, a learned geographic routing bias, an adaptive expert count, and shared context pathways to realize target- and location-dependent computation within a unified model. • We evaluate both forecasting accuracy and routing behavior in long-horizon multivariate ORAS5 forecasts, showing reductions in aggregate error, improvements across most regions and most later rollout months, and target- and location-dependent routing behavior. 
+
+## 2 Related Work 
+
+2.1 Data-Driven Earth-System Forecasting 
+
+Data-driven Earth-system forecasting learns state evolution from reanalysis data and jointly models multiple interacting geophysical fields within a unified network. Pangu-Weather organizes multilevel atmospheric variables into a three-dimensional representation and forecasts them with an Earth-specific Transformer, whereas GraphCast propagates local and global information through a graph neural network on a multiscale spherical mesh [Bi et al., 2023, Lam et al., 2023]. ClimaX further uses variable-specific encoding and aggregation to accommodate different variable sets and downstream tasks across datasets [Nguyen et al., 2023]. Together, these studies show that shared multivariate representations can exploit coupling across Earth system variables, and that geometry and variable organization provide useful structural priors. This line of work primarily addresses how coupled fields are represented and evolved in a unified network. Acomplementary question is whether the parameterized computation should also adapt to the current prediction target and local state. OceanMoE studies this question by extending multivariate sharing from common representations to target- and location-conditioned computation. 2OceanMoE A P REPRINT 
+
+2.2 Data-Driven Ocean Forecasting 
+
+Data-driven ocean forecasting now spans timescales from short-range, eddy-resolving forecasts to multi-year global prediction. XiHe uses a hierarchical Transformer with land–ocean masking and ocean-specific blocks to model local structures and global teleconnections [Wang et al., 2024]. WenHai incorporates air–sea flux calculations and ocean dynamical priors into a high-resolution forecasting system for temperature, salinity, velocity, and sea-surface states [Cui et al., 2025]. At longer timescales, ORCA-DL adopts an encoder–fusion–decoder architecture to predict three-dimensional multivariate ocean states with atmospheric conditioning [Guo et al., 2025]. These models demonstrate that unified data-driven frameworks can learn coupled ocean evolution across different spatial resolutions and forecast horizons. The main advances along this direction concern joint ocean representation, spatial structure, and long-horizon evolution. OceanMoE studies a complementary axis within the unified forecasting setting: common ocean context is retained through shared pathways, while specialized computation varies with the prediction target and local spatial state. It therefore focuses on how sharing and specialization are organized during joint prediction, rather than replacing ocean-specific representations or coupling mechanisms. 
+
+2.3 Conditional Computation and Mixture-of-Experts 
+
+Mixture-of-Experts (MoE) models provide a general framework for conditional computation by using a learned router to select different parameter pathways for different inputs. Sparsely gated MoEs activate only a subset of experts, partially decoupling model capacity from computation per example [Shazeer et al., 2017]. GShard and Switch Transformer scale sparse experts to large language models, while V-MoE applies token-level routing to vision Transformers [Lepikhin et al., 2021, Fedus et al., 2022, Riquelme et al., 2021]. These studies establish input-conditioned sparse parameter selection as a practical computational paradigm. Recent work has relaxed the fixed-top-K assumption by selecting experts until their cumulative routing probability exceeds a confidence threshold, so that different tokens can use different numbers of experts [Huang et al., 2024]. OceanMoE adopts this confidence-based selection principle for spatial ocean tokens, while additionally conditioning the router on target-specific content and geographic structure. MoE architectures have also been used to coordinate shared and task-specific processing in multi-task learning. Multi-gate Mixture-of-Experts (MMoE) shares an expert pool across tasks while learning a separate gate for each task, so that expert reuse can vary with task identity [Ma et al., 2018]. Spatial field forecasting introduces a finer conditional structure: different locations of the same target can have different local states and computational needs. Multivariate ocean forecasting therefore calls for routing that combines target conditioning with per-position content and geographic context. OceanMoE connects these lines of research by constructing target-specific representations, routing expert computation from per-position content, and introducing geographic context into decoder routing. In parallel, shared residual and seasonal pathways retain common cross-variable and month-dependent context. The role of MoE in this work is thus not capacity scaling alone, but structured sharing and specialization within a unified ocean forecasting model. 
+
+## 3 Method 
+
+3.1 Preliminaries Multivariate ocean forecasting. Let Xt = {x(v) 
+
+> t
+
+}Vv=1 denote the multivariate ocean state at month t, where x(v) 
+
+> t
+
+∈
+
+RCv ×H×W contains variable v over Cv vertical levels. Let Q ⊆ { 1, . . . , V } be the set of prediction targets and At
+
+the auxiliary atmospheric surface fields. Given the current ocean state, atmospheric context, and calendar month, a forecasting model estimates 
+
+bX Q 
+
+> t+1: t+T
+
+= Fθ (Xt, At, t ). (1) Inputs and targets are normalized with month-dependent statistics estimated from the training set, and predictions are transformed back to physical units for evaluation. For target v, the prediction head directly produces the normalized field by(v) 
+
+> t+δ
+
+at lead δ. Land cells are masked before patch embedding and excluded from the objective. Let Iocean denote the fixed global ocean grid and define the latitude-area weights once for the full grid as 
+
+wi = cos( φi), ewi = wi
+
+> 1
+> |I ocean |
+
+P 
+
+> j∈I ocean
+
+wj
+
+. (2) 3OceanMoE A P REPRINT 
+
+The same normalized weights are used for every sample, variable, month, and region; they are not recomputed from sample-specific valid cells. We compute a latitude-area-weighted root mean squared error separately for each target, 
+
+Lpred  
+
+> v
+
+=
+
+s P  
+
+> c,i
+
+Mv,c,i ewi(byv,c,i − yv,c,i )2
+
+P 
+
+> c,i
+
+Mv,c,i ewi
+
++ ϵ, (3) where Mv,c,i is the ocean mask, ϵ = 10 −12 , and the mean of ewi over Iocean is one. This RMSE is computed in the normalized training space, with no additional variable-scale normalization. No depth weighting is applied, so the Cv
+
+levels of a three-dimensional variable contribute equally within that variable. For a training batch, let Bv be the samples with a valid label for variable v and let nv = |B v |. The per-variable reductions above are aggregated over the variables present in the batch as 
+
+Lpred =
+
+P 
+
+> v∈Q batch
+
+nv Lpred 
+
+> v
+
+P 
+
+> v∈Q batch
+
+nv
+
+, (4) where Qbatch contains the variables with at least one valid label. Thus, when all variables are present, the variable losses are equally weighted; variables without valid labels are skipped. The model is trained over a direct forecast window of M months and extended to longer horizons through block-autoregressive inference. Let tj = t + jM denote the beginning of rollout block j. The model predicts 
+
+bX Q   
+
+> tj+1: tj+M
+
+= Fθ ( bXtj , Acond  
+
+> j
+
+, t j ), bXtj+1 ← bXtj +M , (5) where Acond  
+
+> j
+
+denotes the aligned zonal and meridional atmospheric surface-stress fields for the M target months in block j. These fields are encoded separately from the ocean state and supplied as prescribed conditioning for the corresponding direct forecast block; they are not predicted by the ocean decoder. The direct window and rollout horizon are specified in Section 4. The rollout state contains the complete model ocean-variable contract; variables without a continuous evaluation target remain input/context channels rather than reported forecast targets. 
+
+Parameter-sharing formulations. Two limiting formulations clarify how computation can be organized across prediction targets. A fully shared forecaster uses one parameter set for every target, 
+
+bx(q) 
+
+> t+δ
+
+= Fθ (Xt, At, q, δ ), (6) where the target identity q conditions a common mapping Fθ. At the other endpoint, a target-specific formulation assigns an independent parameter set to each target, 
+
+bx(q) 
+
+> t+δ
+
+= Fθq (Xt, At, δ ). (7) Both formulations may access the same coupled ocean state; they differ in whether the parameterized computation is reused across targets. We use them as conceptual endpoints of the sharing design space rather than as an exhaustive taxonomy of forecasting architectures. 
+
+Sparse conditional computation. Given a local feature hi ∈ Rd, a router produces logits ℓi ∈ RE over E experts. The routing probability of expert e is 
+
+pi,e = exp( ℓi,e )
+
+PEj=1 exp( ℓi,j ) , (8) For an active expert set Si, a sparse MoE computes [Shazeer et al., 2017] 
+
+MoE( hi) = X
+
+> e∈S i
+
+epi,e fe(hi), epi,e = pi,e 
+
+P 
+
+> j∈S i
+
+pi,j 
+
+, (9) so only the selected experts are evaluated and their probabilities are renormalized within the active set. 
+
+3.2 Our Method 
+
+OceanMoE is designed around three linked decisions. First, it learns which source-variable information is relevant to each prediction target at each location. Second, it provides parameter-shared pathways for context that need not be mediated solely by expert selection. Third, it allocates specialized computation according to both the target-conditioned local state and geographic structure, including the amount of expert capacity required at each position. The resulting execution order is variable-wise encoding → target-specific fusion → encoder routing and shared fusion →
+
+decoder routing with a geographic bias → target-wise prediction . This decomposition turns the question of “shared or 4OceanMoE A P REPRINT 
+
+Figure 1: Overview of OceanMoE. Variable-wise ocean encoders feed the target-specific fusion module, and the figure’s “Atmosphere Variables” branch denotes the two prescribed surface stresses (τu, τ v ). In both Ocean Encoder and Ocean Decoder, the boxes labeled “Seasonal Expert” and “Residual Expert” correspond to the shared seasonal and residual pathways in Eq. (27), while “Routed Expert” boxes denote the adaptively selected private experts. The Time branch supplies calendar-month conditioning, and the Location branch supplies the spherical-harmonic geographic bias to the decoder router. Variable-wise decoders produce a six-month forecast block, whose final state is fed into the next block during the 60-month rollout. independent” computation into the more specific questions of what information should be shared, where computation should specialize, and how much specialized capacity a local state requires. In the following, s ∈ B = {enc , dec } denotes a routed stage and q denotes a prediction target; these indices specialize the generic MoE quantities in Eqs. (8)– (9). Figure 1 summarizes the data flow. Variable-specific encoders are kept separate until target-specific fusion, while the atmospheric surface stresses are encoded by a separate branch and remain external block conditioning rather than predicted outputs. The routed and shared computations below operate on the resulting target-wise states before each prediction head reconstructs its future field. 
+
+Target-specific cross-variable representation. Let z(v) 
+
+> i
+
+∈ Rd be the encoded feature of source variable v at bottleneck position i ∈ { 1, . . . , N }, where N = hw , and let ev denote its learned variable embedding. For target q ∈ Q , we construct a target query and source keys, 
+
+q(q) 
+
+> i
+
+= W cQ LN( z(q) 
+
+> i
+
+) + W aQ LN( eq ), (10) 
+
+k(v) 
+
+> i
+
+= W cK LN( z(v) 
+
+> i
+
+) + W aK LN( ev ). (11) Their patch-local compatibility is 
+
+sq,v,i = ⟨q(q) 
+
+> i
+
+, k(v) 
+
+> i
+
+⟩√d + bself I[q = v], (12) where bself is a learnable self-bias that provides a preference for the source variable corresponding to the target. We normalize sq,i = [ sq, 1,i , . . . , s q,V,i ] over source variables with a sparse transformation, 
+
+αq,i = entmax 1.5(sq,i ), (13) 5OceanMoE A P REPRINT 
+
+where entmax 1.5 produces a normalized, potentially sparse source-weight distribution [Peters et al., 2019]. We then obtain the target-specific local state 
+
+bq,i =
+
+> V
+
+X
+
+> v=1
+
+αq,v,i Pv z(v) 
+
+> i
+
++ bf . (14) Here, Pv is a source-specific projection and bf is a learnable fusion bias. Target identity therefore affects subsequent routing through the fused content state bq,i rather than through a target-only expert gate. The weights αq,v,i provide an interpretable description of how source variables contribute to each target-specific state. 
+
+Structured conditional routing. At the encoder fusion stage, the target-specific local state determines both the local expert input and the router logits, 
+
+uenc  
+
+> q,i
+
+= bq,i , ℓenc  
+
+> q,i
+
+= W enc  
+
+> r
+
+LN( bq,i ) + cenc  
+
+> r
+
+. (15) No target embedding is concatenated directly to this router. Target dependence is already encoded in bq,i , while position-specific content allows different locations of the same target to activate different expert combinations. The selected experts transform uenc  
+
+> q,i
+
+, after which their output is combined with the shared pathways in Eq. (27). At the decoder stage, the fused encoder outputs are projected back to the decoder grid and combined with the target-specific shared context to form dq,i ∈ Rd. No additional cross-variable fusion is performed after this point. The decoder state is passed to the content router, the geographic router, and the prediction head in that order. The content component of the decoder router is 
+
+udec  
+
+> q,i
+
+= dq,i , ℓcontent  
+
+> q,i
+
+= W dec  
+
+> r
+
+LN( dq,i ) + cdec  
+
+> r
+
+. (16) To represent stable global spatial structure, we evaluate real spherical harmonics up to degree L = 4 at the latitude– longitude coordinate of position i. Excluding the constant component gives ϕi ∈ R(L+1) 2−1 = R24 . A learnable geographic router maps this basis to expert logits, 
+
+egi = Wg, 2 SiLU( Wg, 1ϕi + bg, 1) + bg, 2, (17) 
+
+gi = σ(sg ) egi − mean e(egi,e )RMS( egi) + ϵ . (18) where sg is a learnable scalar controlling the magnitude of the geographic contribution. The final decoder logits are 
+
+ℓdec  
+
+> q,i
+
+= ℓcontent  
+
+> q,i
+
++ gi. (19) The geographic bias is shared across targets and depends only on location, whereas target dependence enters through 
+
+dq,i . It therefore acts as an additive spatial prior rather than a fixed assignment of experts to geographic regions. Decoder routing is conditioned jointly on the current target-specific state and this learned global spatial prior. After either router produces probabilities psq,i , OceanMoE converts the router confidence into an adaptive expert capacity following the confidence-based dynamic-selection principle of Huang et al. [Huang et al., 2024]. Let πsq,i order experts by decreasing probability and define the smallest cumulative-probability set 
+
+K∗,s q,i = min 
+
+k ∈ { 1, . . . , E } :
+
+> k
+
+X
+
+> j=1
+
+psq,i,π sq,i (j) ≥ p0
+
+ , (20) 
+
+Ksq,i = min  Kmax , max  Kmin , K ∗,s q,i 
+
+ . (21) The active set Ssq,i contains the first Ksq,i experts under πsq,i . Their probabilities are renormalized as in Eq. (9), and sparse dispatch evaluates only the selected token–expert pairs. Concentrated router distributions therefore use fewer experts, whereas diffuse distributions can use more, subject to the explicit Kmin and Kmax bounds. Router logits are perturbed during training and are deterministic at inference; the perturbation schedule and selection hyperparameters are given in the experimental setup. 
+
+Shared context pathways. Sparse routing allocates conditional computation, but shared information should not have to pass only through the selected private experts. We therefore construct a target-aware global context using projections shared across targets. We first pool each target-specific bottleneck representation and modulate it with an affine transformation derived from the target embedding, 
+
+bq = LN 1
+
+N
+
+> N
+
+X
+
+> i=1
+
+bq,i 
+
+!
+
+, (22) 
+
+[γq , βq ] = WAdaLN LN( eq ), (23) 
+
+cq = (1 + γq ) ⊙ bq + βq . (24) 6OceanMoE A P REPRINT 
+
+The global context cq is used by the shared pathways and is not concatenated to the per-position encoder router in Eq. (15); the encoder router remains driven by the local target-specific state. For each routed stage s ∈ B = {enc , dec }, let usq,i be its local input, msq,i its expert output, and emon  
+
+> t
+
+the calendar-month embedding. The seasonal pathway is 
+
+ssq,i = P s 
+
+> sea
+
+LN( usq,i + cq + emon  
+
+> t
+
+), (25) and the residual pathway is 
+
+rsq,i = P s
+
+> res
+
+LN( usq,i ); sg(LN( msq,i )); sg(LN( ssq,i ))  , (26) where [·; ·] denotes concatenation and sg denotes stop-gradient. The stage output is 
+
+hsq,i = msq,i + ηs
+
+> res
+
+rsq,i + ηs
+
+> sea
+
+ssq,i . (27) The projections in these pathways are shared across targets, while usq,i and cq preserve target-dependent state. The stop-gradient operators prevent the residual pathway from changing the expert and seasonal representations through its auxiliary inputs; the two paths can still receive gradients through their own direct contributions in Eq. (27). The learnable scales ηs 
+
+> res
+
+and ηs 
+
+> sea
+
+are initialized at zero and learned jointly with the routed pathway, so training starts from the routed computation and learns how much shared context to add. 
+
+Routing differentiation objective. For each routed stage s ∈ B , we average the router probabilities over positions for each target, 
+
+psq = 1
+
+N
+
+> N
+
+X
+
+> i=1
+
+psq,i . (28) Their pairwise Jensen–Shannon divergence is 
+
+Droute = 1
+
+|B|  |Q| 
+
+> 2
+
+ X
+
+> s∈B
+
+X
+
+> q<q ′
+
+JS( psq ∥ psq′ ). (29) The complete training objective is 
+
+L = Lpred − λdiv Droute . (30) Because the diversity term enters with a negative coefficient, the objective encourages target-level routing distributions to differentiate while the prediction loss maintains forecasting accuracy. During autoregressive inference, the target-specific representations and routing decisions are recomputed whenever the model receives the updated state from the preceding rollout block. 
+
+## 4 Experiments 
+
+4.1 Datasets 
+
+We use three data sources with distinct roles. Historical CMIP6 simulations provide the training archive, SODA2 provides reanalysis data for training-time validation, and ORAS5 provides the fixed long-horizon forecasting benchmark. All evaluated models use the common preprocessing and forecast protocol described below. 
+
+CMIP6 training archive. The training data consist of monthly historical simulations from 20 models participating in CMIP6 [Eyring et al., 2016]. The local archive spans January 1850 to December 2014. The training loader uses January 2010 as an exclusive endpoint, giving an effective training period from January 1850 through December 2009. The 14-variable models read 14 ocean variables and two atmospheric surface stress variables from each CMIP6 source. The reproduced six-variable baseline uses the same climate models and training months but selects the standard six ocean prediction variables together with the same two surface-stress inputs. This construction keeps the underlying climate-model archive fixed while allowing the two forecasting contracts to use their declared output spaces. The six-variable comparison in the results uses the 14-variable OceanMoE checkpoint scored on the six complete ORAS5 targets, whereas reproduced ORCA-DL is trained with the six-variable input/output contract; this is therefore a cross-contract comparison rather than a matched parameter-space ablation. 
+
+SODA2 validation archive. SODA2 [Carton and Giese, 2008] supplies monthly salinity, potential temperature, sea-surface temperature, zonal and meridional velocity, sea-surface height, and zonal and meridional surface stress from 1871 through 2010; sea-surface salinity is available through 1979 in the local archive. Targets unavailable in a given reanalysis sample are excluded from that sample’s objective. 7OceanMoE A P REPRINT 
+
+ORAS5 forecasting benchmark. ORAS5 [Zuo et al., 2019] provides a complete initialization in December 2020 and monthly targets from January 2021 through December 2025 for all ten evaluated variables. Every model starts from the same December 2020 ocean state and produces a 60-month autoregressive forecast using the configurations and checkpoints listed in Table 1. The aligned surface stresses for each future block are supplied as prescribed external conditioning and are passed unchanged to every compared model. 
+
+Variable inventory. The standard task evaluates potential temperature, salinity, zonal and meridional velocity, sea-surface temperature, and sea-surface height. The extended task additionally evaluates downward surface heat flux, mixed-layer thickness, sea-surface salinity, and water flux into seawater. Four further ocean variables participate in the 14-variable model but are excluded from 60-month error metrics because a complete ORAS5 target sequence is unavailable. The complete model inventory is therefore the six standard targets so , thetao , tos , uo , vo , and zos ;the four added evaluation targets hfds , mlotst , sos , and wfo ; and the four model-only ocean variables rsntds , sob ,
+
+tob , and wo . The atmospheric inputs are the single-level stresses tauu and tauv . Three-dimensional ocean fields are represented at 16 vertical levels, whereas the remaining fields are single-level. 
+
+4.2 Model Architectures and Experimental Setup Reproduced ORCA-DL. ORCA-DL consists of variable-wise ocean encoders, an atmosphere encoder, a fusion module, and variable-wise ocean decoders [Guo et al., 2025]. The ocean variables and surface stresses are encoded separately, the fusion module integrates their latent features under lead-time conditioning, and the decoders reconstruct the future field of each ocean variable with encoder–decoder skip connections. Its maximum direct forecast interval is six months; longer forecasts are generated through block-autoregressive rollout. Our reproduced model follows this six-variable dense architecture and contains 540.5M parameters. 
+
+ORCA-DL-Expanded. ORCA-DL-Expanded preserves the dense encoder–fusion–decoder organization of ORCA-DL while expanding its ocean encoders, fusion inputs, and prediction heads to the same 14-variable model space used by OceanMoE. It contains 883.4M parameters and provides the ten-variable comparison with a matched ocean input and output contract. 
+
+OceanMoE. OceanMoE first constructs a target-specific representation by fusing cross-variable features. Its encoder routes each spatial position according to the resulting local content state, while its decoder augments content-dependent routing with a learned geographic bias parameterized by spherical-harmonic bases. Shared residual and seasonal pathways carry common context alongside the sparsely selected experts, as detailed in Section 3. OceanMoE contains 936.2M parameters. Of these, 37.2M belong to private experts, 5.5M to routing and target conditioning, and 13.3M to shared pathways; the remaining parameters belong to the variable-wise encoder–decoder backbone. Sparse dispatch evaluates only the selected token–expert pairs. Table 1: Architectural roles and evaluated checkpoints.                 
+
+> Model Computation Model variables Parameters Checkpoint Reproduced ORCA-DL Dense shared fusion 6540.5M 16,000 ORCA-DL-Expanded Dense shared fusion 14 883.4M 28,000 OceanMoE Conditional sparse fusion 14 936.2M 12,000
+
+Preprocessing. All fields are bilinearly remapped to a 128 × 360 latitude–longitude grid with 1◦ spacing, covering 
+
+63 .5◦S– 63 .5◦N and 0.5◦E– 359 .5◦E. Three-dimensional variables are vertically interpolated to 10, 15, 30, 50, 75, 100, 125, 150, 200, 250, 300, 400, 500, 600, 800, and 1000 m. Each field is normalized with month-dependent mean and standard-deviation statistics estimated from the shared training archive. Predictions and targets are returned to physical units before evaluation. Land cells are masked before patch embedding and excluded from evaluation. 
+
+Training configuration. All three models use AdamW, cosine learning-rate decay, a warmup ratio of 0.1, weight decay of 0.1, random seed 1, the same training archive, effective batch size, BF16 precision, learning-rate setting (2 × 10 −4), and total training budget. The parameter-count differences arise from the model architectures rather than from different data or optimization budgets; the six- and fourteen-variable contracts differ only in their declared input/output spaces. Evaluation uses checkpoint 16,000 for reproduced ORCA-DL, 28,000 for ORCA-DL-Expanded, and 12,000 for OceanMoE, as listed in Table 1. OceanMoE uses E = 14 experts and dynamic top-p routing with cumulative probability threshold p0 = 0 .8, Kmin = 1 ,and Kmax = 14 . The geographic router uses real spherical harmonics through degree L = 4 , a hidden width of 64, an initial scale of 0.5, and a 500-step warmup. Noisy routing is used only during training, with standard deviation 8OceanMoE A P REPRINT 
+
+initialized at 0.05 and capped at 0.5; inference is deterministic. The routing differentiation coefficient is λdiv = 10 −3 in Eq. (30). For the component-removal sensitivity analysis, all five models are evaluated over the same 60-month ORAS5 window and all 70 target layers, using the same latitude-area weighting and physical-space RMSE as the main evaluation. The four variants retain the complete forecasting contract while removing one design choice or replacing dynamic routing with fixed top-2 selection. 
+
+Rollout protocol. Each model directly predicts a six-month block and passes the final predicted state to the next block, producing ten blocks and 60 forecast months in total. Within every pairwise comparison, the models use the same initialization and target months. Each block also receives the aligned auxiliary atmospheric surface fields as conditioning; the ocean model does not autoregressively predict these fields. 
+
+Evaluation metrics. Land cells are excluded with the ocean mask. For variable v, level c, forecast month m, and region 
+
+R, the latitude-area-weighted RMSE is 
+
+RMSE R 
+
+> v,c,m
+
+=
+
+s P 
+
+> i∈R
+
+Mv,c,i ewi(byv,c,m,i − yv,c,m,i )2
+
+P 
+
+> i∈R
+
+Mv,c,i ewi
+
+. (31) Here, Mv,c,i is the ocean mask and ewi is the fixed global normalized latitude-area weight defined in Eq. (2). The weights are not renormalized after restricting the calculation to a sample, variable, month, or region. We first average the physical-unit RMSE in Eq. (31) over all 60 months, denoting this arithmetic time average by RMSE . To summarize relative performance across variables with different units and numbers of vertical levels, we use a hierarchically weighted geometric mean of RMSE ratios, following the cross-series relative-error aggregation principle of Kourentzes et al. [2019]. Each variable receives equal total weight, and its levels are weighted equally: 
+
+RR = exp 
+
+"
+
+1
+
+|V| 
+
+X
+
+> v∈V
+
+1
+
+CvCvX
+
+> c=1
+
+log RMSE R
+
+> v,c, OceanMoE
+
+RMSE R
+
+> v,c, base
+
+#
+
+, ∆R = 100( RR − 1) . (32) Negative ∆R indicates lower OceanMoE error. This aggregation measures relative performance on a multiplicative scale, avoids mixing physical units, and prevents variables with more levels from receiving more total weight. It also makes the model comparison invariant to a positive normalization factor shared by both models at each variable and level. This is an aggregate relative-error score, not a pooled physical RMSE: it allows trade-offs across targets, so we also report variable-wise physical RMSE. All RMSE values entering the reported geometric aggregates are positive and finite; no clipping or additive offset is applied. For regional comparisons, we display a geometric-mean normalized score using the corresponding baseline’s Global Ocean error as a fixed reference: 
+
+GR 
+
+> r
+
+= exp 
+
+"
+
+1
+
+|V| 
+
+X
+
+> v∈V
+
+1
+
+CvCvX
+
+> c=1
+
+log RMSE R
+
+> v,c,r
+
+RMSE Global 
+
+> v,c, base
+
+#
+
+. (33) Only the Global Ocean baseline score is constrained to one. Because the common references cancel, 
+
+GR
+
+> OceanMoE
+
+/G R 
+
+> base
+
+= RR in every region. Thus, the reported reduction 100(1 − RR) is consistent with both the score columns and Eq. (32). The two tasks use different baselines, so score magnitudes are compared within each task. For the forecast-month curves, we apply the same geometric aggregation to the RMSE at month m, retaining the fixed full-window global reference: 
+
+Sr,m = exp 
+
+"
+
+1
+
+|V| 
+
+X
+
+> v∈V
+
+1
+
+CvCvX
+
+> c=1
+
+log RMSE Global 
+
+> v,c,m,r
+
+RMSE Global 
+
+> v,c, base
+
+#
+
+. (34) The curves describe month-specific relative performance. Their time averages need not equal the full-window scores, which average physical RMSE over time before geometric aggregation across levels and variables. In particular, the baseline curve is not constrained to have a time mean of one. Figure annotations use the full-window result from Eq. (32), not the mean of the plotted curves. Regional analysis uses the Global Ocean and six fixed diagnostic boxes: Pacific ( 120 ◦E– 290 ◦E), Atlantic ( 290 ◦E– 20 ◦Eacross the longitude seam), Indian ( 20 ◦E– 120 ◦E), Southern Ocean ( 63 .5◦S– 60 ◦S), northern high-latitude ocean ( 60 ◦N– 
+
+63 .5◦N), and equatorial Pacific ( 5◦S– 5◦N, 120 ◦E– 290 ◦E). Because the evaluation grid ends at 63 .5◦ latitude, the two high-latitude boxes represent narrow boundary bands rather than complete polar basins. 9OceanMoE A P REPRINT 
+
+Reproducibility. We retain every denormalized prediction, target, and error array at shape 60 × 128 × 360 for each evaluated variable and vertical level. The experiment artifacts additionally include regional and horizon summaries and full routing tensors on the 16 × 30 grid. Array shapes, metric row counts, and routing-probability normalization are checked programmatically before aggregation. 
+
+4.3 Results and Analysis Q1: Does OceanMoE improve aggregate long-horizon multivariate forecasting accuracy over the two baselines? A1. Yes under both declared forecasting contracts. OceanMoE reduces the geometric-mean relative RMSE by 4.91% relative to the reproduced ORCA-DL model on the standard six-variable task and by 8.34% relative to ORCA-DL-Expanded on the extended ten-variable task. These results establish consistent aggregate gains under both evaluated forecasting contracts. 
+
+Q2: How does OceanMoE perform across prediction variables? A2. Performance varies across prediction targets. OceanMoE lowers error for salinity, potential temperature, and sea-surface height on the six-variable task. On the ten-variable task, the largest reductions occur for sea-surface salinity, sea-surface height, and sea-surface temperature. The mixed variable-wise pattern is consistent with target-dependent specialization rather than a uniform gain across fields. 
+
+Q2a: Is the ten-variable gain driven by one target? A2a. No. Removing sea-surface salinity still gives a 5.91% aggregate reduction over the remaining nine variables. The gain therefore extends beyond that target, although its magnitude depends on the evaluated variable set. Table 2: Variable-wise Global Ocean RMSE in physical units. For three-dimensional variables, each entry is the mean of the 16 level-wise RMSE values. Lower values indicate better predictive accuracy.                                                          
+
+> Six-variable task Ten-variable task Variable Unit ORCA-DL OceanMoE ORCA-DL-Expanded OceanMoE
+> so psu 0.20638 0.17021 0.17058 0.169834
+> thetao ◦C1.04771 0.92827 0.95943 0.928232
+> tos ◦C0.97971 1.05116 1.36120 1.051150
+> uo m s −10.08461 0.09599 0.08624 0.095956
+> vo m s −10.06521 0.06755 0.06593 0.067546
+> zos m0.09324 0.08119 0.10806 0.081194
+> hfds W m −2––79.95500 83.715613
+> mlotst m––41.44452 36.449152
+> sos psu ––0.67675 0.490427
+> wfo kg m −2s−1––1.0824 ×10 −40.000107614
+
+Q3: How does the relative performance vary across geographic regions? A3. Table 3 shows lower geometric-mean normalized RMSE in six of the seven reported regions on the six-variable task and in all seven on the ten-variable task. The six-variable task has its largest reductions in the northern high-latitude ocean (14.03%) and equatorial Pacific (13.95%), but degrades in the Southern Ocean (4.66%). On the ten-variable task, the largest reductions occur in the northern high-latitude ocean (19.06%), Southern Ocean (18.47%), and Atlantic (11.23%); the equatorial Pacific improves by 2.50%. These differences show that relative performance depends on the target set and geographic context. Table 3: Regional comparison using geometric-mean normalized RMSE GR 
+
+> r
+
+from Eq. (33). Each variable-level error is normalized by the corresponding baseline’s Global Ocean 60-month mean RMSE, using the same reference for all regions within a task. Lower scores are better; bold marks the lower score in each model pair. Reduction is 
+
+100(1 − GOceanMoE /G base ), computed before rounding; negative values indicate higher OceanMoE error.                                            
+
+> Six-variable task Ten-variable task Region Baseline NRMSE OceanMoE NRMSE Error reduction (%) Baseline NRMSE OceanMoE NRMSE Error reduction (%) Global Ocean 1.0000 0.9509 4.91 1.0000 0.9166 8.34 Pacific 0.9730 0.9004 7.47 0.8988 0.8409 6.44 Atlantic 0.9964 0.9701 2.64 1.1282 1.0014 11.23 Indian 1.0283 1.0066 2.11 0.9775 0.9240 5.47 Southern Ocean 0.6886 0.7207 -4.66 0.8367 0.6821 18.47 Northern high latitude 0.8868 0.7624 14.03 1.1744 0.9506 19.06 Equatorial Pacific 1.0193 0.8771 13.95 0.7905 0.7707 2.50
+
+10 OceanMoE A P REPRINT 
+
+Q4: How does the relative performance change with forecast horizon? A4. Figure 2 shows the geometric-mean normalized RMSE at each forecast month of the 60-month autoregressive rollout. The curves fluctuate with lead time rather than improving monotonically, but OceanMoE is below its corresponding baseline for most of the later rollout months in both contracts: over months 13–60, it is lower in all 48 months for both tasks. Early rollout months nevertheless include crossings between the two models. This view complements the full-window aggregate results by showing when the relative advantage appears and how stable it is across individual lead months. 
+
+Figure 2: Monthly geometric-mean normalized RMSE Sr,m from Eq. (34) over the 60-month autoregressive rollout. Panel (a) compares the six-variable reproduced ORCA-DL contract with OceanMoE; panel (b) compares ORCA-DL-Expanded with OceanMoE on the ten-variable contract. Each point corresponds to one forecast month; lower values indicate lower normalized error. For each task, both curves use the corresponding baseline’s variable- and level-wise 60-month mean RMSE as the denominator. The plots show lead-time variation and are not cumulative pooled horizon scores. The annotations report the full-window geometric-mean relative change, computed after averaging each variable-level physical RMSE over 60 months; they are not calculated from the time means of the plotted curves. At the target level, the full-window trend is led by salinity, potential temperature, and sea-surface height, as shown in Table 2. For sea-surface height, the 60-month mean RMSE decreases from 0.09324 to 0.08119 m on the six-variable task, a reduction of approximately 12.9%. Figure 2 complements these full-window results by showing the month-to-month variation in aggregate error. 
+
+Q5: Do the main design components improve balanced multivariate forecasting? A5. Table 4 compares the complete model with four matched sensitivity variants on the ten-variable, full-depth evaluation. For model m, we use the same geometric aggregation relative to the complete model 
+
+Sm = exp 
+
+"
+
+1
+
+|V| 
+
+X
+
+> v∈V
+
+1
+
+CvCvX
+
+> c=1
+
+log RMSE v,c,m 
+
+RMSE v,c, Full 
+
+#
+
+, (35) so that the complete model has SFull = 1 . Removing the shared context pathways, target-specific fusion, or decoder geographic routing increases the aggregate error ratio by 1.20%, 1.84%, and 1.92%, respectively. Replacing dynamic expert selection with fixed top-2 routing has the largest effect, increasing it by 17.69%. Some variants improve individual targets, but none improves the variable-balanced geometric-mean score. The result therefore favors the complete configuration under the stated multivariate score rather than claiming uniform gains for every target. 
+
+Q6: What does the target–source heatmap reveal? A6. Figure 3 shows how target-specific fusion combines the encoded ocean variables before expert routing. Each row corresponds to one prediction target, and its weights multiply the projected source features Pv z(v) 
+
+> i
+
+in Eq. (14) to form that target’s local state. Diagonal entries describe the use of the target’s own variable, while off-diagonal entries describe the use of other ocean variables. The matrix reveals distinct row patterns rather than a fixed source-variable grouping. This is physically plausible: ocean currents are linked to sea-surface-height gradients, while temperature and salinity jointly determine density and stratification; surface fluxes and mixed-layer depth also provide context for upper-ocean temperature and salinity 11 OceanMoE A P REPRINT 
+
+Table 4: Ten-variable, full-depth component-removal sensitivity analysis. Per-variable entries are physical-unit RMSE; three-dimensional variables are averaged over 16 level-wise RMSE values. Overall change is 100( Sm − 1) , where Sm
+
+is the geometric-mean ratio in Eq. (35). Lower is better; bold marks the lowest RMSE in each row.                                                                          
+
+> Variable Unit Full
+> −Shared Context
+> −Decoder GeoRouter
+> −Target Fusion Fixed
+> K= 2
+> so psu 0.169834 0.171304 0.171469 0.171091 0.246157
+> thetao ◦C0.928232 0.927402 0.923289 0.932451 1.125637
+> tos ◦C1.051150 1.048703 1.058691 1.040879 1.144868
+> uo m s −10.095956 0.092966 0.090916 0.090498 0.096402
+> vo m s −10.067546 0.065959 0.066595 0.066851 0.070754
+> zos m0.081194 0.085898 0.082664 0.087629 0.118985
+> hfds W m −283.715613 84.555988 82.520360 83.305787 94.041140
+> mlotst m36.449152 36.604106 36.781655 36.462973 37.823342
+> sos psu 0.490427 0.546658 0.626686 0.593008 0.856603
+> wfo kg m −2s−10.000107614 0.000107717 0.000107876 0.000105714 0.000088479
+> Overall change %0.00 +1.20 +1.92 +1.84 +17.69
+
+evolution. The model reflects these relationships in its feature mixtures. Velocity targets retain large self-weights of 0.659 for uo and 0.632 for vo , whereas tos combines thetao , tos , uo , and vo with weights totaling 0.883. The zos 
+
+row also emphasizes velocity and potential-temperature features. Thus, the heatmap provides a compact diagnostic of physically coherent cross-variable coupling and target-specific selection before routing. These weights support consistency with known ocean structure, but do not establish causal influence. 
+
+Q7: Does expert allocation vary across prediction targets? A7. Routing statistics are computed over all 14 model targets, all 60 rollout months, and the native 16 × 30 routing grid. Table 5 reports the mean active-expert count K and the effective number of experts under normalized selected load. The sea-surface-salinity example has a different encoder and decoder active count from the all-target average, providing descriptive evidence that allocation is target-dependent. The configuration names in Table 5 are compact run labels: the first term identifies the encoder-side conditioning, the second identifies the decoder-side conditioning, and the numeric suffix is the saved checkpoint step. “Geo” denotes the decoder geographic bias, whereas “Content” denotes content-only routing at that stage. AdaLN+Geo-12000 is the OceanMoE configuration used for the main results. For reproducibility, all routing summaries use the ocean fraction of the native 16 × 30 patches as the spatial weight and average over the 14 model targets and 60 rollout months before reporting a configuration-level value. If ℓe is the normalized selected load of expert e, the selected-effective count is (P 
+
+> e
+
+ℓ2
+
+> e
+
+)−1. Spatial JS is the area-weighted Jensen–Shannon divergence between each valid patch’s mean routing distribution and the global mean distribution. The reported SH R2 is the corresponding area-weighted coefficient of determination when the mean routing-probability map is fitted with the spherical-harmonic basis used in Eq. (18); these diagnostics characterize the spatial organization of routing. Table 5: Routing statistics averaged over all 14 model targets and 60 forecast months. Eff. denotes the effective number of experts under normalized selected load. 
+
+Configuration Enc. K Enc. eff. Dec. K Dec. eff. Spatial JS SH R2
+
+AdaLN + Geo-12000 1.76 3.22 2.15 6.93 0.0318 0.935 Content + Geo-12000 2.67 5.38 4.06 7.66 0.0451 0.934 Mask-aware-8000 2.20 5.01 2.02 6.44 0.1447 0.809 Content + Content-12000 2.56 4.78 1.58 5.18 0.0057 0.548 
+
+Both GeoRouter configurations obtain a decoder spherical-harmonic weighted R2 of approximately 0.935, indicating stable large-scale geographic organization in their mean routing maps. The OceanMoE configuration activates only 1.76 encoder experts and 2.15 decoder experts per position on average, while its effective expert counts across targets, locations, and months reach 3.22 and 6.93. Sparse local computation therefore coexists with broader expert utilization over the rollout. Sea-surface salinity illustrates how target selectivity and geographic diversity can coexist. Its encoder activates 
+
+K = 1 .03 experts on average, whereas its decoder activates K = 2 .63 experts and retains a spherical-harmonic weighted R2 of 0.936. These diagnostics indicate that expert allocation changes across targets and locations. 12 OceanMoE A P REPRINT 
+
+Figure 3: Target-specific selection of source features before expert routing in OceanMoE. Rows denote target variables and columns denote source variables across all 14 modeled ocean variables. Entries are the 60-month means of αq,v,i ,with latent positions weighted by their ocean fractions; patches with zero ocean fraction are excluded. Darker blue indicates a larger mean fusion weight, and each row sums to one before rounding. Diagonal and off-diagonal entries describe same-variable and cross-variable feature selection, respectively. The different row patterns show how shared ocean information is combined differently for each prediction target. The target-wise summaries refine this observation. Across the four configurations, encoder routing differs between targets by mean absolute amounts of 0.0937–0.1033. Decoder differentiation is strongest for Content+Geo (0.0503) and weakest for Mask-aware (0.0000), whose decoder maps are shared across targets because target-specific decoder conditioning is disabled. Thus, spatial structure and target specialization are separate properties: a route can be spatially organized without being target-specific. 
+
+Q8: Does the geographic router organize allocation across space? A8. The decoder routing distributions have spatial Jensen–Shannon divergence values of 0.0318 and 0.0451 for the two GeoRouter configurations, and their spherical-harmonic fits reach weighted R2 values of 0.935 and 0.934. These statistics indicate large-scale spatial organization in the average routing patterns. Figure 4 provides a representative map-level view of this organization for sea-surface salinity. 
+
+## 5 Conclusion 
+
+Taken together, the experiments support selective rather than uniform parameter sharing for multivariate ocean forecasting. Under the fixed training and rollout protocol, OceanMoE reduces aggregate error under both evaluated output contracts and maintains lower geometric-mean normalized RMSE than the corresponding baselines over most 13 OceanMoE A P REPRINT 
+
+Figure 4: Representative decoder routing diagnostics for sea-surface salinity under AdaLN+Geo-12000. The four panels show modal top-1 expert, temporal top-1 stability, mean active expert count, and normalized routing entropy on the native 16 × 30 grid. White cells have zero ocean fraction and are excluded from routing statistics. later rollout months. The fusion-weight analysis shows that target states use distinct mixtures of source variables, while routing diagnostics show that expert allocation varies across targets and locations. The target- and region-wise results further show that the measured benefits depend on the output contract and geographic context. Full-depth sensitivity tests confirm that the complete architecture has the lowest geometric-mean ten-variable error ratio, with the largest degradation under fixed top-2 routing. Together, these results support structured conditional computation as a way to combine shared ocean context with target- and location-dependent specialization. 
+
+## References 
+
+Remi Lam, Alvaro Sanchez-Gonzalez, Matthew Willson, Peter Wirnsberger, Meire Fortunato, Ferran Alet, Suman Ravuri, Timo Ewalds, Zach Eaton-Rosen, Weihua Hu, Alexander Merose, Stephan Hoyer, George Holland, Oriol Vinyals, Jacklynn Stott, Alexander Pritzel, Shakir Mohamed, and Peter Battaglia. Learning skillful medium-range global weather forecasting. Science , 382(6677):1416–1421, 2023. doi:10.1126/science.adi2336. Zijie Guo, Pumeng Lyu, Fenghua Ling, Lei Bai, Jing-Jia Luo, Niklas Boers, Toshio Yamagata, Takeshi Izumo, Sophie Cravatte, Antonietta Capotondi, and Wanli Ouyang. Data-driven global ocean modeling for seasonal to decadal prediction. Science Advances , 11(33):eadu2488, 2025. doi:10.1126/sciadv.adu2488. Yingzhe Cui, Ruohan Wu, Xiang Zhang, Ziqi Zhu, Bo Liu, Jun Shi, Junshi Chen, Hailong Liu, Shenghui Zhou, Liang Su, Zhao Jing, Hong An, and Lixin Wu. Forecasting the eddying ocean with a deep neural network. Nature Communications , 16:2268, 2025. doi:10.1038/s41467-025-57389-2. Tung Nguyen, Johannes Brandstetter, Ashish Kapoor, Jayesh K. Gupta, and Aditya Grover. ClimaX: A foundation model for weather and climate. In Proceedings of the 40th International Conference on Machine Learning , volume 202 of Proceedings of Machine Learning Research , pages 25904–25938. PMLR, 2023. URL https://proceedings.mlr.press/v202/nguyen23a.html .Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc V. Le, Geoffrey E. Hinton, and Jeff Dean. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. In International Conference on Learning Representations , 2017. URL https:// openreview.net/forum?id=B1ckMDqlg .William Fedus, Barret Zoph, and Noam Shazeer. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23(120):1–39, 2022. URL https://jmlr.org/papers/v23/21-0998.html .Jiaqi Ma, Zhe Zhao, Xinyang Yi, Jilin Chen, Lichan Hong, and Ed H. Chi. Modeling task relationships in multi-task learning with multi-gate mixture-of-experts. In Proceedings of the 24th ACM SIGKDD International Conference on Knowledge Discovery and Data Mining , pages 1930–1939. ACM, 2018. doi:10.1145/3219819.3220007. Hao Zuo, Magdalena Alonso Balmaseda, Steffen Tietsche, Kristian Mogensen, and Michael Mayer. The ECMWF operational ensemble reanalysis– analysis system for ocean and sea ice: A description of the system and assessment. Ocean Science , 15(3):779–808, 2019. doi:10.5194/os-15-779-2019. Kaifeng Bi, Lingxi Xie, Hengheng Zhang, Xin Chen, Xiaotao Gu, and Qi Tian. Accurate medium-range global weather forecasting with 3d neural networks. Nature , 619:533–538, 2023. doi:10.1038/s41586-023-06185-3. Xiang Wang, Renzhi Wang, Ningzi Hu, Pinqiang Wang, Peng Huo, Guihua Wang, Huizan Wang, Senzhang Wang, Junxing Zhu, Jianbo Xu, Jun Yin, Senliang Bao, Ciqiang Luo, Ziqing Zu, Yi Han, Weimin Zhang, Kaijun Ren, Kefeng Deng, and Junqiang Song. Xihe: A data-driven model for global ocean eddy-resolving forecasting. arXiv preprint arXiv:2402.02995 , 2024. doi:10.48550/arXiv.2402.02995. Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu, Dehao Chen, Orhan Firat, Yanping Huang, Maxim Krikun, Noam Shazeer, and Zhifeng Chen. GShard: Scaling giant models with conditional computation and automatic sharding. In International Conference on Learning Representations ,
+
+14 OceanMoE A P REPRINT 
+
+2021. URL https://openreview.net/forum?id=qrwe7XHTmYb .Carlos Riquelme, Joan Puigcerver, Basil Mustafa, Maxim Neumann, Rodolphe Jenatton, André Susano Pinto, Daniel Keysers, and Neil Houlsby. Scaling vision with sparse mixture of experts. In Advances in Neural Information Processing Systems , volume 34, pages 8583–8595, 2021. Quzhe Huang, Zhenwei An, Nan Zhuang, Mingxu Tao, Chen Zhang, Yang Jin, Kun Xu, Kun Xu, Liwei Chen, Songfang Huang, and Yansong Feng. Harder task needs more experts: Dynamic routing in MoE models. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 12883–12895, Bangkok, Thailand, aug 2024. Association for Computational Linguistics. doi:10.18653/v1/2024.acl-long.696. URL https://aclanthology.org/2024.acl-long.696/ .Ben Peters, Vlad Niculae, and Andre F. T. Martins. Sparse sequence-to-sequence models. In Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics , pages 1504–1519, 2019. doi:10.18653/v1/P19-1146. Veronika Eyring, Sandrine Bony, Gerald A. Meehl, Catherine A. Senior, Bjorn Stevens, Ronald J. Stouffer, and Karl E. Taylor. Overview of the coupled model intercomparison project phase 6 (CMIP6) experimental design and organization. Geoscientific Model Development , 9(5): 1937–1958, 2016. doi:10.5194/gmd-9-1937-2016. James A. Carton and Benjamin S. Giese. A reanalysis of ocean climate using simple ocean data assimilation (SODA). Monthly Weather Review , 136 (8):2999–3017, 2008. doi:10.1175/2007MWR1978.1. Nikolaos Kourentzes, Devon Barrow, and Fotios Petropoulos. Another look at forecast selection and combination: Evidence from forecast pooling. 
+
+International Journal of Production Economics , 209:226–235, 2019. doi:10.1016/j.ijpe.2018.05.019. 
+
+15
