@@ -6,39 +6,41 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-09-21
-- 运行时间：2026-09-21 22:46:16 UTC
+- 最新运行日期：2026-09-22
+- 运行时间：2026-09-22 22:35:50 UTC
 - 运行状态：成功
-- 本次总论文数：5
+- 本次总论文数：6
 - 精读区：1
-- 速读区：4
+- 速读区：5
 
 ### 今日简报（AI）
-今日精读1篇、速读4篇，主题集中在 MoE 路由与专家组合优化，外加一篇城市交通预测应用。
-
-最值得看的是 9.0 分的《Attention-Aware Routing》——把路由与注意力耦合进 MoE，以及 7.0 分的《The Other Half of the Memory Wall》——用可训练的路由预测从 SSD 服务 35B MoE，两条线都指向"让路由更聪明"。
-
-普通读者可先读精读那篇理解路由与注意力耦合的思路，再顺着 SSD 服务与 IntBMoE 两篇看工程落地与块级条件化的不同取舍。
-- 详情：[/202609/21/README](/202609/21/README)
+- 今日共生成 6 篇推荐（精读 1 篇，速读 5 篇）
+- 精读：《MECT: Mixture of Experts with CNN-Transformer Network for Speaker verification》（8.0/10）
+- 速读：《A Multi-Engine Dataflow for MoE Decoding on Scratchpad-Based Tensor Accelerators》（7.0/10）, 《Accelerating Dense LLMs via L0-regularized Mixture-of-Experts》（7.0/10）, 《Efficient Mixture-of-Experts with Speculative Decoding via Expert Coactivation》（7.0/10）
+- 这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。
+- 详情：[/202609/22/README](/202609/22/README)
 
 ### 精读区论文标签
-1. [Attention-Aware Routing: Coupling Routing and Attention in MoEs](/202609/21/2609.20974v1-attention-aware-routing-coupling-routing-and-attention-in-moes)  
-   标签：评分：9.0/10、query:moe-special
-   evidence：改进MoE路由器，基于注意力特征优化专家路由
+1. [MECT: Mixture of Experts with CNN-Transformer Network for Speaker verification](/202609/22/2609.24061v1-mect-mixture-of-experts-with-cnn-transformer-network-for-speaker-verification)  
+   标签：评分：8.0/10、query:moe-special
+   evidence：含稠密与稀疏路由的MoE模型
 
 ### 速读区论文标签
-1. [The Other Half of the Memory Wall: Serving 35B MoEs from SSD with Trained Routing Prediction](/202609/21/2609.18063v1-the-other-half-of-the-memory-wall-serving-35b-moes-from-ssd-with-trained-routing-prediction)  
+1. [A Multi-Engine Dataflow for MoE Decoding on Scratchpad-Based Tensor Accelerators](/202609/22/2609.21137v2-a-multi-engine-dataflow-for-moe-decoding-on-scratchpad-based-tensor-accelerators)  
    标签：评分：7.0/10、query:moe-special
-   evidence：预路由器提前一个token预测下一层专家路由
-2. [IntBMoE: Integrating Block-Level Conditioning into Expert Composition for Full-Participation Mixture-of-Experts](/202609/21/2609.21346v1-intbmoe-integrating-block-level-conditioning-into-expert-composition-for-full-participation-mixture-of-experts)  
+   evidence：面向张量加速器的专家混合解码与路由相关专家权重搬运
+2. [Accelerating Dense LLMs via L0-regularized Mixture-of-Experts](/202609/22/2609.21672v1-accelerating-dense-llms-via-l0-regularized-mixture-of-experts)  
    标签：评分：7.0/10、query:moe-special
-   evidence：混合专家中参与度、执行与物化的专家组合权衡
-3. [STHMoE: Hypergraph-Enhanced Heterogeneous Dependency Coordination for LLM-Based Urban Traffic Data Forecasting](/202609/21/2609.15172v1-sthmoe-hypergraph-enhanced-heterogeneous-dependency-coordination-for-llm-based-urban-traffic-data-forecasting)  
+   evidence：L0正则化专家混合加速稠密大语言模型
+3. [Efficient Mixture-of-Experts with Speculative Decoding via Expert Coactivation](/202609/22/2609.22471v1-efficient-mixture-of-experts-with-speculative-decoding-via-expert-coactivation)  
+   标签：评分：7.0/10、query:moe-special
+   evidence：研究MoE路由器设计与专家共激活对推理速度的影响
+4. [DeepSeek-V4.1-Flash: Pushing the Limits of KV Cache Compression](/202609/22/2609.19969v1-deepseek-v41-flash-pushing-the-limits-of-kv-cache-compression)  
    标签：评分：6.0/10、query:moe-special
-   evidence：用于时空交通预测的混合专家框架
-4. [Who Teaches Which Token? Verifier-Gated Multi-Expert On-Policy Distillation for Scientific Reasoning](/202609/21/2609.15404v2-who-teaches-which-token-verifier-gated-multi-expert-on-policy-distillation-for-scientific-reasoning)  
+   evidence：552B参数的多模态混合专家模型
+5. [The Ups and Downs of Backprop Weights](/202609/22/2609.22554v1-the-ups-and-downs-of-backprop-weights)  
    标签：评分：6.0/10、query:moe-special
-   evidence：验证器门控多专家蒸馏决定哪个专家教哪个token
+   evidence：参数组织与MoE路由对功能组件的可复用性
 
 
 <div class="dpr-home-promo-card">
