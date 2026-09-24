@@ -6,35 +6,29 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-09-23
-- 运行时间：2026-09-23 22:10:32 UTC
+- 最新运行日期：2026-09-24
+- 运行时间：2026-09-24 22:33:53 UTC
 - 运行状态：成功
-- 本次总论文数：4
+- 本次总论文数：3
 - 精读区：1
-- 速读区：3
+- 速读区：2
 
 ### 今日简报（AI）
-- 今日共生成 4 篇推荐（精读 1 篇，速读 3 篇）
-- 精读：《From Experts to Sub-experts: Fine-grained Parameter-Efficient Fine-Tuning for MoE LLMs》（8.0/10）
-- 速读：《You Only Need 2/3 of the Chosen Experts: An Empirical Study of Dynamic Expert Pruning in Fine-Grained MoE LLMs》（7.0/10）, 《RACER: Role-Aligned Competence Estimation for Human-AI Routing》（6.0/10）, 《Brain-Inspired Hierarchical Modularity for General Continual Learning》（6.0/10）
-- 这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。
-- 详情：[/202609/23/README](/202609/23/README)
+今日精读1篇、速读2篇，聚焦MoE效率与推理优化。最值得看的是8.0分的《Exact Quantile Balancing and Load-Error Injection for Mixture-of-Experts》，直击专家负载均衡与误差注入；速读的SSD-LLaMA和Hunyuan-A13B则展示消费级硬件跑万亿MoE、大模型技术报告两条路线。普通读者可先读精读论文的负载均衡思路，再按兴趣浏览两篇速读。
+- 详情：[/202609/24/README](/202609/24/README)
 
 ### 精读区论文标签
-1. [From Experts to Sub-experts: Fine-grained Parameter-Efficient Fine-Tuning for MoE LLMs](/202609/23/2609.25655v1-from-experts-to-sub-experts-fine-grained-parameter-efficient-fine-tuning-for-moe-llms)  
+1. [Exact Quantile Balancing and Load-Error Injection for Mixture-of-Experts](/202609/24/2609.28053v1-exact-quantile-balancing-and-load-error-injection-for-mixture-of-experts)  
    标签：评分：8.0/10、query:moe-special
-   evidence：发现激活专家内部稀疏并提出子专家粒度的MoE微调
+   evidence：通过路由分数梯度注入实现MoE负载均衡，直接涉及专家路由机制
 
 ### 速读区论文标签
-1. [You Only Need 2/3 of the Chosen Experts: An Empirical Study of Dynamic Expert Pruning in Fine-Grained MoE LLMs](/202609/23/2609.25809v1-you-only-need-23-of-the-chosen-experts-an-empirical-study-of-dynamic-expert-pruning-in-fine-grained-moe-llms)  
-   标签：评分：7.0/10、query:moe-special
-   evidence：细粒度MoE中动态专家剪枝与逐token专家选择冗余
-2. [RACER: Role-Aligned Competence Estimation for Human-AI Routing](/202609/23/2609.21953v1-racer-role-aligned-competence-estimation-for-human-ai-routing)  
+1. [SSD-LLaMA: SSD-Native Inference for Trillion-Parameter MoE at 1+ Token/s on a Consumer PC](/202609/24/2609.18110v1-ssd-llama-ssd-native-inference-for-trillion-parameter-moe-at-1-tokens-on-a-consumer-pc)  
    标签：评分：6.0/10、query:moe-special
-   evidence：角色相对的路由框架，估计专家能力与实例级专家专业化
-3. [Brain-Inspired Hierarchical Modularity for General Continual Learning](/202609/23/2609.25146v1-brain-inspired-hierarchical-modularity-for-general-continual-learning)  
+   evidence：面向万亿参数MoE的SSD原生推理系统与专家传输流水线
+2. [Hunyuan-A13B Technical Report](/202609/24/2609.27284v1-hunyuan-a13b-technical-report)  
    标签：评分：6.0/10、query:moe-special
-   evidence：通过专家专业化协调功能的分层模块化原则
+   evidence：基于混合专家架构的开源大语言模型
 
 
 <div class="dpr-home-promo-card">

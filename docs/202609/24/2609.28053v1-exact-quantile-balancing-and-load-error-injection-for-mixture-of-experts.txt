@@ -1,0 +1,707 @@
+Title: Exact Quantile Balancing and Load-Error Injection for Mixture-of-Experts
+
+URL Source: https://arxiv.org/pdf/2609.28053v1
+
+Published Time: Thu, 24 Sep 2026 01:11:27 GMT
+
+Number of Pages: 11
+
+Markdown Content:
+# Exact Quantile Balancing and Load-Error Injection for Mixture-of-Experts 
+
+Pit Neitemeier ∗,† Jiaze Li ∗ Alessio Serra Philipp Scholl Sohir Maskey 
+
+Aleph Alpha 
+
+## Abstract 
+
+Mixture-of-Experts (MoE) training requires global load balance to prevent expert under-utilization and local balance for efficient expert-parallel execution. Existing distributed Quantile Balancing (QB) uses shard-dependent or approximate global quantiles, while token-independent expert biases cannot ensure microbatch-level balance. We introduce Exact Quantile Balancing (EQB), which computes exact global-batch BF16 quantiles with negligible communication, and Load-Error Injection (LEI), which injects local load errors directly into router-score gradients. On 7.5B-parameter MoEs trained for up to 500B tokens, EQB improves global balance and downstream performance over naive QB, while LEI improves local balance and outperforms the GShard loss at comparable quality. 
+
+## 1 Introduction 
+
+Sparse MoE models increase parameter capacity without proportionally increasing per-token compute by routing each token to only few experts [Shazeer et al., 2017, Fedus et al., 2022]. Realizing this benefit requires balancing expert load at two scales. Global balance , measured over all tokens in an optimizer step, prevents routing from persistently concentrating on a small subset of experts. 
+
+Local balance within an expert-parallel (EP) microbatch reduces load skew, improving dispatch and expert-compute efficiency. These objectives are distinct: imbalances across local microbatches can cancel when aggregated over an optimizer step, so global balance does not imply local balance. Quantile Balancing (QB) [Su, 2026] controls global load through token-independent expert biases computed from routing-margin quantiles, requiring neither an auxiliary loss nor a controller learning rate. In distributed training, however, the required global-batch quantile is not available on any individual data-parallel rank. Su [2026], Dial [2026] average rank-local quantiles, yielding a statistic that depends on how the batch is partitioned. Kimi Team [2026] instead aggregate a global histogram, making the estimate partition invariant but limiting its accuracy to the chosen histogram resolution. We introduce Exact Quantile Balancing (EQB), which applies two-pass BF16 radix selection to recover the exact global-batch empirical quantile using two 256-bin all-reduces per layer. Exact global balancing does not solve local imbalance. A single expert bias is shared across microbatches and cannot adapt to their routing distributions. The GShard auxiliary loss [Lepikhin et al., 2021] provides a local training signal, but propagates the load error through normalized routing probabilities, coupling the correction across experts and using a soft surrogate that can change without changing hard top-K assignments. We introduce Load-Error Injection (LEI), which instead passes each expert’s local load error directly to its router-score gradients. Across our experiments, EQB improves global balance over rank-averaged QB, while LEI improves local balance over the GShard loss at comparable model quality and can improve local balance and average accuracy together. Together, EQB and LEI provide complementary control of global and local MoE load balance.  
+
+> ∗Equal contribution
+> †Correspondence to pit.neitemeier@aleph-alpha-research.com .Preprint. arXiv:2609.28053v1 [cs.LG] 23 Sep 2026
+
+## 2 Preliminaries: MoE Routing and Load Balancing 
+
+For each token representation xt ∈ Rd, an MoE layer contains E routed experts and selects K experts per token. The router produces logits zt = Wrxt ∈ RE and selects It = Top -K( zt + b), where 
+
+b ∈ RE is the expert bias used for load balancing [Wang et al., 2024]. The bias affects only expert selection; selected experts are weighted by the unbiased sigmoid scores st,e = sigmoid( zt,e ):
+
+yt = X
+
+> e∈I t
+
+st,e FFN e(xt). (1) For any token batch B, define the load of expert e as fe(B) = P 
+
+> t∈B
+
+1[e ∈ I t], with uniform target 
+
+¯f (B) = K|B| /E . The global batch Bg contains all tokens in one optimizer step, whereas a local batch Bl contains the tokens in one rank-local expert-parallel microbatch. 
+
+Quantile Balancing. Quantile Balancing (QB) [Su, 2026] computes the expert bias directly from the distribution of routing margins. For optimizer step q and token t, let τt denote the (K + 1) st largest entry of zt + b(q). The value τt denotes the cutoff that has to be exceeded for an expert to enter the top-K set of the token t. Since a balanced expert should be selected for a fraction K/E of tokens, QB chooses the corresponding quantile over the margins τt − zt,e :
+
+bb(q+1)  
+
+> e
+
+= quantile K/E {τt − zt,e : t ∈ B g}, b(q+1) = bb(q+1) − mean( bb(q+1) )1. (2) The centering removes a common offset that does not affect top-K selection. Statistics from optimizer step q therefore determine the bias b(q+1) used in the next step. QB uses neither an auxiliary loss nor a controller learning rate. Appendix B derives this update from the balanced-assignment objective. In distributed training, the global batch is partitioned across data-parallel ranks, so no individual rank observes the global-batch quantile required by QB. Dial [2026] approximate it by computing a quantile on each shard Bg,p and averaging across ranks. The target statistic, however, is the quantile 
+
+bglobal  
+
+> e
+
+over the entire global batch from Equation 2. As quantiles do not commute with averaging, 
+
+bavg  
+
+> e
+
+generally differs from bglobal  
+
+> e
+
+and depends on how the batch is partitioned. Kimi Team [2026] instead aggregate histogram counts of the routing margins across ranks, yielding a partition-invariant estimate of the global quantile with communication independent of the number of tokens. However, the estimate remains approximate, as its resolution is limited by the histogram bin width. 
+
+Auxiliary load balancing. A token-independent bias can correct systematic expert imbalance but cannot adapt separately to different local microbatches. Load balancing can therefore also be imposed through the router gradients. A common choice is the GShard auxiliary loss [Lepikhin et al., 2021]. For a local batch Bl, define the hard-load fraction Fe = fe(Bl)/(K|B l|), the normalized routing probability pt,e = st,e / P 
+
+> j
+
+st,j , and its batch mean P G 
+
+> e
+
+= |B l|−1 P 
+
+> t
+
+pt,e . The loss 
+
+Laux = α X
+
+> e
+
+FeP G 
+
+> e
+
+, (3) with Fe treated as stop-gradient, encourages the router to reduce observed load imbalance. Such gradient-based control is complementary to bias-based methods: for example, DeepSeek-AI [2024] combine an expert-bias controller with a sequence-wise auxiliary loss. 
+
+## 3 Exact Quantile Balancing 
+
+The goal of this section is to introduce a distributed, exact quantile balancing methodology. The QB update requires knowing the r-th smallest routing margin for each expert, where r = T K/E for a global batch of T tokens. A direct distributed implementation could gather all token-level margins across data-parallel ranks, but its communication grows with T . Alternatively, following the idea of Kimi Team [2026], one could utilize an exact histogram over BF16 values, however, this would require up to 216 bins per expert. 
+
+Distributed radix selection. We introduce EQB by adapting radix selection [Alabi et al., 2012, Li et al., 2024], which locates an order statistic by successively histogramming groups of key bits and retaining the target bin. Unlike radix top-k, EQB only requires the resulting pivot. 2We require one global order statistic per expert from margins sharded across data-parallel ranks. We exploit the 16-bit BF16 representation and use an 8-bit radix, reducing selection to exactly two passes over a high and a low byte. Each rank forms 256-bin counts locally, and an all-reduce locates the target bin globally. EQB never materializes a smaller candidate array: the second pass simply rescans local margins whose high byte matches the selected bin. Thus, token-level margins remain local while the exact global-batch quantile is recovered with communication independent of T .In the coarse pass, each rank counts how many margins fall into each of the 256 high-byte ranges and all-reduces the counts. Their cumulative sum identifies the high byte ue containing the r-th smallest margin and its rank ρe within that range. The fine pass then counts the low bytes only for margins with high byte ue. Its cumulative counts identify the low byte ve at rank ρe. Because the encoding preserves BF16 order, (ue, v e) recovers the exact empirical quantile. Moreover, because both passes aggregate global counts, the result is invariant to how tokens are partitioned across data-parallel ranks. 
+
+Communication. EQB communicates 2E ·256 int32 counts per layer, independent of the number of tokens. For E = 256 , this corresponds to 0.5 MiB per layer. In our experimental setup with 48 MoE layers (Section 5), this amounts to 24 MiB per optimizer step. This is 128 × smaller than all-reducing a full 216 -bin BF16 histogram while returning the same exact empirical quantile. Compared with the histogram approximation of Kimi Team [2026], EQB therefore removes the histogram-resolution choice while retaining token-count-independent communication. Algorithm 1 in Appendix C gives the full distributed procedure. 
+
+## 4 Load-Error Injection 
+
+For a local batch Bl, let Fe = fe(Bl)/(K|B l|) denote the hard-load fraction defined in Section 2, and let Qe = 1 /E be the uniform target. A natural load-balancing objective is 
+
+Lbal = 12 ∥F − Q∥22. (4) However, F is determined by the discrete top-K assignment and therefore has zero gradient almost everywhere. To obtain a useful backward signal, consider a differentiable surrogate P (s) and define 
+
+eF = P (s) + sg( F − P (s)) , LSTE bal = 12 ∥ eF − Q∥22, (5) where sg denotes stop-gradient. In the forward pass, eF = F . In the backward pass, 
+
+∇sLSTE bal = JP (s)⊤(F − Q). (6) Thus, the observed hard-load error F − Q determines the desired correction, while the choice of surrogate P determines how that correction is propagated to the router scores. 
+
+GShard as a surrogate gradient. The GShard loss can be viewed as using mean normalized routing probabilities P G as the STE surrogate. Its probability-dependent Jacobian couples experts and can change without changing the hard top-K assignments. Appendix D gives the full derivation. 
+
+Load-Error Injection To avoid utilizing the normalized routing probabilities P G, which induces the drawbacks outlined above, we introduce Load-Error Injection (LEI). LEI applies the mean unnormalized router score 
+
+P L 
+
+> e
+
+= 1
+
+|B l|
+
+X
+
+> t∈B l
+
+st,e (7) as the STE surrogate. Its Jacobian is constant and diagonal, 
+
+∂P L
+
+> e
+
+∂s t,e ′
+
+= 1
+
+|B l| 1[e = e′], (8) so the load error of expert e affects only that expert’s router scores and is applied equally to every token in the local batch. Defining the relative load error ρe = fe(Bl)/ ¯f (Bl) − 1 = E(Fe − Qe) LEI therefore applies the simple gradient correction 
+
+grad st,e = grad st,e + η ρ e, t ∈ B l. (9) where η > 0 controls the correction strength. Thus, overloaded experts receive a positive score gradient and underloaded experts a negative one. In contrast to GShard, LEI does not transform the load error through normalized routing probabilities or couple it to the residuals of other experts. Appendix D provides the complete derivation. 3Table 1: 100B-token ablation. Full benchmark results are in Appendix E.2.                                                                   
+
+> MaxVio ↓BPB ↓
+> Method Global Local MMLU ARC HSwag GSM8K HumanEval MBPP Mean Rank-avg. QB 0.92 5.96 0.9007 0.7508 0.7718 0.5260 0.5205 0.5993 0.6782 EQB 0.74 5.38 0.8650 0.6876 0.7703 0.5258 0.5154 0.5777 0.6570
+> EQB + GShard loss 0.71 4.71 0.8932 0.7295 0.7737 0.5400 0.5129 0.6625 0.6853 EQB + LEI 0.60 3.49 0.8897 0.7348 0.7729 0.5409 0.4989 0.6177 0.6758 EQB + norm. GShard loss 0.74 4.30 0.8853 0.7373 0.7730 0.5333 0.5031 0.6228 0.6758 EQB + norm. LEI 0.60 3.52 0.8892 0.7198 0.7729 0.5341 0.5167 0.5992 0.6720
+
+Table 2: 500B-token EQB vs. normalized LEI. Full benchmark results in Appendix E.3 
+
+MaxVio ↓ Accuracy (%) ↑
+
+Method Global Local MMLU ARC HSwag TriviaQA Avg. EQB 0.44 5.14 41.36 50.05 63.53 38.06 48.25 EQB + norm. LEI 0.63 4.15 41.38 51.49 63.53 37.83 48.56 
+
+Stabilizing the correction. In early ablations, unbounded auxiliary score gradients caused attention logit instability for both the GShard loss and LEI (Figure 1). We therefore bound LEI’s injected residual without changing its STE direction, using one shared scale across experts: 
+
+eρ = ρ tanh( ξ)
+
+ξ , ξ = ∥ρ∥∞
+
+c , (10) with c > 0 and tanh( ξ)/ξ := 1 at ξ = 0 . This preserves the direction and zero-centering of ρ while bounding the injected gradient. LEI leaves forward routing and mixture weights unchanged. 
+
+## 5 Experiments 
+
+Setup. We evaluate on a 7.5B-parameter decoder-only MoE with 0.5B active parameters per token, 
+
+E = 256 routed experts, and K = 6 . We train six ablations for 100B tokens and additionally compare EQB with normalized LEI at 500B tokens. Experimental details are given in Appendix E. 
+
+Metrics. We measure imbalance by MaxVio( B) = max e[fe(B)/ ¯f (B) − 1] [DeepSeek-AI, 2024]. Global MaxVio uses loads aggregated over an optimizer step, whereas Local MaxVio is computed on rank-local expert-parallel microbatches. We report worst-layer means over the final 1,000 steps. 
+
+EQB improves on rank-averaged QB. As shown in Table 1, replacing rank-averaged quantiles with the exact global-batch statistic reduces Global MaxVio from 0.92 to 0.74 (19.4%) and Local MaxVio from 5.96 to 5.38 (9.8%), while improving BPB on all six reported benchmarks. 
+
+LEI improves local balance. At 100B tokens, normalized LEI reduces Global/Local MaxVio to 
+
+0.60 /3.52 , compared with 0.71 /4.71 for the GShard loss, at comparable model quality (Table 1). At 500B tokens, LEI reduces Local MaxVio from 5.14 to 4.15 while average accuracy increases from 48 .25% to 48 .56% ; Global MaxVio increases from 0.44 to 0.63 (Table 2). Full trajectories, gradient-weight sweeps, and per-benchmark results are reported in Appendix E. 
+
+## 6 Conclusion 
+
+EQB and LEI address complementary scales of MoE load balancing. EQB recovers the exact global-batch quantile with token-count-independent communication, while LEI injects local load residuals directly into router-score gradients. EQB improves on rank-averaged QB, and LEI improves balance over the GShard loss at comparable quality. Bounding the injected residual preserves this improvement without attention-logit instability. 
+
+Limitations Our results use one model scale and seed, without estimating variance. GShard and LEI use separately tuned coefficients because the same coefficient produces very different router-gradient magnitudes. Local MaxVio is a proxy for dispatch cost rather than measured EP throughput. 4References 
+
+Tolu Alabi, Jeffrey D. Blanchard, Bradley Gordon, and Russel Steinbach. Fast k-selection algorithms for graphics processing units. ACM Journal of Experimental Algorithmics , 17(4):1–29, October 2012. doi: 10.1145/2133803.2345676. URL https://doi.org/10.1145/2133803.2345676 .Aleph Alpha Research. Aleph alpha eval framework, 2026. URL https://github.com/ Aleph-Alpha-Research/eval-framework . Software. Jacob Austin, Augustus Odena, Maxwell Nye, Maarten Bosma, Henryk Michalewski, David Dohan, Ellen Jiang, Carrie Cai, Michael Terry, Quoc Le, and Charles Sutton. Program synthesis with large language models, 2021. Mark Chen et al. Evaluating large language models trained on code, 2021. Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. Think you have solved question answering? try ARC, the AI2 reasoning challenge, 2018. Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. Training verifiers to solve math word problems, 2021. DeepSeek-AI. DeepSeek-V3 technical report, 2024. Larry Dial. Mixture of experts quantile balancing: Validated at 32b-a5b (1e22 flops) scale, April 2026. URL https://openathena.ai/blog/quantile-balancing/ . OpenAthena blog post; MARIN implementation. William Fedus, Barret Zoph, and Noam Shazeer. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23(120):1–39, 2022. Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. Measuring massive multitask language understanding. In International Conference on Learning Representations , 2021a. URL https://arxiv.org/abs/2009.03300 .Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. Measuring mathematical problem solving with the MATH dataset. In 
+
+Advances in Neural Information Processing Systems Datasets and Benchmarks Track , 2021b. URL 
+
+https://arxiv.org/abs/2103.03874 .Mandar Joshi, Eunsol Choi, Daniel S. Weld, and Luke Zettlemoyer. TriviaQA: A large scale distantly supervised challenge dataset for reading comprehension, 2017. Kimi Team. Kimi K3: Open frontier intelligence, 2026. Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu, Dehao Chen, Orhan Firat, Yanping Huang, Maxim Krikun, Noam Shazeer, and Zhifeng Chen. GShard: Scaling giant models with conditional computation and automatic sharding. In International Conference on Learning Representations ,2021. URL https://openreview.net/forum?id=qrwe7XHTmYb .Aitor Lewkowycz, Anders Andreassen, David Dohan, Ethan Dyer, Henryk Michalewski, Vinay Ramasesh, Ambrose Slone, Cem Anil, Imanol Schlag, Theo Gutman-Solo, Yuhuai Wu, Behnam Neyshabur, Guy Gur-Ari, and Vedant Misra. Solving quantitative reasoning problems with language models, 2022. Yifei Li, Bole Zhou, Jiejing Zhang, Xuechao Wei, Yinghan Li, and Yingda Chen. Radik: Scalable and optimized gpu-parallel radix top-k selection. In Proceedings of the 38th ACM International Conference on Supercomputing , pages 537–548, 2024. doi: 10.1145/3650200.3656596. URL 
+
+https://doi.org/10.1145/3650200.3656596 .Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. In 
+
+International Conference on Learning Representations , 2017. 5Jianlin Su. Travels in MoE: 6. Promoting load balance via optimal assignment, February 2026. URL 
+
+https://spaces.ac.cn/archives/11619 . Blog post (in Chinese). Lean Wang, Huazuo Gao, Chenggang Zhao, Xu Sun, and Damai Dai. Auxiliary-loss-free load balancing strategy for mixture-of-experts, 2024. URL https://arxiv.org/abs/2408.15664 .Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. HellaSwag: Can a machine really finish your sentence? In Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics , pages 4791–4800, 2019. doi: 10.18653/v1/P19-1472. URL 
+
+https://aclanthology.org/P19-1472/ .
+
+## A Related work 
+
+Sparse MoE systems commonly encourage balanced routing with an auxiliary objective. The GShard loss [Lepikhin et al., 2021] couples hard expert loads to mean routing probabilities, and Switch Transformer [Fedus et al., 2022] uses a closely related objective. Wang et al. [2024] instead introduce an auxiliary-loss-free controller that updates expert-selection biases from observed loads but requires a tuned step size; DeepSeek-V3 later adopts this strategy [DeepSeek-AI, 2024]. These approaches motivate our separation between global bias control and local score-side correction. QB [Su, 2026] derives a bias update from quantiles of the balanced-assignment problem and removes the controller learning rate. Distributed implementations differ in the statistic they aggregate: Su’s formulation and MARIN [Dial, 2026] average rank-local quantiles, whereas Kimi Team [2026] estimates the global-batch quantile with an all-reduced histogram. EQB targets the same global-batch statistic exactly, while LEI complements the token-independent QB bias with a local router-score update. 
+
+## B Balanced assignment, existence, and routing uniqueness 
+
+For T tokens, E experts, and 1 ≤ K < E top-K routing, assume r = T K/E ∈ N. Define the balanced assignment set 
+
+M =
+
+(
+
+M ∈ { 0, 1}T ×E : X
+
+> e
+
+Mt,e = K, X
+
+> t
+
+Mt,e = r
+
+)
+
+. (11) This set is nonempty: enumerate the T K assignment slots cyclically over the E experts and give each token K consecutive slots. Since K ≤ E and E | T K , each token receives distinct experts and each expert appears exactly r times. Because M is finite and nonempty, the balanced oracle value 
+
+V ⋆ = max  
+
+> M∈M
+
+⟨z, M ⟩ (12) is attained. 
+
+Bias representation. For any M ∈ M and expert bias b ∈ RE , column balance gives 
+
+⟨z, M ⟩ = X
+
+> t,e
+
+Mt,e (zt,e + be) − r X
+
+> e
+
+be
+
+≤ X
+
+> t
+
+TopKSum K (zt + b) − r X
+
+> e
+
+be =: Φ( b). (13) The inequality maximizes each row independently. The common shift of b is irrelevant because 
+
+T K = Er , so fix H = {b ∈ RE : 1⊤b = 0 }. The convex hull of M is the integral bipartite 
+
+b-matching polytope. LP strong duality and dual attainment therefore give 
+
+min  
+
+> b∈H
+
+Φ( b) = V ⋆, B⋆ := arg min  
+
+> b∈H
+
+Φ( b)̸ = ∅. (14) More precisely, for any balanced M ,
+
+Φ( b) − ⟨ z, M ⟩ = X
+
+> t
+
+"
+
+TopKSum K (zt + b) − X
+
+> e
+
+Mt,e (zt,e + be)
+
+#
+
+≥ 0. (15) 6Every bracket is nonnegative. If M is an oracle and b ∈ B ⋆, strong duality makes their sum zero, hence every row selected by M is a valid top-K subset of zt + b. Conversely, if a balanced M is row-wise top-K at b, Eq. (15) is zero, so M and b are primal and dual optimal. Thus every oracle is supported by every optimal bias. At a boundary tie, this means the oracle is one valid realization; an arbitrary row-local tie rule need not return the balanced realization. 
+
+Why the QB update is a quantile. The threshold identity 
+
+TopKSum K (x) = min 
+
+> α∈R
+
+(
+
+Kα + X
+
+> e
+
+[xe − α]+
+
+)
+
+(16) expands the reduced dual into 
+
+D(α, b ) = K X
+
+> t
+
+αt + X
+
+> t,e
+
+[zt,e + be − αt]+ − r X
+
+> e
+
+be, Φ( b) = min  
+
+> α
+
+D(α, b ). (17) For fixed b, a lower-endpoint minimizer is the (K + 1) st largest adjusted score, αt = ( zt + b)[K+1] .For fixed α, the eth bias minimizes P
+
+> t
+
+[be − (αt − zt,e )] + − rb e and is therefore the rth smallest value of {αt − zt,e }t. With the quantile convention of Section 2, this is exactly Eq. (2), up to the common shift removed by centering. Moreover, ∂eΦ( b) ∋ fe(b) − r, so its subgradient is the hard-load residual. This derivation follows the balanced-assignment view of Kimi K3 [Kimi Team, 2026]; it also shows why a single simultaneous finite-batch update is not in general a complete solution of the coupled dual problem. 
+
+Geometry and uniqueness. Fix an oracle M ⋆ and, for distinct experts u, v , define 
+
+Cuv = min    
+
+> t:M⋆tu =1 , M ⋆tv =0
+
+(ztu − ztv ), (18) with Cuv = + ∞ when the index set is empty. The preceding row-wise support condition gives the exact characterization 
+
+B⋆ = {b ∈ H : bv − bu ≤ Cuv for every finite Cuv } . (19) Indeed, each inequality says that every selected u weakly outranks every unselected v in the corre-sponding rows; intersecting them is therefore equivalent to supporting M ⋆. The set is closed and convex. It is also bounded: on H, TopKSum K (b) > 0 for every nonzero b, so positive homogeneity and compactness of the unit sphere give TopKSum K (b) ≥ c∥b∥∞ for some c > 0. Since 
+
+Φ( b) ≥ T TopKSum K (b) − K X
+
+> t
+
+∥zt∥∞, (20) 
+
+Φ is coercive on H. Hence B⋆ is a nonempty compact polytope. The oracle itself is generically unique. Since M is finite, two different assignments M, N tie only if 
+
+⟨z, M − N ⟩ = 0 . If the score distribution assigns probability zero to each such hyperplane, as any joint density does, a finite union bound shows that no pair ties almost surely. This does not make the numerical bias unique. If M ⋆ is the unique oracle, every b ∈ B ⋆ supports it, and any balanced row-wise top-K realization at b must equal M ⋆: by Eq. (15), another realization would be another oracle. Thus the solution is unique in routing space while the supporting biases may fill the polytope in Eq. (19). 
+
+## C Exact Quantile Balancing Algorithm 
+
+Algorithm 1 Two-pass EQB.                                                                 
+
+> Let κ(τt−zt,e ) = ( ht,e , ℓ t,e )∈ { 0, . . . , 255 }2be an order-preserving encoding of each BF16 routing margin into high and low bytes. Assume r=T K/E ∈N.
+> Coarse pass (high byte) 1. Hp,e,u ←X
+> t∈B g,p
+> 1[ht,e =u], u ∈ { 0, . . . , 255 }
+> 2. He,u ←
+> PX
+> p=1
+> Hp,e,u (all-reduce)
+> 3. ue←min {u:Puj=0 He,j ≥r},ρe←r−Pue−1
+> j=0 He,j .
+> Fine pass (low byte) 4. Lp,e,v ←P
+> t∈B g,p 1[ht,e =ue, ℓ t,e =v],v∈ { 0, . . . , 255 }.
+> 5. Le,v ←PPp=1 Lp,e,v (all-reduce) ,ve←min
+> n
+> v:Pvj=0 Le,j ≥ρe
+> o
+> .
+> 6. bbe←κ−1(ue, v e),b←bb−mean( bb)1.
+
+7D Straight-through derivation of the GShard loss and LEI 
+
+We give the full derivation of the common straight-through view used in Section 4. Normalize the observed hard load as Fe = f be /(T K ), let Qe = 1 /E , and consider Lbal = 12 ∥F − Q∥22. The top-K
+
+load F is nondifferentiable. For any differentiable surrogate P (u), define 
+
+eF = P (u) + sg( F − P (u)) , LSTE bal = 12
+
+X
+
+> e
+
+( eFe − Qe)2, (21) where sg denotes stop-gradient. In the forward pass, eF = F . In the backward pass, ∇u eFe =
+
+∇uPe(u), and therefore 
+
+∇uLSTE bal = X
+
+> e
+
+(Fe − Qe)∇uPe(u). (22) The gradient is the observed hard-load residual multiplied by a surrogate Jacobian. The surrogate need not be numerically close to F ; it only needs a Jacobian whose increasing directions track increased expert selection. For the GShard loss , choose the batch-mean normalized routing probability 
+
+pt,e = st,e 
+
+P 
+
+> j
+
+st,j 
+
+, P G 
+
+> e
+
+= 1
+
+T
+
+X
+
+> t
+
+pt,e , (23) where s is the unbiased router score. Because P 
+
+> e
+
+P G 
+
+> e
+
+= 1 and Qe = 1 /E ,
+
+X
+
+> e
+
+Qe∇sP G 
+
+> e
+
+= 1
+
+E ∇s
+
+X
+
+> e
+
+P G 
+
+> e
+
+= 0 .
+
+The Q term in Eq. (22) therefore vanishes. Since F is treated as stop-gradient, the remaining term is 
+
+∇sLSTE bal = X
+
+> e
+
+Fe∇sP G 
+
+> e
+
+= 1
+
+α ∇sLaux . (24) To make this gradient explicit for each router score, let dt = P 
+
+> j
+
+st,j and R = F − Q. Only the 
+
+tth term in P G 
+
+> e
+
+= T −1 P 
+
+> t′
+
+pt′,e depends on st,j , so ∂P G 
+
+> e
+
+/∂s t,j = T −1∂p t,e /∂s t,j . Applying the quotient rule and then summing over experts gives 
+
+∂p t,e 
+
+∂s t,j 
+
+= 1[e = j] − pt,e 
+
+dt
+
+,∂LSTE bal 
+
+∂s t,j 
+
+= 1
+
+T
+
+X
+
+> e
+
+Re
+
+∂p t,e 
+
+∂s t,j 
+
+= 1
+
+T d t
+
+Rj − X
+
+> e
+
+pt,e Re
+
+!
+
+.
+
+(25) Thus every expert’s residual is coupled to all others through the probability-weighted mean, and the magnitude is scaled by the token’s current score sum. For a softmax router this is the usual softmax probability Jacobian; for a sigmoid router it is followed by the sigmoid Jacobian when propagated to the router logits. With an expert bias, this estimator combines the actual load selected using z + b with probabilities computed from s alone, a common implementation choice. 3 When b substantially changes the top-K
+
+choices, P G can be weakly aligned with the observed load; its score-dependent Jacobian can further attenuate the correction. For LEI , choose instead the batch-mean unnormalized score 
+
+P L 
+
+> e
+
+= 1
+
+T
+
+X
+
+> t
+
+st,e . (26) Its Jacobian is constant and diagonal: 
+
+∂P L
+
+> e
+
+∂s t,e ′
+
+= 1
+
+T 1[e = e′].
+
+> 3For example, the Nemotron recipe enables both sequence auxiliary loss and expert bias, while the router implementation applies the bias only to expert selection and computes mixture weights from the original scores.
+
+8Substitution into Eq. (22) gives 
+
+∂LSTE bal 
+
+∂s t,e 
+
+= 1
+
+T (Fe − Qe). (27) Thus LEI broadcasts the same observed load residual to every token, up to the coefficient and residual rescaling in Eq. (9). The GShard loss and LEI are therefore both STEs of the same hard-load objective; they differ in the surrogate Jacobian, normalized probability for the GShard loss and constant identity-like raw score for LEI. In both score-side estimators, b determines F but is held fixed during differentiation. The same view also covers a gradient-based auxiliary-loss-free bias controller. Taking u = b and 
+
+P (b) = b in Eq. (22) gives 
+
+∇bLSTE bal = F − Q. (28) It uses the same identity-like surrogate Jacobian as LEI but acts on the token-independent selection bias rather than on token-dependent router scores. QB replaces a tuned gradient step along this residual with the exact coordinate-wise quantile minimizer of Eq. (17). 
+
+## E Experimental Details and Additional Results 
+
+E.1 Model, training, and evaluation 
+
+All experiments use a 7.5B-parameter decoder-only model with 0.5B active parameters per token. The model has 50 Transformer layers, with two dense layers followed by 48 MoE layers, and combines sliding-window attention (SWA) with full attention in a 4:1 ratio. Each MoE layer contains E = 256 
+
+routed experts with K = 6 active experts per token, plus one shared expert. We use sigmoid routing with the expert bias applied to the router logits, a 128k vocabulary, and sequence length 16,384. The six 100B-token ablations use 64 data-parallel ranks, a global batch size of 576 sequences, and a warmup-stable learning-rate schedule. Each run trains for 10,342 optimizer steps. To evaluate the balance–quality trade-off over a longer horizon, we additionally train EQB and normalized LEI variants for 500B tokens. 
+
+Evaluation. Evaluations use the Aleph Alpha Eval Framework [Aleph Alpha Research, 2026] and include MMLU [Hendrycks et al., 2021a], ARC [Clark et al., 2018], HellaSwag [Zellers et al., 2019], TriviaQA [Joshi et al., 2017], GSM8K [Cobbe et al., 2021], HumanEval [Chen et al., 2021], MBPP [Austin et al., 2021], and MATH [Hendrycks et al., 2021b] following the Minerva evaluation protocol [Lewkowycz et al., 2022]. 
+
+Balance metrics. Using the notation from Section 2, we define 
+
+MaxVio( B) = max 
+
+> e
+
+ fe(B)¯f (B) − 1
+
+
+
+, (29) following common MoE usage [DeepSeek-AI, 2024]. Global MaxVio is computed from expert loads aggregated over all tokens in an optimizer step. Local MaxVio is computed separately for each rank-local expert-parallel microbatch and then averaged across microbatches and ranks. For both metrics, we take the maximum across MoE layers at each step and report the mean over the final 1,000 steps. Thus, a Local MaxVio of 5.96 corresponds to the most-loaded expert receiving, on average, approximately 6.96 × its uniform load within the worst-balanced layer. We additionally track the maximum log-sum-exp (LSE) of the pre-softmax attention logits across SWA layers, tokens, and heads as an indicator of attention-logit instability. 
+
+E.2 100B-token ablation 
+
+Figure 1 shows the training trajectories corresponding to the endpoint results in Table 1. Table 3 reports the complete per-benchmark evaluation. 
+
+E.3 500B-token results 
+
+Table 4 reports the normalized-LEI gradient-weight sweep at 500B tokens. Table 5 gives the corresponding per-benchmark BPB results. 920 40 60 80 
+
+> Tokens (B)
+> 0.5 1.0 1.5
+> Layer max (200-step mean)
+
+Global MaxVio    
+
+> 20 40 60 80
+> Tokens (B)
+> 246
+> Layer max (200-step mean)
+
+Local MaxVio    
+
+> 20 40 60 80
+> Tokens (B)
+> 10 1
+> 10 2
+> 10 3
+> 10 4
+> Layer-max LSE
+
+SWA attention LSE 
+
+> Rank-avg. QB EQB EQB + GShard EQB + LEI EQB + norm. GShard EQB + norm. LEI
+
+Figure 1: 100B-token ablation trajectories. LEI reduces both Global and Local MaxVio more strongly than the GShard loss. Without normalization, both score-side balancing methods cause runaway SWA attention LSE; normalization preserves most of the balance improvement while keeping LSE stable. Table 3: Six-run 100B-token ablation, all benchmarks (BPB, lower is better). 
+
+Benchmark Rank-avg. QB EQB EQB + GShard loss EQB + LEI EQB + norm. GShard loss EQB + norm. LEI 
+
+English general knowledge 
+
+MMLU 0.9007 0.8650 0.8932 0.8897 0.8853 0.8892 ARC 0.7508 0.6876 0.7295 0.7348 0.7373 0.7198 HellaSwag 0.7718 0.7703 0.7737 0.7729 0.7730 0.7729 
+
+aggregate 0.8077 0.7743 0.7988 0.7991 0.7985 0.7940 
+
+English code 
+
+HumanEval 0.5205 0.5154 0.5129 0.4989 0.5031 0.5167 MBPP 0.5993 0.5777 0.6625 0.6177 0.6228 0.5992 
+
+aggregate 0.5599 0.5465 0.5877 0.5583 0.5629 0.5580 
+
+English math 
+
+GSM8K 0.5260 0.5258 0.5400 0.5409 0.5333 0.5341 
+
+German general knowledge 
+
+ARC-DE 0.6616 0.6517 0.6666 0.6725 0.6682 0.6633 MMLU-DE 0.9522 0.9245 0.9493 0.9559 0.9336 0.9513 HellaSwag-DE 0.6393 0.6397 0.6438 0.6449 0.6451 0.6398 
+
+aggregate 0.7510 0.7386 0.7532 0.7578 0.7490 0.7515 
+
+German code 
+
+HumanEval-DE 0.5060 0.4869 0.5041 0.4878 0.4740 0.4765 MBPP-DE 0.6808 0.6505 0.6839 0.7200 0.6835 0.6506 
+
+aggregate 0.5934 0.5687 0.5940 0.6039 0.5788 0.5635 
+
+German math 
+
+GSM8K-DE 0.4691 0.4700 0.4669 0.4698 0.4849 0.4612 
+
+MATH Minerva-DE 0.4923 0.4933 0.4942 0.4958 0.4988 0.4981 
+
+aggregate 0.4807 0.4817 0.4806 0.4828 0.4919 0.4797 
+
+Table 4: Normalized-LEI gradient-weight sweep at 500B tokens. Balance metrics are worst-layer means over the final 1,000 steps; Avg. is the unweighted mean of the reported accuracy metrics. 
+
+MaxVio ↓ Accuracy (%) ↑
+
+Gradient weight η Global Local MMLU ARC HSwag TriviaQA Avg. 
+
+0 0.44 5.14 41.36 50.05 63.53 38.06 48.25 
+
+5 × 10 −6 0.94 4.68 43.53 54.05 64.85 39.68 50.53 
+
+2 × 10 −5 0.63 4.15 41.38 51.49 63.53 37.83 48.56 
+
+8 × 10 −5 0.48 3.54 40.65 48.17 63.75 39.43 48.00 
+
+10 Table 5: 500B-token setting, all benchmarks (BPB, lower is better). 
+
+Normalized LEI gradient weight η
+
+Benchmark 0 5 × 10 −6 2 × 10 −5 8 × 10 −5
+
+English general knowledge 
+
+MMLU 0.9071 0.8816 0.9031 0.9125 ARC 0.8105 0.7582 0.7958 0.8344 HellaSwag 0.7535 0.7572 0.7595 0.7620 
+
+aggregate 0.8237 0.7990 0.8195 0.8363 
+
+English code 
+
+HumanEval 0.4729 0.4694 0.4422 0.4368 
+
+MBPP 0.5722 0.5541 0.5931 0.5365 
+
+aggregate 0.5225 0.5118 0.5176 0.4866 
+
+English math 
+
+GSM8K 0.4689 0.4700 0.4907 0.4745 MATH Minerva 0.4818 0.4796 0.4794 0.4881 
+
+aggregate 0.4754 0.4748 0.4851 0.4813 
+
+German general knowledge 
+
+ARC-DE 0.8650 0.8090 0.8498 0.8629 MMLU-DE 0.9372 0.9262 0.9413 0.9506 HellaSwag-DE 0.6324 0.6236 0.6280 0.6298 
+
+aggregate 0.8115 0.7862 0.8064 0.8144 
+
+German code 
+
+HumanEval-DE 0.4440 0.4503 0.4570 0.4176 
+
+MBPP-DE 0.4491 0.4483 0.4409 0.4352 
+
+aggregate 0.4466 0.4493 0.4490 0.4264 
+
+German math 
+
+GSM8K-DE 0.4234 0.4162 0.4212 0.4365 MATH Minerva-DE 0.4007 0.3947 0.3955 0.4046 
+
+aggregate 0.4121 0.4055 0.4084 0.4205 
+
+11
