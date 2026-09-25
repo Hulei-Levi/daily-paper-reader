@@ -1,0 +1,558 @@
+Title: All-in-One Multilingual Scene Text Recognition with Script-aware Mixture-of-Experts
+
+URL Source: https://arxiv.org/pdf/2609.24058v1
+
+Published Time: Tue, 22 Sep 2026 02:45:35 GMT
+
+Number of Pages: 22
+
+Markdown Content:
+# All-in-One Multilingual Scene Text Recognition with Script-aware Mixture-of-Experts 
+
+## Xingsong Ye 1,2 , Yongkun Du 1,2 , Jiaxin Zhang 3, Zhixian Li 1,2 , Chong Sun 3,Chen Li 3, Jing LYU 3, Lianwen Jin 4, Zhineng Chen 1,2, †
+
+> 1
+
+Institute of Trustworthy Embodied AI, Fudan University ,
+
+> 2
+
+Shanghai Key Laboratory of Multimodal Embodied AI , 3WeChat Vision, Tencent Inc. 
+
+> 4
+
+South China University of Technology 
+
+## Abstract 
+
+Multilingual scene text recognition (STR) remains challenging due to the scarcity of training data for most languages and the difficulty of serving diverse scripts within a single model. Existing solutions either deploy one recognizer per language, inflating cost and introducing error accumulation, or rely on massive vision-language models (VLMs) that are expensive and still inaccurate on many scripts. In this work, we pursue an all-in-one multilingual recognizer that is simpler than per-language experts, lighter than VLMs, and more accurate than both. First, we construct TextMuSS-10M, a large-scale synthetic scene text dataset spanning 10 scripts and 229 languages. It provides balanced and sufficient supervision where real data is unavailable. Second, we propose ScriptMoE, a script-aware Mixture-of-Experts (MoE) architecture. It shares a single visual encoder and replaces the dense decoder with a sparse MoE block, which consists of an image-level router dispatches each image to the top-2 script-aligned experts and a shared expert absorbs cross-script knowledge. Extensive experiments on our assembled TextMuSS-Bench (10 scripts, 10,899 images) show that ScriptMoE achieves the highest accuracy of 82.06%, outperforming the strongest STR baseline by 1.31%. On the CC-OCR end-to-end multilingual task, replacing only the recognizer in PP-OCRv5 with ScriptMoE lifts F1 score from 65.71% to 80.89%, slightly surpassing the best VLM (80.73%) at a fraction of the parameter count.  
+
+> Correspondence:
+
+zhinchen@fudan.edu.cn  
+
+> Code:
+
+https://github.com/YesianRohn/ScriptMoE & https://github.com/Topdu/OpenOCR 
+
+## 1 Introduction 
+
+Scene text recognition (STR) is one of the most widely deployed OCR tasks, aiming to read text from cluttered natural images. Existing research has overwhelmingly centered on high-resource languages such as English and Chinese, where, driven by ever-stronger models and data, accuracy is now approaching saturation [14, 27, 53]. Once we step outside this comfort zone, however, the problem is far from settled. Real-world OCR systems must read text and symbols in many more scripts like Japanese, Korean, Arabic, Hindi, Cyrillic, and beyond. Today’s multilingual OCR approaches fall broadly into two camps. Expert OCR systems [7] cascade a scene text detector with multilingual STR models. Typically they still deploy one recognizer per language and require an extra language-identification step to route each crop to the 
+
+> †Corresponding authors. arXiv:2609.24058v1 [cs.CV] 21 Sep 2026
+
+(b) Previous expert models 
+
+> Script Classifier Hindi STR Korean STR Latin STR Arabic STR
+
+(c) Our all-in-one model 
+
+(a) Data volume overview (d) Comparison with VLMs   
+
+> Share Expert Expert 1 Expert 2 Expert 4
+> ScriptMoE
+> Expert 3 Figure 1 Current landscape of multilingual STR datasets ( a). Existing datasets are heavily biased toward major languages, and some languages have no corresponding data available. Comparison with existing mainstream multilingual OCR systems in terms of methodology ( b, c ) and performance ( d).
+
+language-specific recognizer. This inflates training and deployment cost, complicates maintenance, and introduces error accumulation: once the language classifier is wrong, no downstream model can recover. VLM-based systems [8, 10, 15, 28, 43, 44] unify many languages in a general or OCR-specialized visual language model, yet their massive parameter counts and inference cost make edge deployment difficult. We therefore set out to build an all-in-one multilingual recognizer. It is a single model that is simpler than per-language experts, lighter than VLMs, and more accurate than both (see the per-script performance in Fig. 1 (d)). The world has hundreds of languages, but grouping them by script collapses this number dramatically. PP-OCRv5 MLT [7], for instance, covers 106 languages with only about ten per-script models. This script-centric view greatly simplifies modeling a unified multilingual recognizer. We accordingly consolidate the major world languages into ten representative scripts: the most widespread Latin; the Latin-adjacent Cyrillic (e.g. Russian); the Han-derived but mutually distinct Chinese, Japanese and Korean; the right-to-left Arabic; and the Hindi family. To stress generality we further include the Southeast-Asian Thai, and the minority scripts Bangla and Tibetan. Modeling these ten scripts already covers 229 languages, and the full language-to-script mapping is given in the appendix. Even after this consolidation, every script other than English and Chinese lacks large-scale real STR data for training [52], as the dataset landscape in Fig. 1 (a) makes clear. Following and expanding the synthetic engine UnionST [53], we synthesize 1M samples for each script ( 10M in total) to form TextMuSS-10M , a 
+
+Mu ltilingual Synthetic Scene Text dataset. Although synthetic, it guarantees language coverage, balance and scene diversity, and is the most practical way to obtain large-scale supervision when real data is unavailable. Our overall training mixture is thus threefold: abundant existing real data for English (Union14M [25]) and Chinese (BCTR [6]), a small amount of real multilingual data (MLT2019 [35]), and the large-scale synthetic TextMuSS-10M covering all scripts. For these ten scripts we assemble and re-collect real scene text images for evaluation: we reuse the MLT2019 2test set (seven scripts) and additionally collect images for Tibetan, Russian and Thai. We refer to the resulting benchmark as TextMuSS-Bench , a Mu ltilingual ten-Script Scene Text Bench mark. Simply training mainstream STR methods on our data already lets the jointly trained model surpass multilingual OCR expert systems and strong VLMs, a first confirmation that the all-in-one route is viable. Yet joint training alone exposes a deeper problem. Scripts differ fundamentally in stroke topology (the stacked consonants of Hindi and Tibetan, the cursive ligatures of Arabic), reading direction (right-to-left Arabic), and script-internal vocabulary size (Han character sets are tens to hundreds of times larger than the Latin alphabet). Reusing a single dense recognizer originally designed for one language forces one parameter budget to be shared across these conflicting priors, with two consequences that pull against each other: (i) low-resource scripts (Thai, Tibetan) receive too little capacity, while (ii) common scripts are never fully specialized. Our key observation is that a scene text instance always contains a single script (occasionally bilingual mix). Under this single-image-few-script prior, a Mixture-of-Experts (MoE) is an especially natural fit: the router nearly always faces an unambiguous decision. Incremental multilingual text recognition (IMLTR) presented by MRN [57] explores routing-like ideas, but maintains a separate feature extractor per language and activates a language-specific expert with a distinct character classifier. So their parameters grow linearly with the number of languages. Inspired by how MoE “activates expert parameters on demand” in LLMs and VLMs [9, 19, 39, 40], our multilingual recognizer shares one visual encoder followed by an MoE-based decoder whose experts are aligned with script clusters: an always-on shared expert absorbs cross-script knowledge, while the router activates the Top-2 script experts matching the current language. The resulting model, 
+
+ScriptMoE , meets the all-in-one goal while keeping per-language performance mutually non-interfering. Experimental results demonstrate the effectiveness of ScriptMoE across diverse scripts. On TextMuSS-Bench, it achieves state-of-the-art (SOTA) average accuracy, outperforming the jointly trained baseline by 1.31%, with 2-3 points on Arabic, Thai and Tibetan. It even improves by about 18% over PP-OCRv5 MLT and Qwen3.5-9B [44]. It also benefits end-to-end multilingual OCR: keeping the PP-OCRv5 detector and replacing only the recognizer with ScriptMoE raises PP-OCRv5 MLT’s F1 score on the CC-OCR [51] multilingual task from 65.71% to 80.89%, slightly outperforming the best VLM (80.73%) despite the latter having a hundred times more parameters. This is a win on both efficiency and accuracy. In summary, our main contributions are: • We build TextMuSS-10M, a large-scale and balanced multilingual synthetic scene text dataset spanning 10 scripts and 229 languages, and assemble TextMuSS-Bench, a real scene text benchmark covering these scripts. • We propose ScriptMoE, a script-aware MoE-based (Top-2 routed experts plus an always-on shared expert for cross-script transfer) recognizer with image-level routing and lightweight script-aware supervision. • We systematically evaluate all-in-one multilingual STR under a unified training protocol. ScriptMoE achieves the best average accuracy on TextMuSS-Bench. With the PP-OCRv5 detector, it performs on par with VLMs on end-to-end multilingual OCR while remaining lightweight. 
+
+## 2 Related Work 
+
+Scene Text Recognition. STR models can be split, by decoding strategy, into autoregressive (AR) and non-autoregressive (NAR) families. AR methods [4, 21, 22, 25, 41, 54] introduce explicit language modeling and lead in accuracy, but decode token-by-token and are comparatively slow. NAR methods include classic CTC decoding [11, 14, 20, 42] and purpose-built parallel decoding [13, 18, 50]: few-step decoding is fast but lacks expressive language priors. Crucially, both families are designed for the monolingual English/Chinese setting and are rarely adapted to other scripts. In the multilingual regime their weaknesses surface: NAR models, being vision-centric and prior-poor, degrade further on morphologically rich scripts such as Hindi and Tibetan, and are ill-suited to joint multi-script recognition. Directly reusing an AR model, in contrast, lets 3all scripts contend for one dense set of decoder parameters and imbalances high- and low-resource languages. We therefore keep an AR backbone but reallocate its decoder capacity to be script-aware, activating only the expert parameters for the current script. 
+
+Multilingual OCR. The community first approaches multilingual scene text through competitions [34, 35], which laid their data and evaluation foundations. E2E-MLT [5] builds the first systematic end-to-end multilingual OCR pipeline and contributes the SynthMLT. On how to handle multiple scripts, Multiplexed TextSpotter [24] performs word-level script identification and routes each word to a script-specific recognition head. SARN [26] injects script information into the recognizer to make character features more discriminative. For the resource-constrained incremental setting, MRN [57] formulates IMLTR [29–31] with a language-domain router. On the data side, CLI-STR [1] finds that data scale, not linguistic similarity, is the decisive factor. It motivates our large-scale synthetic data for low-resource scripts. Among deployed systems, general multilingual OCR [7] maintains a separate model per script and must be told the target language in advance. Recent generalist [44, 45] and OCR-specific VLMs [8, 10, 28, 43] claim to transcribe many scripts. But, as our experiments show, their performance remains markedly behind specialized recognizers on one or more scripts. This again argues for a lighter, unified, high-accuracy recognizer. 
+
+## 3 Method 
+
+3.1 Overview 
+
+We target a single network that transcribes multilingual text with high accuracy. So we identify two key obstacles to building such a recognizer. (i) Data. Existing STR supervision is overwhelmingly in Chinese and English, leaving most long-tail scripts impossible to learn from real data. We therefore construct TextMuSS-10M (see examples in Fig. 2), a balanced multilingual synthetic dataset that provides every script with a comparable amount of training signal. (ii) Capacity. Even with data in hand, a single dense decoder must amortize one parameter budget across scripts. This both blurs script-specific features and starves low-resource scripts. Building on the single-image-few-script prior, we replace its dense FFN with ScriptMoE, which makes one routing decision per image rather than per token. Its router and auxiliary script classifier are separate heads sharing only the pooled visual representation, so the classifier supervises script-aware specialization without directly selecting experts. Each routed expert has an explicit script-family role, while an always-on shared expert preserves cross-script transfer. Fig. 3 sketches the full pipeline. 
+
+3.2 Balanced Multilingual Data through Synthesis 
+
+SynthMLT [5] is the only multilingual synthetic STR dataset currently available. We empirically find that its scale and quality are too limited to support high-accuracy model training. In addition, the languages it covers are the ten mentioned in MLT2019 [35]. This cannot meet our need to support hundreds of languages. Therefore, we need to build our own large, high-quality synthetic dataset. It will serve as the foundation for subsequent script-balanced, high-accuracy models. We follow the current strong STR synthesis engine, UnionST [53]. We adapt it to our task in the following ways. (1) Character vocabulary. We first collect the character set to be supported for each of the ten target scripts. We refer to PP-OCRv5 MLT [7] and the standard definition of each script. This character set is then used for filtering and sampling expansion in subsequent data. (2) Corpus collection. The scene text corpus is word-level. So we collect 100K to 1M words for each script. For scripts like Latin that cover dozens of languages, we collect more words and try to balance them across languages. To cover longer text, we concatenate the words above with spaces. This simulates phrase- and line-level corpora. To further balance the length and character distributions and to cover rare characters, we add meaningless text generated by random permutations of the character table. To simulate sentence-level real semantics, we collect newspaper corpora for our target languages from News Crawl [3]. We then extract phrases and sentences of various lengths from them. The result is a multilingual corpus with comprehensive coverage and balanced distribution. (3) Detail adjustments for language features. Chinese, Japanese, and Korean need a larger proportion of vertical-text 4Arabic Bangla Hindi Chinese Japanese Korean Latin Thai Cyrillic Tibetan  
+
+> TextMuSS-10M
+> Samples from MLT2019
+> TextMuSS-Bench
+> Thai Russian Tibetan
+
+Figure 2 Top: Data samples from TextMuSS-10M, organized by script. Bottom: Representative samples from TextMuSS-Bench, which extends the original MLT2019 with newly collected real-world samples in three additional languages for evaluation. 
+
+synthesis (20%, while the rest is 5%). The synthesis of texts such as Arabic needs to be rendered from right to left (saved in logical order). The specific synthesis flow is as follows. (1) We select 8k text-free scene images or pure-color images as the background layer. (2) We select a text from the corresponding language corpus. (3) We use a rendering tool such as Pillow to render the text according to preset layout templates. The templates include horizontal, vertical, multi-directional rotation, and curved. This produces a text layer. (4) We add effects (shadow, distortion, perspective) to the text layer. We then overlay it on the background layer. The above process produces the synthesis effect shown in the top of Fig. 2. It constitutes 1M synthetic data per script, TextMuSS-10M. 
+
+3.3 Script-aware Mixture-of-Experts 
+
+With data ready, the next obstacle is architectural. Our enabling insight is the single-image-few-script prior. The recognizer therefore does not need a dense decoder that is simultaneously fluent in every script. It needs the ability to switch to the right specialist. Sparsely-activated experts express exactly this. Specifically, ScriptMoE starts with a strong and hierarchical visual encoder (SVTRv2 [14] here). It maps an input image 𝑥 ∈ ℝ𝐻 ×𝑊 ×3 to a sequence of visual tokens F ∈ ℝ𝐿 ×𝑑 . These tokens are then fed into a script-aware Transformer decoder, in which the feed-forward network (FFN) is replaced by an MoE-based FFN. The remaining components stay identical to a vanilla Transformer decoder that produces the output autoregressively step by step. Let h𝑡 ∈ ℝ𝑑 be the decoder hidden state at step 𝑡 , taken after the attention sub-layer and before the FFN. With 𝑛 routed experts and one always-on shared expert, the layer computes: MoE (h𝑡 ) = 𝛼 𝑡 FFN share (h𝑡 ) + ( 1 − 𝛼 𝑡 )
+
+> 𝑛
+
+Õ
+
+> 𝑖 =1
+
+𝑔 𝑖 FFN 𝑖 (h𝑡 ), (1) 
+
+𝑔 𝑖 = 𝑝 𝑖 · 𝕀 {𝑖 ∈ TopK (p)} 
+
+Í𝑗 𝑝 𝑗 · 𝕀 {𝑗 ∈ TopK (p)} , (2) 
+
+p = softmax  𝑊 𝑔 ( ¯ F ⊙ ( 1 + 𝜎 · ϵ))  , (3) where ¯F ∈ ℝ𝑑 is the image-level router input, obtained by mean-pooling the visual tokens F. ϵ ∼ 𝒩 ( 0, 𝐼 )
+
+is a multiplicative router jitter applied only during training with 𝜎 as the jitter coefficient, 𝑊 𝑔 is the router 5Script Router SVTRv2 Encoder 
+
+# ... 
+
+ScriptMoE Decoder Transformer Expert FFN 
+
+> ...
+
+Classifier Share Expert Expert 1 Expert 2 Expert 3 Expert 4 
+
+Routing 
+
+× NTeacher Forcing Prediction Figure 3 Overview of ScriptMoE. Multilingual scene text (real and synthetic mixed) is encoded by a visual encoder and fed into a decoder that replaces the FFN with an image-level script-aware MoE block. The script router selects the top-2 script experts per image from pooled visual features, and all output tokens share this route. Experts have explicit script-family roles, while the shared expert is always active. After N=2 such modified Transformer blocks, it passes through a classification head to produce the final prediction. The training process follows the standard teacher-forcing paradigm. 
+
+projection, and TopK keeps the highest-scoring experts (Top-2 here), whose gates 𝑔 𝑖 are renormalized to sum to one. Instead of a fixed weight, a learnable per-token gate 𝛼 𝑡 = sigmoid (w⊤ 
+
+> 𝑠
+
+h𝑡 ) balances the shared and routed branches. The resulting MoE (h𝑡 ) directly replaces the FFN output of the vanilla Transformer. 
+
+Script Grouping. Based on the character morphology similarity of the ten scripts, we further divide them into four groups to save expert capacity and achieve optimal performance. The first group is the alphabet group, including Latin + Cyrillic. The second group is CJK, including Chinese, Japanese, and Korean. The third group is the Arabic family. The fourth group is Others, including Hindi, Bangla, Tibetan, and Thai. We also reserve sufficient room for unsupported languages. If a script is visually similar to letters, it can be assigned to the first group. If it is in Han-character form, it can be assigned to the second group. If it follows an RTL reading order, it falls into the third group. If none of the above applies, it can be assigned to the fourth group. The subsequent routing mechanism is also built upon this grouping strategy. Crucially, the router input ¯F is formed once per image rather than once per token, so all 𝑇 output tokens of an image are processed by the same routed experts. This is the natural encoding of the single-image-few-script prior and brings three structural advantages: it (a) cuts routing cost, (b) avoids the token-level “ping-ponging” that destabilizes training, and (c) makes each expert directly readable as a script specialist. 
+
+Shared Expert. The shared expert FFN share is always activated, regardless of the routing decision, and is the one path through which gradients from every image flow. Its role is to absorb the script-invariant part of the problem: symbols that recur across scripts (digits, punctuation), the geometry of curved and perspective-distorted text, and vocabulary shared within close families such as Chinese and Japanese. It is what preserves cross-script transfer, so that specializing the routed experts does not fragment the common sense shared across all scripts. 
+
+3.4 Script-aware Supervision 
+
+Script-classification Signal. Left unsupervised, the router is free to discover any grouping of images, which need not align with scripts. We give it a gentle nudge with a four-way classification head ℎscls : ℝ𝑑 → ℝ4
+
+attached to the same router input ¯F, and trained with the cross-entropy between its softmax output and the 6Table 1 Per-script size of TextMuSS-Bench. Latin includes English, French, German, Italian, etc. 
+
+Script Arabic Bangla Chinese Hindi Japanese Korean Latin Russian Thai Tibetan Total 
+
+# img 470 393 325 393 594 679 5,885 1,054 750 356 10,899 
+
+Table 2 Performance comparison on TextMuSS-Bench. Results are reported as a / b, where a is word accuracy (%) and b is 1 - normalized edit distance (. denotes 0.). Avg is the arithmetic average across ten scripts. For PP-OCRv5 MLT [7], it is computed over the supported ones. For each metric, best in bold , second underlined. “/” indicates the model does not support this language. Method Arabic Bangla Chinese Hindi Japanese Korean Latin Russian Thai Tibetan Avg 
+
+General / OCR-specialized VLMs (zero-shot) 
+
+InternVL3.5-8B [2025] 0.00 / .09 0.00 / .03 72.31 / .82 0.25 / .09 32.32 / .55 38.88 / .50 74.34 / .83 30.93 / .48 0.40 / .09 0.00 / .00 24.94 / .35 
+
+Qwen3.5-9B [2026] 62.13 / .78 63.36 / .78 92.31 / .94 62.85 / .82 63.97 / .81 80.27 / .87 88.04 / .84 69.17 / .74 38.76 / .65 16.85 / .74 63.77 / .80 
+
+GOT-OCR 2.0 [2024] 0.00 / .00 0.00 / .02 76.92 / .86 0.25 / .02 21.72 / .44 0.59 / .04 84.71 / .92 0.47 / .09 0.00 / .04 0.00 / .00 18.47 / .24 
+
+HunyuanOCR [2025] 36.17 / .44 62.34 / .67 92.31 / .93 52.67 / .62 57.07 / .72 64.06 / .68 86.85 / .90 50.19 / .61 35.33 / .53 29.78 / .42 56.68 / .65 
+
+PaddleOCR-VL [2026] 38.30 / .63 34.61 / .55 87.38 / .92 23.41 / .49 55.05 / .76 68.78 / .78 83.89 / .90 46.30 / .62 11.07 / .34 68.54 / .89 51.73 / .69 
+
+DeepSeek-OCR2 [2026] 0.00 / .01 0.00 / .01 35.38 / .44 0.25 / .01 8.59 / .21 0.59 / .02 39.29 / .50 1.99 / .08 0.00 / .02 0.00 / .01 8.61 / .13 
+
+GLM-OCR [2026] 1.49 / .22 3.31 / .29 90.46 / .94 9.14 / .41 56.40 / .77 40.06 / .62 89.62 / .94 50.95 / .69 0.13 / .13 0.00 / .01 34.16 / .50 
+
+Expert OCR Systems (zero-shot) 
+
+PP-OCRv5 MLT [2025] 68.30 / .86 / 80.00 / .86 60.05 / .84 57.41 / .76 75.85 / .84 83.43 / .91 47.82 / .67 35.87 / .69 / 63.59 / .80 
+
+PP-OCRv6 [2026] / / 84.62 / .89 / 58.75 / .75 / 88.05 / .93 / / / /
+
+NAR-based (CTC / PD) STR 
+
+CRNN [2016] 42.77 / .72 55.47 / .82 64.00 / .80 63.87 / .86 44.28 / .66 70.10 / .82 82.38 / .90 30.93 / .44 53.13 / .72 48.60 / .85 55.55 / .76 
+
+ABINet [2021] 61.06 / .84 69.47 / .90 82.15 / .94 79.90 / .94 58.08 / .83 81.74 / .90 88.84 / .95 50.76 / .46 53.20 / .82 73.88 / .92 69.91 / .85 
+
+SVTR [2022] 64.68 / .83 75.83 / .92 83.38 / .94 81.42 / .93 60.44 / .81 83.95 / .91 90.06 / .95 52.75 / .46 58.80 / .82 78.65 / .93 73.00 / .85 
+
+LPV [2023] 66.17 / .88 74.30 / .94 84.00 / .94 82.44 / .95 60.27 / .85 82.92 / .92 90.03 / .95 49.81 / .36 56.80 / .80 74.72 / .91 72.15 / .85 
+
+BUSNet [2024] 61.49 / .78 70.48 / .82 85.54 / .90 77.10 / .86 61.62 / .75 83.51 / .89 90.18 / .93 49.43 / .71 53.87 / .74 74.44 / .85 70.77 / .82 
+
+CPPD [2025] 67.02 / .81 78.12 / .87 78.77 / .85 79.39 / .87 57.24 / .73 81.74 / .88 88.36 / .92 40.13 / .67 52.53 / .72 73.60 / .85 69.69 / .82 
+
+SVTRv2 [2025] 70.85 / .86 83.46 / .92 93.23 / .97 84.73 / .94 66.67 / .85 85.86 / .92 91.52 / .95 47.91 / .41 66.27 / .83 85.39 / .95 77.59 / .86 
+
+MDiff4STR [2026] 72.13 / .84 83.46 / .90 88.31 / .92 83.21 / .90 66.50 / .79 85.13 / .90 91.03 / .94 42.31 / .68 57.33 / .75 75.84 / .86 74.53 / .85 
+
+AR-based STR 
+
+NRTR [2019] 67.66 / .84 79.64 / .89 81.23 / .91 83.21 / .92 60.44 / .80 81.15 / .89 89.97 / .94 58.53 / .45 59.39 / .82 71.07 / .91 73.23 / .84 
+
+SEED [2020] 66.60 / .80 80.92 / .89 84.62 / .90 83.46 / .90 62.12 / .75 82.77 / .88 90.64 / .94 51.80 / .72 56.53 / .76 76.40 / .87 73.59 / .84 
+
+PARSeq [2022] 67.87 / .87 78.12 / .92 87.08 / .97 83.21 / .95 65.15 / .85 84.98 / .92 90.81 / .96 61.01 / .47 62.67 / .82 84.55 / .95 76.55 / .87 
+
+MAERec [2023] 76.17 / .85 80.15 / .87 92.92 / .95 86.01 / .90 68.35 / .78 86.16 / .90 92.13 / .94 52.66 / .71 63.73 / .77 86.80 / .91 78.51 / .86 
+
+CDistNet [2024] 71.28 / .87 82.95 / .92 89.23 / .96 85.50 / .95 67.51 / .86 85.42 / .91 91.18 / .95 59.49 / .45 64.13 / .83 82.87 / .94 77.96 / .86 
+
+SMTR [2025] 70.43 / .83 77.86 / .91 88.92 / .96 85.24 / .94 65.32 / .84 85.27 / .91 91.06 / .95 51.99 / .44 62.93 / .84 82.87 / .93 76.19 / .86 
+
+SVTRv2-AR [2026] 75.11 / .91 87.79 / .94 94.15 / .97 87.28 / .96 69.36 / .87 85.86 / .93 92.27 / .95 59.30 / .45 69.60 / .85 86.80 / .95 80.75 / .88 
+
+ScriptMoE (ours) 78.09 / .92 88.30 / .94 95.38 / .98 86.77 / .97 71.21 / .87 87.19 / .93 91.67 / .96 61.20 / .72 72.00 / .86 88.76 / .96 82.06 / .91 
+
+script-group label 𝑦 𝑥 , which is derived automatically by mapping the Unicode ranges of the ground-truth transcription characters to one of the four script groups, 
+
+ℒscls = − 1
+
+|ℬ| 
+
+Õ
+
+𝑥 ∈ℬ 
+
+log softmax  ℎscls ( ¯ F𝑥 )
+
+𝑦 𝑥 , (4) where ℬ is the mini-batch. Importantly, ℎscls shares the router input but not the router weights: it supplies a script-aware learning signal while still letting the router carve out useful within-script sub-populations. 
+
+Training Objective. ScriptMoE is trained end-to-end by minimizing 
+
+ℒ = ℒar + 𝜆 scls ℒscls , (5) where ℒar is the standard autoregressive cross-entropy and dominates the objective. The single auxiliary term ℒscls only shapes how the experts are used and is therefore weighted far below it. We set 𝜆 scls =0.1, enough to orient the experts towards scripts but not so strong as to override the router’s freedom. 
+
+## 4 Experiments 
+
+7Table 3 End-to-end OCR on the CC-OCR multilingual task (F1 score, %). “-” means that a system whose per-language scores are not reported by QianfanOCR [10]. Method Korean Japanese Vietnamese French German Italian Spanish Portuguese Russian Arabic Total                                                                                                                                                                                                                   
+
+> General VLMs
+> Claude-3.5-Sonnet 58.72 56.90 /76.76 70.66 68.38 73.42 76.07 51.01 65.29 65.68 GPT-4o 74.20 66.96 70.11 81.17 73.60 69.01 78.95 80.90 67.22 72.31 73.44 Gemini-1.5-Pro 80.01 73.52 78.49 83.33 78.11 75.77 81.28 83.46 69.99 85.70 78.97 Qwen2.5-VL-72B [2025] 85.36 76.27 78.16 83.56 79.27 77.81 82.14 83.65 71.09 79.44 79.68 InternVL3.5-8B [2025] 54.96 65.85 55.69 79.53 42.16 64.94 80.03 76.34 42.13 38.33 60.00 Qwen3.5-9B [2026] 79.03 75.17 81.43 82.83 76.82 78.77 85.08 87.24 78.97 82.01 80.73 GPT-5.6-Terra 74.93 72.60 66.98 78.63 73.39 71.74 76.96 78.77 63.49 59.79 71.73 Gemini-3.5-Flash 89.15 85.89 73.17 84.84 81.43 74.07 81.35 80.07 67.21 88.05 80.52
+> OCR-specialized VLMs
+> KOSMOS2.5 [2023] 26.95 26.94 27.24 48.93 47.04 44.59 52.92 54.56 11.13 22.04 36.23 GOT-OCR 2.0 [2024] 27.53 43.66 7.92 33.74 28.73 28.53 31.63 25.20 3.85 18.72 24.95 DeepSeek-OCR [2025] ----------32.50 Dots.ocr [2025] ----------47.20 Surya OCR 2 [2025] 70.35 71.45 63.49 63.79 57.62 51.90 69.26 69.31 55.88 76.30 64.94 MinerU2.5 [2026] ----------43.20 PaddleOCR-VL [2026] ----------45.50 Qianfan-OCR [2026] ----------76.70
+> Expert OCR Systems
+> GoogleOCR 85.32 77.46 63.15 73.40 64.80 67.67 67.93 69.72 57.69 90.62 71.78 PP-OCRv5 MLT [2025] 78.58 76.13 33.67 64.86 62.30 69.47 68.48 72.03 49.67 81.93 65.71 PP-OCRv5 Det + ScriptMoE 92.33 89.43 75.93 80.77 81.00 71.81 72.58 78.41 79.22 87.45 80.89
+
+4.1 Evaluation and Implementation Details 
+
+We assess ScriptMoE along two complementary axes. The first is STR evaluation on TextMuSS-Bench, which we build by extending the MLT2019 [35] test split with Russian, Thai and Tibetan. This covers all ten major scripts on which ScriptMoE is trained, for a total of 10,899 images whose per-script sizes are listed in Tab. 1. The second is end-to-end multilingual OCR task on CC-OCR [51]. We keep the PP-OCRv5 detector fixed and replace only the recognizer, so that any difference is attributable to recognition alone. To keep the main text focused, we further evaluate on two benchmarks in the appendix: Chinese BCTR [6] and English Union14M-Benchmark [25]. For a fair comparison, all STR baselines are trained on the same data for the same number of epochs as ScriptMoE and re-evaluated on TextMuSS-Bench by us. The generalist OCR and VLM systems are evaluated zero-shot through their official models. Other details are reported in the appendix. 
+
+4.2 Main Results 
+
+STR Results. Tab. 2 compares ScriptMoE against 15 representative STR models and 9 general OCR systems on TextMuSS-Bench. Among STR-class methods ScriptMoE reaches 82.06% Avg and improves over the strongest baseline SVTRv2-AR by 1.31%. The gains concentrate exactly where multilingual recognition is hardest, on the visually-difficult low-resource scripts Arabic (+2.98%), Thai (+2.40%) and Tibetan (+1.96%). The contrast with generalist systems is far sharper: they trail by 18-70% Avg points, while some of them collapse outright on Arabic, Bangla and Tibetan, concrete evidence that broad coverage does not imply accuracy. As Fig. 4 shows, ScriptMoE reaches this accuracy by activating 41.13M of its 45.85M parameters per image, one to two orders of magnitude fewer than VLM-based systems. We note two additional findings. (1) A cross-script trade-off exists: optimizing aggregate accuracy inevitably sacrifices per-script peaks. (2) The Russian gap stems from Cyrillic-Latin character confusion, compounded by Latin’s dominance in real training data, a pattern our later ablations confirm. 
+
+End-to-End OCR Results. These gains on STR carry over to a full OCR pipeline. Tab. 3 reports the end-to-end CC-OCR multilingual task with a per-language breakdown. We benchmark against three families of systems: general VLMs, OCR-specialized VLMs and expert OCR systems. Replacing the PP-OCRv5 MLT recognizer with ScriptMoE lifts the overall F1 score from 65.71% to 80.89%, a 15.18% absolute jump. It also edges past the strongest zero-shot general VLM (Qwen3.5-9B, 80.73%), the best OCR-specialized VLM (Qianfan-OCR, 76.70%) 810 2 10 3 10 4
+
+(Activated) Parameters (M) 
+
+> 020 40 60 80
+> Average Accuracy (%)
+> STR methods VLM / OCR systems
+> ScriptMoE (Ours) SVTRv2-AR MAERec SVTRv2 PARSeq CRNN PP-OCRv5 MLT Qwen3.5-9B HunyuanOCR PaddleOCR-VL DeepSeek-OCR2
+
+Figure 4 Average accuracy on TextMuSS-Bench versus (activated) parameters. As PP-OCRv5 MLT comprises multiple models, we report the most commonly used PP-OCRv5_server_rec for reference. 
+
+Table 4 Effect of our training data. Real = all the real data mentioned, Synth = TextMuSS-10M, Synth+Real = our default. Avg is computed over the seven MLT2019 scripts. Data Arabic Bangla Chinese Hindi Japanese Korean Latin Avg Russian Thai Tibetan SynthMLT [2018] 53.68 23.15 46.37 20.34 37.98 74.10 79.98 47.94 0.00 0.00 0.00 Real only 73.40 76.34 91.08 79.39 58.25 68.92 92.47 77.12 0.00 0.00 0.00 Synth only 60.00 83.21 91.08 82.44 67.85 85.71 86.95 79.61 68.13 70.30 87.08 Synth + Real 78.09 88.30 95.38 86.77 71.21 87.19 91.67 85.52 61.20 72.00 88.76 
+
+and the expert GoogleOCR (71.78%). This reaffirms that broad OCR pretraining does not by itself guarantee multilingual recognition accuracy. Because detection is held constant, the improvement is attributable entirely to recognition, showing that a stronger script-aware recognizer translates directly into a stronger deployed OCR system. Note that the CC-OCR task only scores text recognition, not detection boxes. Our end-to-end scores are still capped by the upstream PP-OCRv5 detector, whose missed and false detections are most visible on Latin scripts with strict word-level evaluation. Despite this, we still substantially outperform the original PP-OCRv5 and closed-source GoogleOCR. 
+
+Routing Analysis. Beyond accuracy, we verify that the router learns the intended script with expert specialization rather than an arbitrary partition. Fig. 5 shows, for one representative line per script group, the router softmax over the experts and the resulting effective expert mixture. As can be seen, the four lines from different scripts are each dominated by their expected expert, which strongly validates our claim. 
+
+4.3 Ablation Study 
+
+Data Ablation Tab. 4 disentangles the role of real and synthetic data. First, real-only training collapses on the three low-resource scripts that it never sees. It confirms that synthetic supplementation is mandatory for at least these scripts. Training on TextMuSS-10M alone already far surpasses SynthMLT and even outperforms real data on the MLT2019 average by +2.49%, demonstrating the benefit of sheer synthetic scale. More practically, combining synthetic and real data yields an effective complement: the MLT2019 average rises by 8.40% over real-only training. An interesting pattern emerges in the per-script breakdown: adding synthetic data lowers Latin, while adding real data lowers Russian. This is primarily because Latin and Cyrillic share visually identical glyphs that map to different characters, causing cross-script confusion. ScriptMoE mitigates 9Russian 0.0 0.5 1.0   
+
+> E1 E2 E3 E4
+> 0.93
+> 0.01
+> 0.05
+> 0.01
+> 0.0 0.5 1.0
+
+Korean 0.0 0.5 1.0   
+
+> E1 E2 E3 E4
+> 0.13
+> 0.58
+> 0.09
+> 0.20
+> 0.0 0.5 1.0
+
+Arabic 0.0 0.5 1.0   
+
+> E1 E2 E3 E4
+> 0.04 0.04
+> 0.85 0.07
+> 0.0 0.5 1.0
+
+Thai 0.0 0.5 1.0          
+
+> E1 E2 E3 E4
+> 0.03
+> 0.07
+> 0.04
+> 0.86
+> 0.0 0.5 1.0
+> Input text line Router (softmax, top-2 selected) Effective expert mixture
+> E1: Alphabet E2: CJK E3: Arabic E4: Others Shared expert
+
+Figure 5 Routing case study. One representative line per script group. Left: input, middle: router softmax over experts, right: effective mixture of the routed experts and the shared expert. Each group is dominated by a distinct expert, evidencing the learned script → expert specialization. 
+
+Table 5 Full ablation on TextMuSS-Bench. The experimental setup is identical to the main experiment. #Experts =0denotes the pure AR baseline without MoE. #Experts Top-experts Routing-level ℒscls Shared expert Arabic Bangla Chinese Hindi Japanese Korean Latin Russian Thai Tibetan Avg 0 / / / / 75.11 87.79 94.15 87.28 69.36 85.86 92.27 59.30 69.60 86.80 80.75 2 2 image ✓ ✓ 80.85 87.53 95.08 86.26 69.53 87.19 91.72 63.47 70.67 82.87 81.52 4 2 image ✓ ✓ 78.09 88.30 95.38 86.77 71.21 87.19 91.67 61.20 72.00 88.76 82.06                                                                                         
+
+> 10 2image ✓✓76.81 88.04 93.23 87.28 70.37 87.48 91.81 58.25 72.00 87.92 81.32 41image ✓✓78.30 88.55 94.15 87.28 70.54 87.48 91.47 60.53 69.47 88.20 81.60 44image ✓✓79.15 88.55 95.69 87.53 68.69 86.89 92.03 62.14 71.33 87.36 81.94 42token ✓✓78.09 88.80 95.69 89.06 68.69 87.92 92.10 59.58 69.60 87.36 81.69 42image ✓77.66 87.79 95.08 85.75 70.88 87.33 91.93 61.67 70.00 88.20 81.63 42image ✓74.47 88.30 95.08 87.28 70.03 87.04 91.55 63.19 71.47 85.11 81.35
+
+this confusion relative to other STR methods, but the gap remains difficult to close entirely because Latin benefits from abundant real data whereas Cyrillic relies solely on synthetic substitutes. 
+
+Model Ablation Tab. 5 isolates the key components of the MoE decoder and three trends emerge. The MoE decoder is indispensable: the pure AR baseline without experts falls behind MoE series except Latin, the single most data-rich script, confirming that a single dense decoder cannot adequately serve all ten scripts. Four experts reaches the best average of 82.06%, with the gain concentrated on the scripts that benefit most from dedicated capacity (Thai +2.40%, Chinese +1.23%). Scaling to ten experts (one per script) however, erases the gain: each expert now sees too few samples to specialize, and some scripts are better served by sharing an expert with their structural neighbors (e.g. Chinese, Japanese and Korean share stroke topology). Top-2 is the right sparsity. Top-1 still outperforms the no-MoE baseline, but a single routed expert cannot capture the shared sub-patterns between related scripts and drops most on Thai and Chinese. Top-4 nearly matches Top-2 on average yet activates more parameters per image for a negligible return, and actually hurts Japanese and Korean, indicating diminishing returns from over-activation. Routing granularity is essentially a wash: token-level routing trades marginal per-script gains on some scripts (e.g. Hindi) for comparable losses on others (e.g. Russian), all within noise. We therefore keep image-level routing for its lower router cost. Finally, the last two rows isolate our two script-aware components. Removing the script-classification signal lets the router drift away from script boundaries and costs 0.43% on average. Removing the shared expert is more damaging (-0.71% on average), with the drop concentrated on the low-resource scripts: Arabic (-3.62%) and Tibetan (-3.65%). 10 5 Conclusion 
+
+In this paper, we have presented a systematic study of all-in-one multilingual scene text recognition from both data and model perspectives. On the data side, we constructed TextMuSS-10M, a large-scale multilingual synthetic scene text dataset covering 10 scripts and 229 languages, which provides balanced and sufficient training signal for scripts where real data is scarce. We also assembled TextMuSS-Bench, a real scene text benchmark spanning all ten scripts for comprehensive evaluation. On the model side, we proposed ScriptMoE, a script-aware Mixture-of-Experts architecture that keeps a shared visual encoder and reallocates decoder capacity through an image-level router activating script-aligned experts. With the shared expert preserving cross-script transfer and a lightweight script-classification signal guiding expert specialization, ScriptMoE maintains the efficiency of a single model while effectively serving diverse scripts. Extensive experiments demonstrate ScriptMoE’s effectiveness: it achieves competitive average accuracy on TextMuSS-Bench, with notable gains on low-resource scripts such as Arabic, Thai, and Tibetan. When integrated into an end-to-end OCR pipeline, it surpasses both expert OCR systems and strong VLMs on the CC-OCR multilingual task while remaining lightweight. In the future, we plan to explore continual learning strategies that allow new scripts to be added without retraining the full model. We are also interested in integrating ScriptMoE with stronger text detectors to further improve end-to-end multilingual OCR performance. 
+
+## References 
+
+[1] Jeonghun Baek, Yusuke Matsui, and Kiyoharu Aizawa. Cross-lingual learning in multilingual scene text recognition. In ICASSP, pages 6770–6774, 2024. [2] Shuai Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin Ge, Sibo Song, Kai Dang, Peng Wang, Shĳie Wang, Jun Tang, Humen Zhong, Yuanzhi Zhu, Mingkun Yang, Zhaohai Li, Jianqiang Wan, Pengfei Wang, Wei Ding, Zheren Fu, Yiheng Xu, Jiabo Ye, Xi Zhang, Tianbao Xie, Zesen Cheng, Hang Zhang, Zhibo Yang, Haiyang Xu, and Junyang Lin. Qwen2.5-vl technical report. CoRR, abs/2502.13923, 2025. [3] Loïc Barrault, Ondřej Bojar, Marta R Costa-Jussa, Christian Federmann, Mark Fishel, Yvette Graham, Barry Haddow, Matthias Huck, Philipp Koehn, Shervin Malmasi, et al. Findings of the 2019 conference on machine translation (wmt19). In WMT, pages 1–61, 2019. [4] Darwin Bautista and Rowel Atienza. Scene text recognition with permuted autoregressive sequence models. In ECCV, pages 178–196, 2022. [5] Michal Bušta, Yash Patel, and Jiri Matas. E2e-mlt-an unconstrained end-to-end method for multi-language scene text. In ACCV, pages 127–143, 2018. [6] Jingye Chen, Haiyang Yu, Jianqi Ma, Mengnan Guan, Xixi Xu, Xiaocong Wang, Shaobo Qu, Bin Li, and Xiangyang Xue. Benchmarking chinese text recognition: Datasets, baselines, and an empirical study. CoRR, abs/2112.15093, 2021. [7] Cheng Cui, Ting Sun, Manhui Lin, Tingquan Gao, Yubo Zhang, Jiaxuan Liu, Xueqing Wang, Zelun Zhang, Changda Zhou, Hongen Liu, et al. Paddleocr 3.0 technical report. CoRR, abs/2507.05595, 2025. [8] Cheng Cui, Ting Sun, Suyin Liang, Tingquan Gao, Zelun Zhang, Jiaxuan Liu, Xueqing Wang, Changda Zhou, Hongen Liu, Manhui Lin, et al. Boosting document parsing efficiency and performance with coarse-to-fine visual processing. In CVPR, pages 16655–16665, 2026. [9] Damai Dai, Chengqi Deng, Chenggang Zhao, RX Xu, Huazuo Gao, Deli Chen, Jiashi Li, Wangding Zeng, Xingkai Yu, Yu Wu, et al. Deepseekmoe: Towards ultimate expert specialization in mixture-of-experts language models. In ACL, pages 1280–1297, 2024. [10] Daxiang Dong, Mingming Zheng, Dong Xu, Chunhua Luo, Bairong Zhuang, Yuxuan Li, Ruoyun He, Haoran Wang, Wenyu Zhang, Wenbo Wang, et al. Qianfan-ocr: A unified end-to-end model for document intelligence. CoRR, abs/2603.13398, 2026. [11] Yongkun Du, Zhineng Chen, Caiyan Jia, Xiaoting Yin, Tianlun Zheng, Chenxia Li, Yuning Du, and Yu-Gang Jiang. SVTR: Scene text recognition with a single visual model. In ĲCAI, pages 884–890, 2022. 
+
+11 [12] Yongkun Du, Zhineng Chen, Caiyan Jia, Xieping Gao, and Yu-Gang Jiang. Out of length text recognition with sub-string matching. In AAAI, volume 39, pages 2798–2806, 2025. [13] Yongkun Du, Zhineng Chen, Caiyan Jia, Xiaoting Yin, Chenxia Li, Yuning Du, and Yu-Gang Jiang. Context perception parallel decoder for scene text recognition. IEEE Trans. Pattern Anal. Mach. Intell., 47(6):4668–4683, 2025. doi: 10.1109/TPAMI.2025.3545453. [14] Yongkun Du, Zhineng Chen, Hongtao Xie, Caiyan Jia, and Yu-Gang Jiang. Svtrv2: Ctc beats encoder-decoder models in scene text recognition. In ICCV, pages 20147–20156, 2025. [15] Yongkun Du, Zhineng Chen, Yazhen Xie, Weikang Bai, Hao Feng, Wei Shi, Yuchen Su, Can Huang, and Yu-Gang Jiang. Unirec-0.1b: Unified text and formula recognition with 0.1b parameters. In ECCV, 2026. [16] Yongkun Du, Miaomiao Zhao, Songlin Fan, Zhineng Chen, Caiyan Jia, and Yu-Gang Jiang. Mdiff4str: Mask diffusion model for scene text recognition. In AAAI, volume 40, pages 3705–3713, 2026. [17] Shuaiqi Duan, Yadong Xue, Weihan Wang, Zhe Su, Huan Liu, Sheng Yang, Guobing Gan, Guo Wang, Zihan Wang, Shengdong Yan, et al. Glm-ocr technical report. CoRR, abs/2603.10910, 2026. [18] Shancheng Fang, Hongtao Xie, Yuxin Wang, Zhendong Mao, and Yongdong Zhang. Read like humans: Autonomous, bidirectional and iterative language modeling for scene text recognition. In CVPR, pages 7098–7107, 2021. [19] William Fedus, Barret Zoph, and Noam Shazeer. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research, 23(120):1–39, 2022. [20] Alex Graves, Santiago Fernández, Faustino Gomez, and Jürgen Schmidhuber. Connectionist temporal classification: Labelling unsegmented sequence data with recurrent neural networks. In ICML, pages 369–376, 2006. [21] Tongkun Guan, Wei Shen, Xue Yang, Qi Feng, Zekun Jiang, and Xiaokang Yang. Self-supervised character-to-character distillation for text recognition. In ICCV, pages 19473–19484, 2023. [22] Tongkun Guan, Wei Shen, and Xiaokang Yang. Ccdplus: Towards accurate character to character distillation for text recognition. IEEE Trans. Pattern Anal. Mach. Intell., 47(5):3546–3562, 2025. doi: 10.1109/TPAMI.2025.3533737. [23] Ankush Gupta, Andrea Vedaldi, and Andrew Zisserman. Synthetic data for text localisation in natural images. In CVPR, pages 2315–2324, 2016. [24] Jing Huang, Guan Pang, Rama Kovvuri, Mandy Toh, Kevin J Liang, Praveen Krishnan, Xi Yin, and Tal Hassner. A multiplexed network for end-to-end, multilingual ocr. In CVPR, pages 4547–4557, 2021. [25] Qing Jiang, Jiapeng Wang, Dezhi Peng, Chongyu Liu, and Lianwen Jin. Revisiting scene text recognition: A data perspective. In ICCV, pages 20486–20497, 2023. [26] Wenjun Ke, Qingzhi Hou, Yutian Liu, Xinyue Song, and Jianguo Wei. Sarn: Script-aware recognition network for scene multilingual text recognition. Expert Syst. Appl., 250:123753, 2024. [27] Minghao Li, Tengchao Lv, Jingye Chen, Lei Cui, Yĳuan Lu, Dinei Florencio, Cha Zhang, Zhoujun Li, and Furu Wei. Trocr: Transformer-based optical character recognition with pre-trained models. In AAAI, volume 37, pages 13094–13102, 2023. [28] Yumeng Li, Guang Yang, Hao Liu, Bowen Wang, and Colin Zhang. dots. ocr: Multilingual document layout parsing in a single vision-language model. CoRR, abs/2512.02498, 2025. [29] Zi-Xin Li, Xiao-Qian Liu, Tai Zheng, Zhen-Duo Chen, Xin Luo, and Xin-Shun Xu. Risen: Incremental multilingual text recognition by sharing and fusing cross-language knowledge. Pattern Recognition, 177:113299, 2026. ISSN 0031-3203. [30] Xiao-Qian Liu, Ming-Hui Liu, Zhen-Duo Chen, Xin Luo, and Xin-Shun Xu. Hierarchical multi-label learning for incremental multilingual text recognition. In ACM Int. Conf. Multimedia, page 8750–8758, 2024. [31] Xiao-Qian Liu, Zhen-Duo Chen, Xin Luo, and Xin-Shun Xu. Self-supervised discovery of cross-lingual shared knowledge for continual text recognition. IEEE Trans. Image Process., 34:6524–6536, 2025. [32] Ilya Loshchilov and Frank Hutter. Decoupled weight decay regularization. In ICLR, 2019. 
+
+12 [33] Tengchao Lv, Yupan Huang, Jingye Chen, Yuzhong Zhao, Yilin Jia, Lei Cui, Shuming Ma, Yaoyao Chang, Shaohan Huang, Wenhui Wang, et al. Kosmos-2.5: A multimodal literate model. CoRR, abs/2309.11419, 2023. [34] Nibal Nayef, Fei Yin, Imen Bizid, Hyunsoo Choi, Yuan Feng, Dimosthenis Karatzas, Zhenbo Luo, Umapada Pal, Christophe Rigaud, Joseph Chazalon, et al. Icdar2017 robust reading challenge on multi-lingual scene text detection and script identification-rrc-mlt. In ICDAR, volume 1, pages 1454–1459, 2017. [35] Nibal Nayef, Yash Patel, Michal Busta, Pinaki Nath Chowdhury, Dimosthenis Karatzas, Wafa Khlif, Jiri Matas, Umapada Pal, Jean-Christophe Burie, Cheng-lin Liu, et al. Icdar2019 robust reading challenge on multi-lingual scene text detection and recognition—rrc-mlt-2019. In ICDAR, pages 1582–1587, 2019. [36] Junbo Niu, Zheng Liu, Zhuangcheng Gu, Bin Wang, Linke Ouyang, Zhiyuan Zhao, Tao Chu, Tianyao He, Fan Wu, Qintong Zhang, et al. Mineru2. 5: A decoupled vision-language model for efficient high-resolution document parsing. In ACL, pages 13–42, 2026. [37] Vikas Paruchuri and Datalab Team. Surya: A lightweight document ocr and analysis toolkit, 2025. GitHub repository. [38] Zhi Qiao, Yu Zhou, Dongbao Yang, Yucan Zhou, and Weiping Wang. Seed: Semantics enhanced encoder-decoder framework for scene text recognition. In CVPR, pages 13528–13537, 2020. [39] Carlos Riquelme, Joan Puigcerver, Basil Mustafa, Maxim Neumann, Rodolphe Jenatton, André Susano Pinto, Daniel Keysers, and Neil Houlsby. Scaling vision with sparse mixture of experts. NeurIPS, 34:8583–8595, 2021. [40] Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. In ICLR, 2017. [41] Fenfen Sheng, Zhineng Chen, and Bo Xu. NRTR: A no-recurrence sequence-to-sequence model for scene text recognition. In ICDAR, pages 781–786, 2019. [42] Baoguang Shi, Xiang Bai, and Cong Yao. An end-to-end trainable neural network for image-based sequence recognition and its application to scene text recognition. IEEE Trans. Pattern Anal. Mach. Intell., 39(11):2298–2304, 2016. doi: 10.1109/TPAMI.2016.2646371. [43] Hunyuan Vision Team, Pengyuan Lyu, Xingyu Wan, Gengluo Li, Shangpin Peng, Weinong Wang, Liang Wu, Huawen Shen, Yu Zhou, Canhui Tang, et al. Hunyuanocr technical report. CoRR, abs/2511.19575, 2025. [44] Qwen Team. Qwen3. 5-omni technical report. CoRR, abs/2604.15804, 2026. [45] Weiyun Wang, Zhangwei Gao, Lixin Gu, Hengjun Pu, Long Cui, Xingguang Wei, Zhaoyang Liu, Linglin Jing, Shenglong Ye, Jie Shao, et al. Internvl3. 5: Advancing open-source multimodal models in versatility, reasoning, and efficiency. CoRR, abs/2508.18265, 2025. [46] Haoran Wei, Chenglong Liu, Jinyue Chen, Jia Wang, Lingyu Kong, Yanming Xu, Zheng Ge, Liang Zhao, Jianjian Sun, Yuang Peng, et al. General ocr theory: Towards ocr-2.0 via a unified end-to-end model. CoRR, abs/2409.01704, 2024. [47] Haoran Wei, Yaofeng Sun, and Yukun Li. Deepseek-ocr: Contexts optical compression. CoRR, abs/2510.18234, 2025. [48] Haoran Wei, Yaofeng Sun, and Yukun Li. Deepseek-ocr 2: Visual causal flow. CoRR, abs/2601.20552, 2026. [49] Jiajun Wei, Hongjian Zhan, Yue Lu, Xiao Tu, Bing Yin, Cong Liu, and Umapada Pal. Image as a language: Revisiting scene text recognition via balanced, unified and synchronized vision-language reasoning network. In AAAI, volume 38, pages 5885–5893, 2024. [50] Xiaomeng Yang, Zhi Qiao, and Yu Zhou. Ipad: iterative, parallel, and diffusion-based network for scene text recognition. Int. J. Comput. Vis., 133(8):5589–5609, 2025. [51] Zhibo Yang, Jun Tang, Zhaohai Li, Pengfei Wang, Jianqiang Wan, Humen Zhong, Xuejing Liu, Mingkun Yang, Peng Wang, Shuai Bai, et al. Cc-ocr: A comprehensive and challenging ocr benchmark for evaluating large multimodal models in literacy. In ICCV, pages 21744–21754, 2025. [52] Xingsong Ye, Yongkun Du, Yunbo Tao, and Zhineng Chen. Textssr: Diffusion-based data synthesis for scene text recognition. In ICCV, pages 17464–17473, 2025. 
+
+13 [53] Xingsong Ye, Yongkun Du, JiaXin Zhang, Chen Li, Jing LYU, and Zhineng Chen. What’s wrong with synthetic data for scene text recognition? a strong synthetic engine with diverse simulations and self-evolution. In CVPR, pages 16645–16654, 2026. [54] Xingsong Ye, Yongkun Du, Jiaxin Zhang, Haojie Zhang, Chong Sun, Chen Li, Jing Lyu, and Zhineng Chen. Advancing wordart-oriented scene text recognition: Datasets and methods. In ECCV, 2026. [55] Boqiang Zhang, Hongtao Xie, Yuxin Wang, Jianjun Xu, and Yongdong Zhang. Linguistic more: Taking a further step toward efficient and accurate scene text recognition. In ĲCAI, pages 1704–1712, 2023. [56] Yubo Zhang, Xueqing Wang, Manhui Lin, Yue Zhang, Penglongyi Deng, Ting Sun, Tingquan Gao, Zelun Zhang, Jiaxuan Liu, Changda Zhou, et al. Pp-ocrv6: From 1.5 m to 34.5 m parameters, surpassing billion-scale vlms on ocr tasks. CoRR, abs/2606.13108, 2026. [57] Tianlun Zheng, Zhineng Chen, Bingchen Huang, Wei Zhang, and Yu-Gang Jiang. Mrn: Multiplexed routing network for incremental multilingual text recognition. In ICCV, pages 18644–18653, 2023. [58] Tianlun Zheng, Zhineng Chen, Shancheng Fang, Hongtao Xie, and Yu-Gang Jiang. Cdistnet: Perceiving multi-domain character distance for robust text recognition. Int. J. Comput. Vis., 132(2):300–318, 2024. 
+
+14 Appendix 
+
+Dataset and Benchmark Details 
+
+Data Card of TextMuSS-10M 
+
+Text-source composition. For every script, the rendered text strings are drawn from four sources with a fixed mixing ratio: 40% real words sampled from the per-language lexicon, 20% words with their characters randomly shuffled (to expose the model to out-of-vocabulary and non-linguistic character sequences), 20% vocabulary-expansion strings that oversample rare characters so that the full character table is covered, and 20% sentences sampled from the News Crawl corpora. This mixture balances lexical realism with full coverage of the character space. For the Latin script, which internally spans many languages, the lexicon is sampled across all Latin-based languages to keep the intra-script language distribution balanced. 
+
+Rendering effects. Unless a template specifies otherwise, each rendering effect is applied independently with the following probability and may be stacked with the others: 20% curved layout, 20% multi-directional (including vertical) layout, and 20% perspective distortion. Backgrounds are sampled from the 8k background images released by SynthText [23], a widely used and publicly available resource for STR data synthesis.                      
+
+> Table 6 Per-script character-table sizes. Script Arabic Bangla Chinese Hindi Japanese Korean Latin Cyrillic Thai Tibetan #Chars 747 102 16,147 817 4,398 3,687 923 850 524 64
+
+Character set. Tab. 6 lists the size of each per-script character table. We build the released character set by de-duplicating and merging all ten tables into a single unified vocabulary and adding the space symbol, yielding 19,684 characters. Together with the three special tokens (BOS/EOS/PAD), the decoder embedding uses a vocabulary of 19,687 entries. 
+
+Collection and Annotation of TextMuSS-Bench 
+
+TextMuSS-Bench extends the MLT2019 [35] test split with three additional scripts (Russian, Thai and Tibetan) that we collect and annotate ourselves. The collection and annotation pipeline is as follows. 
+
+Image collection. For each of the three new scripts, we collect real-world scene images of the corresponding language from publicly available sources. 
+
+Detection and box verification. We first run an OCR text detector (PP-OCRv5 [7]) to obtain candidate text regions, and then manually verify and correct the detected bounding boxes so that every box tightly encloses a real text instance. 
+
+Transcription annotation. Text belonging to each target script is transcribed by a language expert of that script. Because experts in these low-resource languages are scarce, each script is annotated by a single expert. 
+
+Quality control. All annotations are then subjected to a unified quality check by a separate reviewer (not specialized in these low-resource languages), who verifies at the morphological level that the transcribed text visually matches the text in the image. 
+
+Full Language-to-Script Mapping 
+
+We consolidate the major world languages into ten representative scripts, and these ten scripts can represent 229 languages that share this common character space. For modeling, the ten scripts are further organized 15 Table 7 Full language-to-script mapping. The ten scripts are organized into the four expert families used by the router. All languages representable by our released character set are enumerated per script. This set can represent 229 languages. Languages written in more than one script (e.g. Kurdish, in both Latin and Arabic) are listed under each script they appear in. Greek uses its own alphabet, but because several Greek letters coincide with characters already shared by Latin-script text, we fold it into the Latin (alphabet) group for convenience rather than treating it as a separate script. Expert group Script Languages Alphabet Latin English, French, German, Afrikaans, Italian, Spanish, Bosnian, Portuguese, Czech, Welsh, Danish, Estonian, Irish, Croatian, Uzbek, Hungarian, Serbian-Latin, Indonesian, Occitan, Icelandic, Lithuanian, Maori, Malay, Dutch, Norwe-gian, Polish, Slovak, Slovenian, Albanian, Swedish, Swahili, Tagalog, Turkish, Somali, Azerbaĳani, Kurdish-Latin, Latvian, Maltese, Zulu, Romanian, Viet-namese, Finnish, Basque, Galician, Luxembourgish, Romansh, Catalan, Quechua, Xhosa, Sesotho, Shona, Kinyarwanda, Rundi, Ndebele, Swati, Bemba, Tumbuka, Kongo, Tsonga, Oromo, Cebuano, Hiligaynon, Ilocano, Waray, Bikol, Pangasinan, Bislama, Tok Pisin, Tetum, Fĳian, Kikuyu, Ganda, Chichewa, Tswana, Sango, Wolof, Malagasy, Turkmen, Faroese, Frisian, Corsican, Sardinian, Breton, Wal-loon, Aragonese, Asturian, Scottish Gaelic, Manx, Cornish, Kashubian, Sorbian, Silesian, Haitian Creole, Aymara, Nahuatl, Guarani, Papiamento, Sranan, Green-landic, Zaza, Ladino, Chamorro, Greek Cyrillic Russian, Belarusian, Ukrainian, Serbian-Cyrillic, Bulgarian, Mongolian, Abkhaz, Adyghe, Kabardian, Avar, Dargwa, Ingush, Chechen, Lak, Lezgian, Tabasaran, Kazakh, Kyrgyz, Tajik, Macedonian, Tatar, Chuvash, Bashkir, Mari, Mordvin, Moldovan, Udmurt, Komi, Ossetian, Buryat, Kalmyk, Tuvan, Sakha, Karakalpak, Crimean Tatar, Rusyn, Kumyk, Karachay-Balkar, Abaza, Nogai, Khakas, Even, Evenki, Shor, Rutul, Tsakhur, Aghul, Komi-Permyak, Erzya, Moksha, Khanty, Mansi, Nenets, Chukchi, Koryak, Dungan, Tofa, Yukaghir, Nanai, Selkup CJK Chinese Simplified Chinese, Traditional Chinese Japanese Japanese Korean Korean Arabic Arabic Arabic, Persian, Uyghur, Urdu, Pashto, Kurdish-Arabic, Sindhi, Balochi, Saraiki, Punjabi, Brahui, Kashmiri, Luri, Mazandarani, Gilaki, Wakhi, Shughni, Rohingya Others Hindi Hindi, Marathi, Nepali, Awadhi, Maithili, Angika, Bhojpuri, Magahi, Nagpuri, Santali, Newari, Konkani, Sanskrit, Haryanvi, Chhattisgarhi, Rajasthani, Bundeli, Braj, Garhwali, Kumaoni, Dogri, Bodo, Sherpa, Magar, Kurukh, Ho, Mundari, Sadri, Kanauji, Marwari, Mewari Bangla Bangla, Bishnupriya, Sylheti, Chakma, Rangpuri, Meitei, Kokborok Thai Thai, Isan, Southern Thai Tibetan Tibetan, Dzongkha, Ladakhi, Sikkimese, Balti 
+
+Total 229 languages across 10 scripts 
+
+16 Algorithm 1 Forward pass of a script-aware MoE-FFN layer  
+
+> 1:
+
+Input: decoder states 𝐻 ∈ ℝ𝐵 ×𝑇 ×𝑑 , visual memory 𝐹 ∈ ℝ𝐵 ×𝐿 ×𝑑  
+
+> 2:
+
+¯𝐹 𝑏 ← mean 𝑖 𝐹 𝑏,𝑖 // sample-level router input  
+
+> 3:
+
+if training: ¯𝐹 𝑏 ← ¯ 𝐹 𝑏 ⊙ ( 1 + 𝜎 𝜖 𝑏 ), 𝜖 𝑏 ∼ 𝒩 ( 0, 𝐼 ) 
+
+> 4:
+
+p𝑏 ← softmax (𝑊 𝑔 ¯𝐹 𝑏 ), 𝒦 𝑏 ← Top-2 (p𝑏 ) 
+
+> 5:
+
+𝑔 𝑏,𝑒 ← 𝑝 𝑏,𝑒 
+
+Í 𝑒 ′∈𝒦 𝑏 𝑝 𝑏,𝑒 ′ for 𝑒 ∈ 𝒦 𝑏 // renormalize  
+
+> 6:
+
+𝑦 rt  
+
+> 𝑏
+
+← Í𝑒 ∈𝒦 𝑏 𝑔 𝑏,𝑒 𝑓 𝑒 (𝐻 𝑏 ) // shared by all 𝑇 tokens  
+
+> 7:
+
+𝑦 sh  
+
+> 𝑏
+
+← 𝑓 share (𝐻 𝑏 ) 
+
+> 8:
+
+𝛼 𝑏 ← sigmoid (w⊤ 
+
+> 𝑠
+
+𝐻 𝑏 ) // learnable per-token gate  
+
+> 9:
+
+return 𝛼 𝑏 𝑦 sh  
+
+> 𝑏
+
++ ( 1 − 𝛼 𝑏 ) 𝑦 rt 
+
+> 𝑏
+
+into the four expert groups used by the router: the alphabet group, the CJK group, the Arabic family, and the Others group. Tab 7 gives the complete per-language enumeration for each script. All of these languages are representable by our released character set (19,684 characters including the space symbol). 
+
+Implementation Details of ScriptMoE 
+
+The main paper defines ScriptMoE at the formulation level (see Eq. (1)–(4) of the main paper). Here we complement it with the exact network configuration and training objective as implemented, so that the model can be reproduced without ambiguity. Unless stated otherwise, the values below are the defaults used in all experiments. 
+
+Network Configuration 
+
+Visual encoder. We use the hierarchical SVTRv2 encoder [14] shared across all scripts. It has three stages with widths [128 , 256 , 384 ], depths [6, 6, 6] and [4, 8, 12 ] attention heads. The first stage uses only 5 × 5 local convolutional mixers. The second stage combines convolutional blocks with global self-attention and applies a [2, 1] vertical sub-sampling, and the third stage is fully global. Positional embeddings are disabled, and the encoder emits a sequence of 𝑑 -dimensional visual tokens F that feed both the router and the decoder. 
+
+Script-aware decoder. The decoder stacks 2 Transformer blocks with 12 attention heads. We set the number of decoder blocks to 𝑁 =2 to align with the standard SVTRv2-AR [53] configuration, so that ScriptMoE and its autoregressive baseline differ only in the MoE-FFN rather than in decoder depth. Each block applies self-attention, cross-attention, and then the script-aware MoE-FFN, each wrapped in a post-norm residual connection. Target tokens are embedded (scaled by √𝑑 ) with sinusoidal positional encoding, and a linear head projects the final states to the character vocabulary. Decoding is greedy autoregressive with dedicated BOS/EOS symbols. The maximum length is 25 for the word-level STR setting and 100 for the line-level end-to-end variant. We illustrate the forward pass of a script-aware MoE-FFN layer (full procedure in Alg. 1). 
+
+Main Training Objective Details 
+
+In Eq. (5) of the main paper, ℒar is the token-level autoregressive cross-entropy over the target transcription 
+
+y = (𝑦 1 , . . . , 𝑦 𝑇 ) conditioned on the visual memory F,
+
+ℒar = − 1
+
+𝑇 
+
+> 𝑇
+
+Õ
+
+> 𝑡 =1
+
+Õ
+
+> 𝑐 ∈𝒱
+
+˜𝑦 𝑡,𝑐 log 𝑝  𝑐 | 𝑦 <𝑡 , F , (6) where 𝒱 is the character vocabulary and ˜𝑦 𝑡,𝑐 is the label-smoothed target distribution with smoothing 𝜀 =0.1. 17 Table 8 Parameter breakdown of ScriptMoE. Component Params                                                    
+
+> Overview
+> Total (stored) 45.85 M Activated (per forward) 41.13 M Inactive experts (skipped by router) 4.73 M Activation ratio 89.69%
+> Module decomposition
+> SVTRv2 Encoder 17.65 M Decoder (ScriptMoE, all) 28.20 M Token embedding 7.56 M Output projection 7.56 M Script classifier 0.07 M 2×MoE decoder layer 13.01 M
+> Single MoE decoder layer ( ×2)
+> Self-Attn +Cross-Attn +3×LN 1.19 M Router 0.0015 M Shared expert 0.59 M Single expert FFN 1.18 M All 4 experts 4.73 M Per-layer stored total 6.50 M Per-layer Top-2 activated 4.14 M
+> Table 9 Inference efficiency of ScriptMoE and representative baselines, measured on a single NVIDIA V100 with batch size 256. Method Params (M) Latency (ms) Throughput (img/s) Mem (MB) CRNN [2016] 26.25 57.40 4459.9 1368.4 SVTRv2 [2025] 27.30 210.32 1217.2 1560.8 PARSeq [2022] 38.90 260.17 984.0 1254.0 MAERec [2023] 50.73 1297.63 197.3 2411.3 SVTRv2-AR [2026] 37.50 395.92 646.6 2057.3
+> ScriptMoE 45.85 541.07 473.1 2091.0
+
+Parameter and Efficiency Breakdown 
+
+Tab. 8 decomposes the parameters of ScriptMoE. The full model stores 45.85M parameters. Because routing is performed at the sample level with Top-2 selection over 4 experts, each forward pass activates only 2 of the 4 experts per layer, so on average 41.13M parameters (89.69%) are used per sample and the remaining 4.73M sit idle as unrouted experts. Relative to a dense-FFN decoder (the 4 experts collapsed into a single equivalent FFN), the MoE design stores about 3 × 1.18 =3.5M extra “stored-but-inactive” parameters, while the activated compute stays comparable to a slightly larger FFN (Top-2 experts plus one shared expert). The 9.45M of expert parameters (2 layers × 4 experts) is where the script specialization is concentrated. Tab. 9 reports inference latency, throughput and peak memory against representative STR baselines under an identical batch size of 256 on a single V100. Among autoregressive models, ScriptMoE stays well below the heavy MAERec in both latency and memory, while its sample-level MoE keeps the activated cost close to the standard AR decoder. In terms of training cost, the full model is trained for 2 epochs on 8 V100 GPUs, taking about 92.7 GPU-hours (11.8 hours wall-clock). 18 Table 10 Reference benchmarks: BCTR [6] (Chinese) and Union14M-Benchmark [25] (English). Best in bold , second underlined. BCTR Union14M-Benchmark Method Document Handwriting Scene Web Avg Curve Multi-Oriented Artistic Contextless Salient Multi-Words General Avg SVTRv2 [2025] 99.49 70.13 78.48 87.28 83.85 91.22 94.67 78.11 85.37 85.99 88.30 82.05 86.53 ABINet [2021] 96.92 51.56 67.31 80.24 74.01 76.75 74.51 66.22 73.43 72.43 62.00 74.84 71.45 PARSeq [2022] 98.58 65.70 78.08 86.77 82.28 81.53 89.55 71.44 82.03 80.38 84.20 81.40 81.51 MAERec [2023] 98.98 70.78 81.72 88.71 85.05 90.48 93.64 80.22 87.42 88.71 89.51 84.43 87.77 CDistNet [2024] 97.94 65.87 76.44 85.97 81.56 88.09 90.80 74.44 84.08 84.61 87.09 81.54 84.38 SMTR [2025] 99.14 66.62 78.07 87.48 82.83 89.82 94.59 77.67 84.72 85.36 87.82 82.41 86.06 SVTRv2-AR [2026] 99.35 73.12 81.99 89.25 85.93 93.12 96.49 80.22 88.06 88.68 90.35 83.78 88.67              
+
+> ScriptMoE 99.47 74.79 83.35 89.80 86.85 93.49 96.71 81.78 87.55 89.10 89.87 84.15 88.95
+
+Additional Implementation Details 
+
+Training Details. All models are trained with the OpenOCR framework on 8 NVIDIA V100 GPUs (32 GB each) and an Intel Xeon Platinum 8255C CPU, under a Linux environment. For a fair comparison, all 15 STR baselines are re-trained under the identical data, schedule and hardware, and re-evaluated on TextMuSS-Bench, using the default model-specific configuration (e.g., network depth, hidden dimension) provided by the OpenOCR framework for each architecture. We follow the training recipe of SVTRv2 [14]. We use the AdamW [32] optimizer with a weight decay of 0.05. The peak learning rate is set to 6 .5 × 10 −4 and the global batch size is 1024 (8 GPUs × 128 per GPU). A one-cycle learning-rate scheduler with a 1.5-epoch linear warm-up is used across the total of 2 training epochs. We fix a global random seed for all experiments. The only remaining source of stochasticity is the router jitter 𝜖 ∼ 𝒩 ( 0, 𝐼 ) in Eq. (3) of the main paper, which is likewise seeded so that runs are reproducible. Following PARSeq [4], we randomly apply rotation, perspective distortion, motion blur and Gaussian noise during training. All experiments are run with Python 3.8, PyTorch 2.2.0, CUDA 11.8. 
+
+Task Adaptation Details. For the STR experiments, the maximum text length is set to 25 during training. Because the PP-OCRv5 detector operates at the line level rather than the word level, we extend the maximum length to 100 and re-train ScriptMoE to handle line-level inputs for the end-to-end variant. At inference, we set the detection threshold to 0.0 and the recognition threshold to 0.7 to produce the final end-to-end OCR results. 
+
+Evaluation Details. We report word accuracy as the primary STR metric, following the mainstream evaluation convention in the STR literature. Unlike character-level metrics such as CER or edit distance, word accuracy requires the whole predicted string to exactly match the ground truth. For scene text recognition, a meaningful and usable result is a correctly recognized text instance as a whole. A single-character error already renders the output wrong for many downstream applications. We therefore adopt this stricter, application-aligned criterion. Following the common English evaluation protocol, we first lowercase both the prediction and the ground truth, then remove Unicode symbols and whitespace before computing both metrics, so that the scores reflect accuracy on meaningful text content. As a complementary character-level measure, we additionally report 1 − NED, where NED is the normalized edit distance between the prediction and ground truth. Higher 1 − NED indicates a smaller character-level discrepancy and thus better recognition quality. 
+
+VLM Evaluation Protocol 
+
+Prompts on TextMuSS-Bench. For general-purpose VLMs we use a single unified instruction across all scripts: 
+
+General VLM Prompt: 
+
+“Please directly output all original readable text in the image. Do not include any explanation or description. Only output the recognized text.” 
+
+For OCR-specialized VLMs we adopt each model’s own default OCR prompt rather than a shared instruction: 19 DeepSeek-OCR2 [48] Prompt: 
+
+> “<image>\nFree OCR.”
+
+PaddleOCR-VL [8] Prompt: 
+
+> “OCR:”
+
+GOT-OCR2.0 [46] Prompt: 
+
+> “ocr”
+
+HunyuanOCR [43] Prompt: 
+
+> “Extract the text from this image.”
+
+GLM-OCR [17] Prompt: 
+
+> “Text Recognition:”
+
+Output normalization. The cleaning/alignment rules are identical to those used for our own model as described in Evaluation Details. Predictions and ground truth are lowercased, and Unicode symbols and whitespace are removed before scoring. The same normalization is applied to the VLM outputs so that all systems are compared under one protocol. Label: ScriptMOE: PP-OCRv5 MLT : InternVL3.5-8B : Qwen3.5-9B : HunyuanOCR : PaddleOCR-VL : DeepSeek-OCR2: 
+
+Multilingual Text Image 
+
+!পই$স্ !পই$স্ 
+
+<Null> 
+
+छोटे সাব -জনীন !পই1স্ !পই1স लोबा 
+
+방공대피시설 방공대피시설 방공대괴시실 바공대피시설 방공대피시설 방공대피시설 。
+
+바공대피시설 
+
+HAPPY ﻟﻠﻜﺮاءﻟﻠﻜﺮاءﻟﻜﺮاء813511 اﻟﻜﺮاﻣﺔﻟﻠﻜﺮاءﻟﻠﺤﺎراء\[a \times 21\] 
+
+よいこ よいこ よいこ よしこ よいこ ようこ ふいこ 
+
+\( 5 . 0 3 \) 
+
+เด็กเส้น เด็กเส้น เด็กเส้น 
+
+Gabriella 
+
+เด็กแสน เต็กเส้น 。
+
+ཚ"གས་&ན 
+
+JUST   
+
+> Figure 6 Visualization of different models’ predictions on TextMuSS-Bench. Characters differing from the ground truth are highlighted in red, and
+
+<Null> indicates that the model does not support the corresponding language. 
+
+Qualitative comparison. Fig. 6 compares the predictions of ScriptMoE against several representative VLMs and multilingual OCR systems on TextMuSS-Bench. ScriptMoE consistently produces correct results, while competing methods often fail to guarantee accurate multilingual recognition in general. 
+
+CC-OCR protocol. For the end-to-end CC-OCR [51] evaluation, we strictly follow its official evaluation protocol and metrics: Latin-script languages are scored at the word level, while all other languages are scored at the character level. To complement the quantitative evaluation, we additionally provide an end-to-end OCR demo, as illustrated in Fig. 7. 
+
+Monolingual Reference Benchmarks 
+
+To verify that script-aware specialization does not siphon capacity away from the dominant scripts, Tab. 10 reports results on the long-saturated Benchmarking Chinese Text Recognition [6] (BCTR) benchmark and 20 Figure 7 Users will upload a multilingual scene text image, select a confidence threshold for filtering, and click “Run OCR” to obtain the end-to-end OCR recognition results. 
+
+the English Union14M-Benchmark [25]. ScriptMoE remains competitive on both, reaching 86.85% Avg on BCTR (+0.92% over SVTRv2-AR) and 88.95% Avg on Union14M-Benchmark (+0.28%), confirming that the multilingual gains in the main paper come from script-aware specialization rather than from trading off the high-resource scripts. 
+
+Extended Ablations 
+
+The main ablation studies each MoE component in a binary on/off fashion. Here we complement it with finer-grained sweeps over the three continuous hyper-parameters that the binary study leaves open: the script-classification loss weight 𝜆 scls , the shared-expert width ratio, and the router jitter 𝜎 . All runs use the identical data, schedule and evaluation protocol as the main experiment, and vary a single hyper-parameter at a time around the default configuration ( 𝜆 scls =0.1, ratio =0.5, 𝜎 =0.05). Results are reported in Tab. 11. 
+
+Script-classification loss weight. The main ablation shows that removing ℒscls (𝜆 scls =0) lets the router drift away from script boundaries. The sweep in Tab. 11 shows the opposite failure mode as well: over-weighting the signal is equally harmful. A light 𝜆 scls =0.1 is best, whereas pushing it to 0.2 or 0.5 turns the auxiliary loss into a competing objective that over-constrains the router, dropping the average to 81.44% and 81.35% and hitting the low-resource Tibetan hardest (down to 84.55% at 𝜆 scls =0.5). A gentle regularizer is therefore preferable to a hard script prior. 
+
+Shared-expert width ratio. Removing the shared expert (ratio 0.0) is the most damaging setting (81.35% Avg), as reported before, confirming its role in preserving cross-script transfer. Among the non-zero ratios, 0.5 already recovers almost all of the benefit, and enlarging it to 1.0 does not help. 
+
+Router jitter. A small multiplicative jitter regularizes the sample-level router. Disabling it ( 𝜎 =0) makes routing slightly brittle (81.61% Avg), while an overly large jitter ( 𝜎 =0.1) injects too much noise into the routing 21 Table 11 Extended ablations on TextMuSS-Bench. Each block varies a single hyper-parameter around the shared default configuration. Best Avg within each block in bold .Setting Arabic Bangla Chinese Hindi Japanese Korean Latin Russian Thai Tibetan Avg                                                                                                                 
+
+> Script-classification loss weight 𝜆 scls
+> 0.0 77.66 87.79 95.08 85.75 70.88 87.33 91.93 61.67 70.00 88.20 81.63 0.1 (default) 78.09 88.30 95.38 86.77 71.21 87.19 91.67 61.20 72.00 88.76 82.06
+> 0.2 76.60 88.55 94.46 87.28 70.71 87.19 91.62 61.29 68.53 88.20 81.44 0.5 78.09 87.28 94.46 86.77 71.72 87.19 91.50 61.20 70.80 84.55 81.35
+> Shared-expert width ratio
+> 0.0 74.47 88.30 95.08 87.28 70.03 87.04 91.55 63.19 71.47 85.11 81.35 0.5 (default) 78.09 88.30 95.38 86.77 71.21 87.19 91.67 61.20 72.00 88.76 82.06
+> 1.0 78.94 88.55 95.08 86.26 70.37 87.78 91.79 59.87 70.67 84.83 81.41
+> Router jitter 𝜎
+> 0.0 78.51 88.55 95.38 87.28 71.04 87.63 91.72 62.05 69.33 84.55 81.61 0.05 (default) 78.09 88.30 95.38 86.77 71.21 87.19 91.67 61.20 72.00 88.76 82.06
+> 0.1 77.87 87.53 94.46 87.28 70.88 87.48 91.71 61.29 69.87 84.83 81.32
+
+decision and is worse (81.32%). The default 𝜎 =0.05 gives the best trade-off (82.06%). 
+
+Figure 8 Russian text image, ground truth, model prediction, and homoglyph substitution details (left to right). Red background marks homoglyph-induced cross-script confusion. 
+
+Limitations and Discussion 
+
+We identify three main limitations of the current work. (1) Despite careful synthesis, a domain gap remains between our synthetic TextMuSS-10M and real-world imagery. Collecting large-scale real multilingual scene images for semi-supervised learning is a promising direction to close this gap. (2) The Latin-Cyrillic homoglyph confusion is alleviated but not fully solved. As illustrated in Fig. 8, Cyrillic characters that are visually identical to Latin letters are occasionally mis-recognized as their Latin homoglyphs, so the prediction becomes an orthographically plausible but wrong cross-script transcription. Our fully-synthetic experiments show that a balanced data distribution effectively mitigates it, which further motivates building real Cyrillic-script data to close the remaining gap. (3) The end-to-end pipeline still depends on an upstream detector. We currently reuse the PP-OCRv5 detector, whose multilingual detection quality cannot be fully guaranteed across all scripts and may bound the overall performance. 22
