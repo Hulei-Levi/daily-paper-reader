@@ -1,0 +1,754 @@
+Title: OLED-MoE: Accelerating MoE-Based dLLM Inference via Inter-Iteration Locality-Aware Expert Offloading
+
+URL Source: https://arxiv.org/pdf/2609.33385v1
+
+Published Time: Tue, 29 Sep 2026 02:40:47 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+# OLED-MoE: Accelerating MoE-Based dLLM Inference via Inter-Iteration Locality-Aware Expert Offloading 
+
+Jingyuan Xiao 
+
+Tianjin University Tianjin, China 
+
+3020244304@tju.edu.cn 
+
+Jiayue Wang 
+
+Tianjin University Tianjin, China 
+
+wangjiayue05@tju.edu.cn 
+
+Yitao Hu ∗
+
+Tianjin University Tianjin, China 
+
+yitao@tju.edu.cn 
+
+Xinning Wang 
+
+Tianjin University Tianjin, China 
+
+wxn_coic@tju.edu.cn 
+
+Shi Chen 
+
+Tianjin University Tianjin, China 
+
+jiangnan9@tju.edu.cn 
+
+Ziqi Gong 
+
+Tianjin University Tianjin, China 
+
+victayria@hotmail.com 
+
+Zhengchao Wang 
+
+Tianjin University Tianjin, China 
+
+right135@tju.edu.cn 
+
+Guotao Yang 
+
+Tianjin University Tianjin, China 
+
+gtyang@tju.edu.cn 
+
+Sheng Chen 
+
+Tianjin University Tianjin, China 
+
+chensheng@tju.edu.cn 
+
+Keqiu Li 
+
+Tianjin University Tianjin, China 
+
+keqiu@tju.edu.cn 
+
+Abstract 
+
+Semi-autoregressive diffusion large language models (dLLMs) improve decoding parallelism through iterative block-wise denoising, but scaling them with mixture-of-experts (MoE) layers introduces a large expert parameter footprint that ex-ceeds memory-constrained GPU capacity. Expert offloading is a natural remedy, yet existing MoE serving systems target autoregressive decoding and rely on intra-iteration layer-wise prefetching: while computing one layer, they predict and load experts for subsequent layers. Under dLLM infer-ence, block-wise routing expands the active expert working set within each iteration, making such prefetches difficult to complete in time and costly when mispredicted. Conse-quently, existing prefetch-based solutions often degenerate into on-demand expert loading with high decoding latency. We propose OLED-MoE, an expert offloading system that shifts the optimization target from intra-iteration prefetch-ing to inter-iteration expert retention. Its key insight is that adjacent denoising iterations exhibit strong expert routing overlap, and token confidence indicates which experts are likely to be reused. OLED-MoE uses confidence-guided inter-iteration prediction to retain high-value experts in GPU memory without introducing extra prefetch traffic. It further compensates unavoidable cache misses through CPU-GPU cooperative execution, jointly considering dynamic expert 
+
+> ∗Corresponding author.
+> This work is licensed under a Creative Commons Attribution 4.0 Interna-tional License.
+> EuroSys ’27, Rabat, Morocco
+> © 2027 Copyright held by the owner/author(s). ACM ISBN 979-8-4007-2971-3/2027/04
+> https://doi.org/10.1145/3842654.3848535
+
+computation load and predicted future reuse. Across diverse dLLM workloads, OLED-MoE reduces time per output token (TPOT) by 1.23 ×–7.93 × and improves expert cache utiliza-tion by 1.44 ×–4.23 × over state-of-the-art offloading systems. Notably, OLED-MoE approaches full-residency performance while using only 40% of the expert GPU memory, incurring merely 23% higher TPOT despite a 60% reduction in expert memory footprint. OLED-MoE’s source code is publicly avail-able at https://github.com/flashserve/OLED-MoE. 
+
+CCS Concepts: • Computing methodologies → Machine learning ; • Computer systems organization → Archi-tectures .
+
+Keywords: Diffusion Large Language Models; LLM Infer-ence; Mixture-of-experts; Expert Offloading 
+
+ACM Reference Format: 
+
+Jingyuan Xiao, Jiayue Wang, Yitao Hu, Xinning Wang, Shi Chen, Ziqi Gong, Zhengchao Wang, Guotao Yang, Sheng Chen, and Keqiu Li. 2027. OLED-MoE: Accelerating MoE-Based dLLM Inference via Inter-Iteration Locality-Aware Expert Offloading. In 22nd European Conference on Computer Systems (EuroSys ’27), April 19–23, 2027, Rabat, Morocco. ACM, New York, NY, USA, 16 pages. https://doi. org/10.1145/3842654.3848535 
+
+1 Introduction 
+
+Large language models (LLMs) have traditionally relied on autoregressive (AR) decoding, which generates tokens strictly from left to right [14, 21, 47, 51, 52]. Diffusion-based LLMs (dLLMs), such as LLaDA, have recently emerged as an al-ternative by formulating generation as iterative denoising and enabling semi-autoregressive block-wise decoding [22, 27, 28, 45, 58]. To scale model capacity, recent dLLMs fur-ther adopt mixture-of-experts (MoE) layers [5, 48, 67], whose large expert footprint makes full GPU residency difficult on memory-constrained devices. Expert offloading addresses arXiv:2609.33385v1 [cs.DC] 27 Sep 2026 EuroSys ’27, April 19–23, 2027, Rabat, Morocco Jingyuan Xiao et al. Iter i Iter 1    
+
+> ... ... Error
+> Iter 2
+> predict
+> Iter 3
+> predict
+> Iter i Iter j
+> GPU Task H2D (Compensate)
+> predict predict
+> Time Layer i Layer i+1
+> GPU Cache Utilization
+> H2D (Prefetch)
+> Layer i Layer i+1 Layer i+1 Layer i
+> （a） （b） （c）
+
+Figure 1. Expert offloading paradigms: (a) on-demand com-pensation, (b) intra-iteration prefetching, and (c) inter-iteration retention. this by caching only a subset of experts in GPU memory, while placing the rest in host memory for GPU transfer or CPU execution when activated. Existing MoE serving systems [4, 12, 20, 24, 53, 57] are primarily designed around AR decoding. In AR generation, each decoding iteration generates one token, producing a relatively small active expert set at each layer. This leaves enough intra-iteration slack for layer-wise prefetching: while computing the current layer, the system predicts and trans-fers experts needed by subsequent layers. Remaining misses are compensated through H2D transfers or CPU-side expert computation. These mechanisms work only when prefetch-ing and compensation can be hidden behind ongoing GPU computation. This latency-hiding premise breaks under MoE-based dLLM inference. In each denoising iteration, a dLLM routes a block of tokens through MoE layers, expanding the active expert working set by up to about 8 × compared with AR generation (§3.1). The larger working set creates two coupled bottle-necks: more experts must be fetched or executed within the same iteration, while delayed or mispredicted prefetches con-sume PCIe bandwidth and GPU cache space needed to com-pensate current misses. As a result, intra-iteration prefetch-ing often degenerates toward on-demand expert compen-sation, where H2D transfers and CPU compensation fall onto the critical path of decoding. Figure 1 contrasts these paradigms. Under this regime, offloading performance is dominated by how effectively the limited GPU expert cache avoids repeated misses. This cache-centric bottleneck motivates us to reframe dLLM expert scheduling from intra-iteration prefetching to inter-iteration expert retention. The opportunity comes from dLLM denoising itself: multiple iterations refine the same to-ken block, and their same-layer expert sets strongly overlap across adjacent iterations (§3.3). Moreover, high-confidence tokens tend to preserve more stable routes, making their activated experts more likely to be reused in the next iter-ation (§4.3). This confidence signal is already produced by dLLM denoising. Instead of launching additional prefetches, it allows the system to rank currently resident experts by their near-future reuse value. This makes it possible to pre-serve high-value resident experts for future reuse rather than repeatedly fetching large expert sets within an iteration. Based on this observation, we present OLED-MoE, an expert offloading system tailored to MoE-based dLLMs. The key challenge is to make inter-iteration locality actionable for cache retention and miss compensation under limited GPU memory. First, the system must translate set-level expert overlap into precise cache-retention decisions. Inter-iteration local-ity indicates that many experts are likely to be reused, but not which experts should be preserved under a limited GPU cache budget. A naive policy that retains recently activated experts can keep transient experts selected by unstable to-kens, while evicting experts more likely to reappear in the next denoising iteration. This is further complicated by a granularity mismatch: dLLM confidence is produced at the token level, whereas cache management retains or evicts whole experts under layer-specific cache budgets. Mean-while, heterogeneous activation and reuse patterns across layers make uniform cache allocation inefficient. OLED-MoE addresses this challenge by mapping token confidence and gate scores into expert-level retention priorities and using layer-adaptive cache allocation to preserve the most valuable working set for the next denoising iteration. Second, the system must compensate unavoidable cache misses without sacrificing future cache utility. Even with accurate reuse prediction, memory-constrained GPUs can-not retain all potentially activated experts, so missed experts must be either transferred to the GPU or executed on the CPU. A current-latency-only policy is insufficient: executing a high-reuse expert on the CPU may reduce current H2D traffic but cause repeated future misses, while transferring low-reuse experts may waste PCIe bandwidth and pollute the limited GPU cache. OLED-MoE addresses this trade-off with a dynamic load- and reuse-aware cooperative compensation engine that jointly considers dynamic expert load and pre-dicted future reuse, so compensation both resolves current misses and warms up the GPU cache for later iterations. In summary, we make the following contributions: 
+
+• We identify the mismatch between AR-oriented MoE offloading and MoE-based dLLM inference, showing that block-wise routing makes intra-iteration expert prefetching ineffective under dLLM workloads. OLED-MoE: Accelerating dLLM via Locality-Aware Expert Offloading EuroSys ’27, April 19–23, 2027, Rabat, Morocco 
+
+• We reveal inter-iteration expert locality in dLLMs and identify token confidence as a lightweight signal for expert reuse prediction. 
+
+• We design OLED-MoE, an expert offloading system that leverages inter-iteration locality for confidence-guided retention, layer-adaptive cache allocation, and load- and reuse-aware cooperative compensation. 
+
+• We implement and evaluate OLED-MoE across diverse dLLM workloads, reducing TPOT by 1.23 ×–7.93 × and improving expert cache utilization by 1.44 ×–4.23 ×
+
+over state-of-the-art offloading systems. 
+
+2 Background 
+
+2.1 Semi-Autoregressive MoE-based dLLMs Autoregressive MoE-based LLMs. Mixture-of-experts (MoE) architectures scale LLM capacity without a proportional in-crease in inference computation [2, 3, 30, 54, 59]. Instead of activating all parameters for every token, MoE models route each token to a sparse subset of expert networks, typically the top-𝑘 experts [40]. Traditional MoE-based LLMs follow autoregressive (AR) generation: after a compute-intensive prefill phase builds the prompt KV cache, decoding generates tokens one by one while reusing cached KV states [23, 55], as shown in Figure 2a. Because each decode iteration produces only one token, AR decoding exposes limited token-level par-allelism and makes request latency scale with the generated sequence length [13, 17]. 
+
+Fully-diffusion MoE-based dLLMs. Diffusion LLMs (dLLMs) have recently emerged as an alternative to AR generation [56, 66, 67], with recent variants also adopting MoE layers [67]. Instead of generating tokens left to right, fully-diffusion dLLMs perform iterative denoising. As shown in Figure 2b, generation starts from a masked response sequence; in each forward pass, or iteration , the model predicts all masked po-sitions in parallel, fixes high-confidence tokens, and refines uncertain tokens later [36]. This breaks AR’s strict sequen-tial dependency, but repeatedly processing the full sequence introduces substantial redundant computation. 
+
+Semi-AR MoE-based dLLMs. Semi-autoregressive (semi-AR) dLLMs balance diffusion parallelism and AR-style ef-ficiency, and they are the primary workload focus of this paper [2, 3]. As shown in Figure 2c, semi-AR dLLMs generate text block by block. Within each block, a diffusion process resolves multiple masked tokens in parallel; across blocks, generation proceeds autoregressively so that KV states of completed blocks can be reused. During prefill, the prompt and the first masked block initialize the KV cache. During decode, the block undergoes denoising iterations until all tokens are finalized; the completed block is committed to the KV cache, and the next masked block is appended. For consistency, we define an iteration as one forward pass through the model. Thus, an AR decode iteration processes Autoregressive LLM Inference Diffusion LLM Inference Semi-autoregressive dLLM Inference Token-by-token generation Multi-step parallel denoising Block generation with diffusion                     
+
+> t2KV prompt t1
+> tnKV prompt tn-1 ···
+> Prompt t1Prefill Decode Prefill Decode
+> (a) (b) (c)
+> Step 1 Step 2 Step T
+> ··· ···
+> Block 1
+> 0%
+> Prompt
+> Block 1
+> 20%
+> KV Prompt
+> Block 1
+> 100%
+> KV Prompt
+> KV Prompt Block 1
+> 100%
+> Block 2
+> 0%
+> ···
+> KV Prompt KV B1 Block n
+> 100% KV Bn-1 ···
+> KV Prompt KV B1
+> Block 2
+> 100%
+> KV Prompt KV B1
+> Block 2
+> 100%
+> Block 3
+> 0%
+> Block1
+> KV Prompt KV B1
+> Block 2
+> 30%
+> Block2
+> ··· ···
+> Step 3 Prompt Response 10%
+> Prompt Response 3%
+> Prompt Response 100%
+> Prompt Response 0%
+> t2KV prompt t3
+
+Figure 2. Comparison of three LLM decoding paradigms: (a) autoregressive decoding, (b) fully diffusion decoding, and (c) semi-autoregressive diffusion decoding. one newly generated token, whereas a semi-AR dLLM decode iteration processes a block of active masked tokens. 
+
+2.2 Expert Offloading 
+
+While sparse activation reduces per-token computation, the aggregate expert parameter footprint of MoE models ex-acerbates the GPU memory capacity wall. In recent large-scale MoE models, such as DeepSeek-style, Qwen-style, and LLaDA-style models [2, 31, 44], expert weights account for the dominant fraction of total parameters, often exceeding 90%. A common way to serve such models under strict GPU memory budgets is expert offloading : only a subset of experts is kept in GPU memory, while the rest reside in host CPU memory. We refer to the GPU-resident experts as the GPU expert cache . When an activated expert is absent from this cache, the system compensates the miss either by transfer-ring the expert weights to the GPU through host-to-device (H2D) communication or by executing the corresponding expert computation on the CPU [4, 12, 20, 24, 53, 57]. Existing expert offloading systems differ by where expert computation is performed. All-GPU execution keeps computa-tion on the GPU and uses H2D transfers for missing experts, while partial-CPU execution computes part of the activated experts on the CPU. As shown in Figure 3, all-GPU execu-tion further differs by prediction granularity: request-level caching or intra-iteration prefetching. 
+
+All-GPU execution. All-GPU systems keep expert compu-tation on the GPU and differ in when they predict expert demand. Systems such as SiDA [12] and MoE-Infinity [53] perform request-level caching: they estimate a coarse ex-pert working set for the request and populate the GPU ex-pert cache accordingly (Figure 3a). Systems such as Swap-MoE [24] and FineMoE [57] perform intra-iteration prefetch-ing: while the GPU computes the current layer, they pre-dict experts needed by subsequent layers and overlap H2D EuroSys ’27, April 19–23, 2027, Rabat, Morocco Jingyuan Xiao et al. Layer Layer Layer Layer Predict Prefetch Token Token       
+
+> jkLayer Layer Predict & prefetch Iteration iPrompt Layer Layer Layer Layer Layer GPU CPU
+> （a）
+> (b)
+> （c）
+
+Figure 3. Prior expert offloading paradigms: (a) request-level cache, (b) intra-iteration prefetch, (c) partial-CPU execution. GPQA GSM8K HumanEval 0.00 8.04 16.07 24.11 32.14      
+
+> Expert Activation(%)
+> 7.2x 8.2x 7.7x 22.6% 25.5% 24.2%
+> Token Block(16)
+
+(a) Expert activation footprint GPQA GSM8K HumanEval 0225M 451M 676M 902M FLOPs       
+
+> 16x 16x 16x
+> 805.31M 805.31M 805.31M
+> Token Block(16)
+
+(b) Expert FLOPs 
+
+Figure 4. Expert activation footprint and expert FLOPs of semi-AR dLLM decoding compared with AR decoding. Re-sults are measured on LLaDA2.0-mini with block length 16. transfers with current-layer computation (Figure 3b). These approaches rely on the premise that prediction and transfer latency can be hidden within the current iteration. 
+
+Partial-CPU execution. Partial-CPU systems reduce H2D traffic by executing part of the activated expert computation on the CPU. Systems such as KTransformers [4] and Fid-dler [20] use a split-expert mechanism: frequently used or performance-critical experts are placed on the GPU, while the remaining activated experts are computed on the CPU (Figure 3c). Unlike predictive prefetching systems, these ap-proaches do not rely on explicit expert activation prediction; instead, they exploit idle CPU resources to compensate GPU cache misses when PCIe bandwidth becomes a bottleneck. 
+
+Offloading decision dimensions. Prior systems make de-cisions either before decoding at the request level or within the current decoding iteration, which matches AR decoding where each iteration activates a small expert set. In §3.1, we show that semi-AR dLLMs break this assumption and motivate offloading decisions across denoising iterations. 
+
+3 Motivation 
+
+This section characterizes semi-AR dLLM workloads (§3.1), explains why existing offloading systems fail (§3.2), and iden-tifies inter-iteration expert locality as the key opportunity for efficient dLLM offloading (§3.3–§3.4). Cache=40 Cache=100 
+
+> 025 50 75 100
+> TPOT (ms)
+
+LLaDA2.0-mini 
+
+> Cache=40 Cache=100
+> 0500 1000 1500 2000
+
+LLaDA2.0-flash      
+
+> 050 100
+> Utilization (%)
+> KTransformers MoE-Infinity FineMoE Naive OLED-MoE Ideal Cache Bound Cache Util (%)
+
+Figure 5. TPOT and expert cache utilization of prior offload-ing systems under the same GPU expert-cache budget. 
+
+3.1 Workload Characteristics of MoE-based dLLMs 
+
+Block-wise decoding changes the granularity of MoE infer-ence in semi-AR dLLMs. In memory-constrained offloading scenarios dominated by single-request or small-batch decod-ing, AR decoding routes one generated token per request per iteration, whereas a semi-AR dLLM routes multiple block tokens through MoE layers. This increases both expert acti-vation footprint and expert computation volume. 
+
+Larger expert activation footprint. In AR decoding, each MoE layer only needs to access the top-𝑘 experts for one newly generated token per request. In contrast, semi-AR dLLMs route multiple active block tokens independently to their respective top-𝑘 experts. Although different tokens may share experts, their union remains substantially larger. As shown in Figure 4a, semi-AR dLLMs activate around 8 ×
+
+more experts per MoE layer per iteration than AR decoding under the same single-request setting. 
+
+Higher expert computation volume. Semi-AR dLLMs also increase expert computation because each MoE layer computes expert outputs for all active block tokens rather than one newly generated token. As shown in Figure 4b, semi-AR dLLMs incur around 16 × higher expert FLOPs per MoE layer per iteration than AR decoding. Overall, semi-AR dLLMs increase GPU cache pressure, H2D transfer demand, and CPU-side compensation cost, di-rectly challenging AR-oriented offloading systems. 
+
+3.2 Limitations of Prior Offloading Systems 
+
+To quantify the impact of these workload shifts, we evaluate three expert offloading systems: KTransformers [4], MoE-Infinity [53] and FineMoE [57]. They cover the paradigms introduced in §2.2: request-level GPU caching, intra-iteration GPU prefetching, and partial-CPU execution. We compare them under the same GPU expert-cache budget against two reference points: an ideal cache bound, which maximizes activated-expert residency under the same capacity, and a naive inter-iteration baseline that retains activated experts from the previous iteration. We report TPOT and expert cache utilization, defined as the fraction of GPU expert-cache capacity occupied by experts that are actually accessed. As shown in Figure 5, prior systems remain far from the ideal cache bound under dLLM workloads. MoE-Infinity, OLED-MoE: Accelerating dLLM via Locality-Aware Expert Offloading EuroSys ’27, April 19–23, 2027, Rabat, Morocco GPU GPU  
+
+> Latency surge
+> Compensate(CPU Compute)
+> GPU
+> Prefetch(L+1)
+> GPU
+> Prefetch(L+1) Prefetch(L+1)
+> Latency surge Compensate(H2D) Compensate(H2D)
+> token
+> block
+> More activated experts
+> token
+> block
+> More expert computation
+
+(a) Prefetch failure GPU GPU   
+
+> Latency surge
+> Compensate(CPU Compute)
+> GPU
+> Prefetch(L+1)
+> GPU
+> Prefetch(L+1) Prefetch(L+1)
+> Latency surge Compensate(H2D) Compensate(H2D)
+> token
+> block
+> More activated experts
+> token
+> block
+> More expert computation
+
+(b) CPU overload CPU GPU    
+
+> Iter T Iter T+1 Evict
+> Cached experts Offloaded experts
+> CPU
+> (b)
+> GPU Iter T Iter T+1
+> Load(H2D)
+> Evict
+> Activated experts Missed experts Incorrect Eviction Loss Reuse
+
+(c) Blind eviction CPU GPU    
+
+> Iter T Iter T+1 Evict
+> Cached experts Offloaded experts
+> CPU
+> (b)
+> GPU Iter T Iter T+1
+> Load(H2D)
+> Evict
+> Activated experts Missed experts Incorrect Eviction Loss Reuse
+
+(d) Blind placement 
+
+Figure 6. Failure patterns of prior expert offloading systems under MoE-based dLLM workloads: (a) exposed prefetch latency, (b) exposed CPU compensation latency, (c) locality-unaware eviction, and (d) reuse-agnostic placement. FineMoE, and KTransformers achieve TPOTs that are 1.70 ×–8.16 × the ideal value, while their expert cache utilization is lower by 17.5%–73.2%. These results show both expen-sive miss handling and poor GPU cache utilization. Since dLLM workloads leave little room for intra-iteration recov-ery, late prefetches and exposed miss compensation make performance depend heavily on the cache state before each layer executes. Thus, eviction or placement decisions that reduce cache utilization become as harmful as slow miss handling. We next analyze this cache-centric bottleneck in all-GPU and partial-CPU systems. 
+
+Reason #1: all-GPU offloading suffers from exposed prefetch latency and blind eviction. All-GPU offload-ing systems rely on prediction and prefetching to hide H2D transfer latency. This works for AR decoding because each request activates a small expert set, leaving room to transfer later-layer experts during current-layer computation. Un-der semi-AR dLLM decoding, each MoE layer must serve the aggregated expert demand of an entire block, quickly consuming PCIe bandwidth and leaving insufficient slack for intra-iteration prefetching. As illustrated in Figure 6a, prefetched experts often arrive too late, forcing missing ex-perts onto the critical path. This exposed prefetch latency makes cache eviction deci-sions more consequential. LRU/LFU-style policies only re-flect past accesses and cannot identify experts useful for future computation. Under dLLM block-wise routing, the en-larged active expert set quickly fills the GPU cache and trig-gers evictions. As illustrated in Figure 6c, useful experts may be evicted by transient current-iteration experts, causing repeated H2D transfers and lower effective cache utilization. 
+
+Reason #2: partial-CPU offloading suffers from en-larged compensation load and blind placement. Partial-CPU systems reduce H2D traffic by executing part of the activated expert computation on the CPU. This approach is effective when cache misses are sparse and CPU-side work-load remains small. In semi-AR dLLM inference, block-wise decoding increases expert FLOPs per iteration by an order of magnitude, so each miss can trigger much heavier CPU computation. As illustrated in Figure 6b, the latency of CPU-side expert execution is significantly amplified, substantially prolonging the decoding critical path. 1 2 3 4 5 6 7 8 9 10                      
+
+> Step Gap
+> 0.40 0.50 0.60 0.70 0.80 0.90 1.00
+> Cosine Similarity
+> Mini Flash RND SDAR
+> block-boundary transitions
+> 0.40 0.50 0.60 0.70 0.80 0.90
+> Expert Overlap Rate
+> 123456789 10
+> Step Gap
+> Mini Flash RND SDAR
+> GPQA GSM8K HumanEval GPQA GSM8K HumanEval GPQA GSM8K HumanEval GPQA GSM8K HumanEval
+
+Figure 7. Inter-iteration locality in dLLMs: the left shows hidden-state similarity across iteration gaps, the right shows expert routing overlap across iteration gaps and the middle shows expert routing overlap in block-boundary transitions. This exposed compensation cost makes CPU/GPU place-ment decisions more critical. Existing systems make this decision mainly from current H2D and CPU costs. This local cost model may keep useful experts on the CPU while trans-ferring low-value experts to the GPU, reducing future GPU cache utilization. As illustrated in Figure 6d, reuse-agnostic placement causes repeated CPU execution for valuable ex-perts and lets low-value experts occupy scarce GPU cache. Overall, these dLLM workloads leave little room for intra-iteration recovery. Once prefetching and compensation fall onto the critical path, offloading performance is dominated by cache utilization before each layer executes. This raises a key question: what information can identify useful experts before they are missed? 
+
+3.3 Insight: Inter-Iteration Expert Locality 
+
+The failure analysis above suggests that dLLM offloading needs reuse information beyond the current iteration. Semi-AR dLLMs provide such an opportunity because they refine the same block over multiple denoising iterations. During this process, block hidden states tend to evolve gradually rather than change abruptly. Since MoE gates compute rout-ing decisions from these hidden states, adjacent iterations are likely to preserve many activated experts. We quantify this temporal locality using LLaDA2.0-mini and LLaDA2.0-flash on GSM8K [11], HumanEval [8], and GPQA [38]. As shown in Figure 7, hidden states at corre-sponding layers remain highly similar between adjacent EuroSys ’27, April 19–23, 2027, Rabat, Morocco Jingyuan Xiao et al. 
+
+iterations, with cosine similarity reaching 98%. This con-tinuity translates into stable expert routing: Figure 7 shows that adjacent iterations share 85%–90% of activated experts across models and datasets, and even block-boundary transi-tions retain more than 65% overlap. The overlap gradually decreases as the iteration gap grows, indicating a practical temporal window for reuse prediction. Beyond the LLaDA family, SDAR [9] and RND1-Base [37] exhibit similar trends in hidden-state similarity and expert-routing overlap, sug-gesting that inter-iteration locality also exists across different dLLM model families. This observation provides the central insight: dLLM of-floading should exploit predictable inter-iteration expert lo-cality at the same layer to reserve limited GPU cache for high-value experts, rather than relying on congested intra-iteration prediction for subsequent layers. 
+
+3.4 Implications and Challenges 
+
+The strong inter-iteration locality identified in §3.3 suggests that dLLM offloading should exploit same-layer reuse across consecutive denoising iterations. However, turning this lo-cality into an efficient serving system raises two challenges. 
+
+Challenge #1: predicting reusable experts under lim-ited GPU cache. Adjacent iterations exhibit high expert-set overlap, but their active expert sets are not identical. Some experts persist across iterations, while others disappear as token states and routing decisions evolve. Simply retaining all recently accessed experts is therefore insufficient under tight GPU memory budgets: it may preserve transient ex-perts while evicting experts likely to be reused. An effective system must predict which experts remain useful for the same layer in future iterations and translate this prediction into cache-retention decisions. 
+
+Challenge #2: compensating misses without sacrificing future cache utility. Even with accurate prediction, cache misses cannot be eliminated because expert routing changes and GPU memory remains constrained. For each miss, the system must decide whether to fetch the expert to the GPU or execute it on the CPU. This decision should account for both immediate execution cost and future reuse probability: high-reuse experts can amortize transfer cost over future iterations, while low-reuse experts can be served on the CPU to avoid consuming PCIe bandwidth and GPU cache space. Efficient compensation therefore requires jointly optimizing current miss handling and future cache utility. These challenges motivate OLED-MoE’s temporal-locality-aware expert retention and dynamic load- and reuse-aware cooperative compensation in §4. 
+
+4 Design 
+
+4.1 System Overview 
+
+We present OLED-MoE, an inter-iteration locality-aware ex-pert offloading system that converts the temporal locality of MoE-based dLLMs into online cache-retention and miss-compensation decisions. Motivated by the cache-centric bot-tleneck identified in §3.2, OLED-MoE targets one central goal: improving the utilization of the limited GPU expert cache before each MoE layer executes. To this end, OLED-MoE maintains a layer-wise GPU expert cache. Each MoE layer owns an independent cache pool because reusable ex-pert locality in dLLMs primarily appears between the same layer across consecutive iterations. After a layer finishes execution, OLED-MoE updates its cache state to prepare for the same layer in the next iteration. As illustrated in Figure 8, OLED-MoE contains two tightly coupled components that operate along the MoE layer exe-cution path. At each layer, the MoE gate first produces the routed expert IDs, gate scores, and token confidence for the current block. The temporal-locality-aware retention mecha-nism maps these runtime signals to expert-level reuse prior-ities and adapts each layer’s cache capacity according to its activation demand and cache effectiveness. Cache-hit experts execute directly on the GPU, whereas the dynamic load- and reuse-aware compensation engine dispatches cache-missed experts to GPU transfer or CPU execution according to their current token loads and predicted reuse values. After execu-tion, GPU-transferred experts join the cache candidate set, and the retention rule keeps the highest-value candidates under the updated layer budget. The resulting cache state is then reused when the same layer executes in the next denois-ing iteration. This execution order couples prediction, miss compensation, and cache retention: transferring a missed ex-pert resolves its current computation and can simultaneously warm the cache for future reuse. 
+
+4.2 Problem Formulation 
+
+We formulate dLLM expert offloading as an online decision problem that couples current miss-compensation latency with future cache utility. An offline retention plan cannot determine these decisions in advance: the activated expert set depends on the input request and continues to evolve across denoising iterations as token states are refined. Offline profiling can characterize the hardware paths, but it cannot identify which experts are valuable for the current request and iteration. OLED-MoE therefore uses profiling only to establish a hardware-aware cost baseline and makes expert retention, cache allocation, and miss-compensation decisions online from the observed routing state. Consider MoE layer 𝑙 
+
+in denoising iteration 𝑖 . Let A𝑖 𝑙 denote the experts activated by the gate, and let R𝑖 𝑙 denote the experts resident in the GPU cache of layer 𝑙 before execution. Experts in A𝑖 𝑙 but absent from R𝑖 𝑙 become cache misses and require compensation. For each missed expert, the system must choose one of two compensation paths: transfer it to the GPU and compute it there, or execute it directly on the CPU. Let M𝑖 𝑙 denote the missed expert set, and let G𝑖 𝑙 ⊆ M 𝑖 𝑙 denote the missed OLED-MoE: Accelerating dLLM via Locality-Aware Expert Offloading EuroSys ’27, April 19–23, 2027, Rabat, Morocco t1 t2 t3 t4 
+
+> Block
+
+GPU E1 Layer i Layer j Layer k  
+
+> E2 E3 E1 E1 E2
+
+CPU Layer i Layer j Layer k         
+
+> E1 E2 E3 E4 E1 E2 E3 E4 E1 E2 E3 E4
+> MoE Layer
+> Temporal-locality-aware prediction mechanism
+> Layer-Adaptive Cache Sizing Cache size
+> Confidence-Based Expert Priority Mapping t1 t2 t3 t4
+> E1 E2 E3 E4
+> Router Confidence Priority Activation Ratio Routing Stability
+> Dual-aware cooperative compensation engine
+> Hardware-Aware CPU/GPU Split Dynamic Load- and Reuse-Aware Expert Dispatch High Priority Low Priority
+> Offline Modeling Missed Experts CPU PCIe
+> To-GPU On-CPU To-GPU On-CPU
+> On-CPU To-GPU Evict
+
+Figure 8. System Overview of OLED-MoE. experts selected for GPU transfer; the remaining experts are executed on the CPU. This decision affects the current layer latency because H2D transfer and CPU execution have different costs. It also affects future cache utility because only GPU-transferred experts can become resident cache candidates for later iterations. After layer execution, OLED-MoE updates the next-iteration cache state as: 
+
+R𝑖 +1 
+
+> 𝑙
+
+= Top 𝐶 𝑖 𝑙 
+
+
+
+R𝑖 𝑙 ∪ G 𝑖 𝑙 , 𝑝 𝑖 𝑒,𝑙 
+
+
+
+,
+
+where 𝐶 𝑖 𝑙 is the cache capacity of layer 𝑙 , 𝑝 𝑖 𝑒,𝑙 is the predicted reuse value of expert 𝑒 , and Top 𝐶 𝑖 𝑙 
+
+(·) keeps the 𝐶 𝑖 𝑙 highest-value experts. This rule captures an important coupling: transferring an expert to the GPU is not only a current miss-compensation decision, but also a potential cache warm-up decision for the next iteration. Ideally, the system should minimize the current compensa-tion latency while preserving experts with high reuse value: min  
+
+> G𝑖 𝑙 ⊆ M 𝑖 𝑙
+
+𝑇 𝑖,𝑙  
+
+> comp
+
+− 𝜆 ∑︁  
+
+> 𝑒 ∈ R 𝑖 +1
+> 𝑙
+
+𝑝 𝑖 𝑒,𝑙 .
+
+Here, 𝑇 𝑖,𝑙  
+
+> comp
+
+is the miss-compensation time of layer 𝑙 , and 
+
+𝜆 conceptually represents the trade-off between current la-tency and future cache utility rather than a runtime param-eter. To solve this problem, OLED-MoE decomposes it into two lightweight online decisions: temporal-locality-aware retention estimates 𝑝 𝑖 𝑒,𝑙 and 𝐶 𝑖 𝑙 , while the dynamic load- and reuse-aware compensation engine chooses G𝑖 𝑙 using dynamic expert load and predicted reuse value. 
+
+4.3 Temporal-Locality-Aware Expert Retention Insight and approach. The insight (§3.3) suggests that the GPU cache should retain experts for reuse by the same layer in future iterations. However, directly exploiting this locality is non-trivial. The overlap is high but not perfect: some experts persist across iterations, while others are activated only transiently as token states evolve during denoising. Under a limited GPU cache budget, simply retaining recently activated experts, or evicting experts with LRU/LFU, cannot distinguish persistent experts from transient ones. Therefore, OLED-MoE must answer two retention questions: which 
+
+experts are more likely to be reused by the same layer in the next iteration, and how much cache capacity each layer should receive. OLED-MoE addresses the first question with confidence- and gate-guided expert priorities, and the second with layer-adaptive cache sizing. 
+
+From token stability to expert priority. During each iter-ation, the model assigns confidence scores to token predic-tions. These confidence scores are already part of the dLLM decoding algorithm and indicate whether a token prediction is stable enough to be accepted or should continue being refined. This makes token confidence a useful lightweight proxy for routing stability. If a token has high confidence, its hidden state tends to change less in the next denoising iteration, and the MoE gate is more likely to route it to the same experts. Conversely, low-confidence tokens are still unstable and may change their routing decisions. This finding bridges the gap between the inter-iteration overlap measured in §3.3 and an actionable cache policy. In-stead of treating all activated experts equally, OLED-MoE prioritizes experts selected by stable tokens. As shown in Figure 10a and Figure 10b, token confidence is strongly cor-related with expert routing stability: high-confidence token groups are more concentrated in high-stability ranges. This provides a lightweight reuse signal without adding a separate predictor or extra model execution. The current routing observations already capture the infor-mation used by conventional cache policies: updating only experts activated in the current iteration reflects recency, while aggregating their gate scores across routed tokens captures activation frequency and routing strength. How-ever, these signals cannot distinguish persistent experts from those activated transiently during denoising. OLED-MoE therefore introduces token confidence as an inter-iteration signal. As shown in Figure 9, token confidence character-izes how likely each token’s route is to persist into the next iteration and is used to weight the current routing informa-tion, thereby adding temporal stability beyond LRU- and LFU-style policies. Formally, let 𝑐 𝑖 𝑡 denote the confidence of token 𝑡 in itera-tion 𝑖 , and let 𝑔 𝑖 𝑡,𝑒,𝑙 denote the gate score of routing token 𝑡 
+
+to expert 𝑒 at layer 𝑙 . Let T 𝑖 𝑒,𝑙 be the set of tokens routed to expert 𝑒 , and let E𝑙 be the expert set of layer 𝑙 . OLED-MoE EuroSys ’27, April 19–23, 2027, Rabat, Morocco Jingyuan Xiao et al. E1 E2 E3 E4 T1 T2 Confidence 0.8 0.4 Cache Evict Evict 
+
+> p1=0.333 p2=0.100 p3=0.567 p4=0.000
+> E1 E2 E3 E4 gate_score
+> 0.5 0.5 0.3 0.7
+
+Figure 9. Expert priority mapping from token confidence and gate scores to cache-retention priorities. computes the expert reuse priority as: 
+
+𝑝 𝑖 𝑒,𝑙 =
+
+Í𝑡 ∈ T 𝑖 𝑒,𝑙 𝑔 𝑖 𝑡,𝑒,𝑙 · 𝜓 (𝑐 𝑖 𝑡 )
+
+Í𝑒 ′ ∈ E 𝑙 
+
+Í𝑡 ∈ T 𝑖 𝑒 ′,𝑙 
+
+𝑔 𝑖 𝑡,𝑒 ′,𝑙 · 𝜓 (𝑐 𝑖 𝑡 ) ,
+
+where 𝜓 (·) is a monotonically increasing function, with 
+
+𝜓 (𝑐 ) = 𝑐 by default. The numerator aggregates activation frequency and routing strength, while confidence weighting favors routes likely to persist across iterations. The denomi-nator normalizes priorities within each layer and iteration. After each layer execution, OLED-MoE updates the prior-ities of experts observed at that layer and evicts low-priority experts if the layer cache exceeds its capacity. For experts that were resident in the GPU cache but are not activated in the current iteration, OLED-MoE sets their priorities to zero. This prevents stale experts from occupying cache space when they are no longer selected by the current denoising trajectory. The priority update uses routing metadata already produced by the MoE gate, so it incurs minimal extra com-putation. 
+
+From expert priority to layer-adaptive cache sizing. The priority rule above uses inter-iteration information to deter-mine which experts are more valuable within each layer, but it assumes that each layer has an appropriate cache budget. Inter-iteration locality also provides a signal at the layer level. As consecutive denoising iterations repeatedly process the same block, the activation demand of each layer evolves rel-atively stably while remaining heterogeneous across layers. Therefore, the recently observed layer activation state can guide cache allocation for subsequent iterations. As shown in Figure 10c, LLaDA2.0-mini and LLaDA2.0-flash exhibit clearly different activation ratios across layers. A uniform per-layer partition ignores this persistent layer heterogene-ity and may allocate the limited cache capacity to layers that need it less. This layer heterogeneity becomes more important when applying inter-iteration retention. Different layers vary in both activation demand and the effectiveness of their re-tained cache entries. Activation ratio alone captures how much cache a layer may need, but does not indicate whether its cached experts are likely to be useful. Conversely, cache utilization alone may favor layers with small activation foot-prints despite their limited demand. OLED-MoE therefore combines the two signals to allocate cache toward layers that exhibit both high activation demand and effective ex-pert reuse. OLED-MoE adjusts layer cache sizes using lightweight runtime statistics accumulated over recent denoising itera-tions. These statistics capture both the activation demand and cache effectiveness of each layer across iterations. Let 
+
+𝑎 𝑙 denote the smoothed activation ratio of layer 𝑙 , and let 
+
+𝑢 𝑙 denote its smoothed expert cache utilization. OLED-MoE computes the layer weight as: 
+
+𝑤 𝑙 = 𝑎 𝑙 𝑢 𝑙 .
+
+The activation ratio assigns more weight to layers with larger active expert working sets, while cache utilization favors layers whose retained experts are more frequently activated. Their product prevents the allocation from being dominated by either demand or utilization alone. Given the layer weights, OLED-MoE assigns the total expert-cache capacity through normalized proportional allo-cation: 
+
+𝐶 𝑙 = 𝐶 total · 𝑤 𝑙 
+
+Í𝑗 𝑤 𝑗 
+
+.
+
+The updated capacity is enforced by the confidence- and gate-guided retention rule after layer execution. In practice, cache sizes are updated every five denoising iterations using smoothed runtime statistics, filtering transient fluctuations while limiting scheduling overhead. 
+
+4.4 Dynamic Load- and Reuse-Aware Cooperative Compensation Insight and approach. Temporal-locality-aware retention reduces cache misses, but cannot eliminate them because expert routing still changes across denoising iterations and the GPU cache may be smaller than the active expert working set. OLED-MoE must therefore compensate the remaining missed experts through either H2D transfer followed by GPU execution or direct CPU execution. A load-aware split can balance the current CPU and H2D workloads, but it considers only the current iteration. The compensation decision also affects subsequent iterations: a missed expert transferred to the GPU becomes a cache candidate, whereas a CPU-executed expert does not. To incorporate inter-iteration information into this de-cision, OLED-MoE reuses the expert priority computed by the retention mechanism as an estimate of future reuse. A missed expert with high reuse priority is more valuable to transfer because it can serve the current iteration and may be reused from the GPU cache in the next iteration. In contrast, a low-priority expert can be executed on the CPU without consuming H2D bandwidth or occupying the cache. OLED-MoE therefore combines the current expert load with the OLED-MoE: Accelerating dLLM via Locality-Aware Expert Offloading EuroSys ’27, April 19–23, 2027, Rabat, Morocco 0.1 0.3 0.5 0.7 0.9 Token Confidence 0.3 0.4 0.5 0.6 0.7 0.8 Routing Stability 
+
+> mini-GSM8K mini-HumanEval mini-GPQA flash-GSM8K flash-HumanEval flash-GPQA
+
+(a) 0.05 0.15 0.25 0.35 0.45 0.55 0.65 0.75 0.85 0.95                                                                                   
+
+> Token Confidence
+> 1.000 0.875 0.750 0.625 0.500 0.375 0.250 0.125 0.000
+> Routing Stability
+> 0.13 0.12 0.16 0.21 0.25 0.30 0.34 0.36 0.39 0.42 0.20 0.19 0.19 0.22 0.20 0.23 0.23 0.24 0.24 0.25 0.14 0.16 0.16 0.14 0.14 0.13 0.12 0.12 0.11 0.10 0.11 0.13 0.14 0.13 0.12 0.10 0.09 0.08 0.08 0.07 0.10 0.10 0.11 0.11 0.10 0.08 0.06 0.06 0.06 0.05 0.10 0.10 0.09 0.08 0.07 0.06 0.06 0.05 0.04 0.04 0.10 0.09 0.07 0.06 0.06 0.05 0.05 0.04 0.04 0.03 0.07 0.07 0.05 0.04 0.04 0.04 0.03 0.03 0.02 0.02 0.05 0.04 0.04 0.02 0.02 0.02 0.02 0.02 0.02 0.01 0.0 0.1 0.2 0.3 0.4 0.5
+> Fraction
+
+(b) 1 5 10 15 20 25 31 Layer 00.1 0.2 0.3 0.4 0.5 Ratio 
+
+mini flash (c) 
+
+Figure 10. Design signals used by OLED-MoE: (a) token confidence and routing stability, (b) confidence-stability distribution, and (c) layer-wise activation ratios. inter-iteration reuse priority: the former balances the im-mediate CPU and H2D costs, while the latter directs GPU transfers toward experts with greater near-term reuse value. 
+
+Hardware-aware baseline split. Before making per-expert decisions, OLED-MoE derives a hardware-aware baseline split from offline profiling. This baseline captures the relative speed of the H2D transfer path and the CPU execution path, preventing the dispatcher from overloading either side. Let 𝑇 H2D denote the profiled latency of transferring one expert from host memory to GPU memory. Let 𝜏 CPU be the CPU latency of computing one expert for one token, and let ¯ 𝑛 
+
+be the profiled average number of routed tokens per missed expert. The average CPU compensation cost per missed ex-pert is ¯ 𝑛𝜏 CPU . OLED-MoE sets the baseline fraction of missed experts assigned to GPU transfer as: 
+
+𝜌 = ¯𝑛𝜏 CPU 
+
+¯𝑛𝜏 CPU + 𝑇 H2D 
+
+.
+
+A larger CPU cost increases 𝜌 , assigning more missed experts to GPU transfer; a larger H2D cost decreases 𝜌 , assigning more missed experts to CPU execution. This ratio is only a starting point: runtime dispatch further adjusts the decision according to each expert’s token load and reuse value. 
+
+Dynamic load- and reuse-aware dispatch. At runtime, cache-missed experts can differ significantly in both compu-tation load and future value. Let M𝑖 𝑙 be the missed expert set and G𝑖 𝑙 be the subset selected for GPU transfer. OLED-MoE uses the following objective to guide dispatch: 
+
+𝐽 (G 𝑖 𝑙 ) = 𝑇 𝑖,𝑙 
+
+comp − 𝜆 ∑︁ 
+
+𝑒 ∈ G 𝑖 𝑙 
+
+𝑝 𝑖 𝑒,𝑙 .
+
+The first term captures the current-iteration compensation cost using the H2D transfer time, CPU execution time, and token load of each missed expert. The second term intro-duces inter-iteration information through the reuse priority produced by the retention mechanism. Since only transferred experts can become GPU-cache candidates for subsequent iterations, this term favors transferring missed experts that are more likely to be reused in the near future. Directly minimizing this objective by enumerating all GPU/CPU partitions is too expensive in the decoding loop. 0.25 30.20 20.15 30.10 20.08 10.07 30.04 20.03 20.02 10.06 3   
+
+> Miss Experts Priority and Load
+> 0.25 30.02 1
+> 𝐀 Latency=6
+> 0.20 20.15 30.10 20.08 10.07 30.04 20.03 20.06 3
+> Priority=0.78 Latency=5 Priority=0.22 Latency=11
+> 𝐀 -4
+> 𝐀 -2
+> ①②
+> To-GPU On-CPU
+> 0.04 20.03 20.02 10.20 20.15 30.10 20.07 30.06 3
+> Priority=0.83 Latency=6 Priority=0.17 Latency=6 To-GPU On-CPU
+> 0.25 30.08 1
+
+Figure 11. Dynamic load- and reuse-aware dispatch: high-reuse experts are transferred first, then bounded swaps bal-ance CPU/GPU latency. As illustrated in Figure 11, OLED-MoE therefore uses a two-stage heuristic that separates load balancing from reuse-aware refinement. First, it uses the hardware-aware ratio 𝜌 
+
+to bound the number of GPU transfers and selects approxi-mately 𝜌 |M 𝑖 𝑙 | high-priority experts. This prevents either the CPU path or the H2D path from being overloaded while ini-tializing the GPU-transfer set with experts likely to produce future cache hits. Second, OLED-MoE performs bounded swaps between the GPU-transfer and CPU-execution sets. A swap is accepted only when it improves the estimated ob-jective without moving the partition far from the hardware-aware split. The first stage preserves the current CPU/GPU load balance, while the second improves the future value of the same transfer budget; together, they avoid both load-only placement and a search over all partitions. 
+
+4.5 Implementation 
+
+We implement OLED-MoE on top of dInfer v0.1 [34] and use vLLM v0.10.2 [25] as the generation backend. Instead of modifying the monolithic C++ inference engine, OLED-MoE adopts a minimally intrusive Python-level hook architec-ture. The hooks are injected into MoE layer definitions to intercept gating outputs, including routed expert IDs, gate scores, and token confidence. These metadata are sufficient for OLED-MoE to update expert priorities, dispatch cache-missed experts, and manage layer-wise cache pools. EuroSys ’27, April 19–23, 2027, Rabat, Morocco Jingyuan Xiao et al. 025 50 75 100 125 150       
+
+> TPOT (ms)
+> LLaDA2.0-mini  GSM8K Cache=40 GPQA Cache=40 HumanEval Cache=40 GSM8K Cache=100 GPQA Cache=100 HumanEval Cache=100
+> 0570 1140 1710 2280 2850
+> TPOT (ms)
+> LLaDA2.0-flash  GSM8K Cache=40 GPQA Cache=40 HumanEval Cache=40 GSM8K Cache=100 GPQA Cache=100 HumanEval Cache=100
+> 0% 20% 40% 60% 80% 100%
+> Cache Util (%)
+> 0% 20% 40% 60% 80% 100%
+> Cache Util (%) KTransformers MoE-Infinity FineMoE Naive OLED-MoE Ideal Cache Bound Cache Util (%)
+
+Figure 12. Average TPOT and expert cache utilization of OLED-MoE and baseline systems. 20 40 60 80 100 120 050 100      
+
+> TPOT (ms/token)  LLaDA2.0-mini
+> +1.93% +6.28% +10.26% +5.86% +3.94% +2.08%
+> 20 40 60 80 100 120 0500 1000
+> LLaDA2.0-flash
+> +4.54% +11.76% +15.22% +10.01% +8.98% +4.70%
+> 0% 25% 50% 75% 100% 0% 25% 50% 75% 100%
+> Cache Util (%) Cache
+> TPOT (OLED-MoE) TPOT (Ideal Cache Bound) Cache Util (OLED-MoE) Cache Util (Ideal Cache Bound)
+
+Figure 13. Gap between OLED-MoE and the ideal cache bound across expert-cache capacities. 
+
+5 Evaluation 
+
+Our evaluation compares OLED-MoE with prior offloading systems in TPOT and expert cache utilization, characterizes its prefill performance through TTFT, analyzes the contri-bution of each major component, and studies sensitivity to cache capacity, PCIe bandwidth, batch size, and block length. 
+
+5.1 Experimental Setup Testbed. We evaluate OLED-MoE on two GPU configu-rations targeting different model scales and memory con-straints. Configuration A targets 16B models and uses an NVIDIA GeForce RTX 5090 with 32GB GPU memory. Con-figuration B targets 100B models and uses an NVIDIA RTX PRO 6000 with 96GB GPU memory. Both use PCIe 5.0 ×16, an Intel Xeon Platinum 8470Q CPU with 25 dedicated cores, CUDA 12.8, and PyTorch 2.8.0. Host memory is 90GB and 240GB for Configurations A and B, respectively. 
+
+Models and datasets. We use two MoE-based semi-AR dLLMs for the main experiments. LLaDA2.0-mini contains 16B parameters, 20 MoE layers, and 256 experts per layer with top-𝑘 =8. LLaDA2.0-flash contains 100B parameters, 32 MoE layers, and 256 experts per layer with top-𝑘 =8. Both use block-wise semi-autoregressive generation. We evaluate GSM8K [11], HumanEval [8], and GPQA [38]. Unless oth-erwise stated, we use batch size 1, block length 16, and a maximum output length of 1,024 tokens. For mixed-workload experiments, we uniformly sample requests from the three FineMoE OLED-MoE FineMoE OLED-MoE FineMoE OLED-MoE           
+
+> 0.0 0.2 0.4 0.6 0.8 1.0 1.2
+> TTFT (s)
+> 0.40 0.39
+> 512
+> 0.49 0.47
+> 1k
+> 0.63 0.70
+> 2k
+> LLaDA2.0-mini
+> FineMoE OLED-MoE FineMoE OLED-MoE FineMoE OLED-MoE
+> 0123456
+> 2.87 2.80
+> 512
+> 3.24 3.29
+> 1k
+> 3.59 3.65
+> 2k
+> LLaDA2.0-flash
+> 78.95% 86.70% 93.65%
+> 0% 25% 50% 75% 100%
+> Active experts (%)
+> 81.99% 87.95% 91.57%
+> Input length (tokens)
+> Attention Cache-hit GPU Compensation (H2D + compute) Other Expert activation ratio (%)
+
+Figure 14. Prefill latency breakdown of OLED-MoE and FineMoE with cache=100. datasets and report the mean. We also report OLED-MoE’s TPOT on LLaDA2.1-mini and LLaDA2.1-flash under cache sizes 40 and 100 to test generalization across model versions. 
+
+Baselines. We compare OLED-MoE with three representa-tive expert offloading policies. Since existing systems tar-get autoregressive MoE inference and do not directly sup-port semi-autoregressive dLLM execution, we port their core mechanisms into dInfer [34] using the same backend, GPU expert-cache capacity, CPU worker configuration, and H2D transfer implementation. This isolates the effects of offload-ing policies from backend differences. MoE-Infinity [53] represents request-level expert caching, FineMoE [57] represents intra-iteration later-layer expert prediction and prefetching, and KTransformers [4] repre-sents partial-CPU expert execution. We also include Naive-LRU, which maintains an inter-iteration expert cache with LRU replacement, and the ideal cache bound, a clairvoyant upper bound that uses perfect knowledge of the activated experts to maximize the number of activated experts already resident in the GPU cache before each layer executes, subject to the same expert-cache capacity. The ideal cache bound is not a deployable policy and is used only to quantify the best achievable cache effectiveness under the same capacity constraint. 
+
+Metrics. Our primary latency metric is time per output token (TPOT), measured during decode. Throughout the evaluation, Cache denotes the expert-cache capacity, defined OLED-MoE: Accelerating dLLM via Locality-Aware Expert Offloading EuroSys ’27, April 19–23, 2027, Rabat, Morocco Cache=40 Cache=100     
+
+> 020 40 60 80 100
+> Latency (ms)
+> LLaDA2.0-mini
+> Cache=40 Cache=100
+> 0200 400 600 800
+> Latency (ms)
+> LLaDA2.0-flash
+> Naive (LRU) +Priority +LayerAdapt +Coop
+
+(a) 025 50 75 100   
+
+> 20 40 60 80 100 120
+> Cache
+> 025 50 75 100
+> 20 40 60 80 100 120
+> Cache
+> 025 50 75 100
+> 20 40 60 80 100 120
+> Cache
+> 025 50 75 100
+> LLaDA2.0 mini LLaDA2.0 flash
+> Cache Util (%) Effective transfer (%)
+> LFU LRU Priority Uniform LayerAdapt Load-only Load+Reuse
+
+(b) 
+
+Figure 15. Ablation analysis of OLED-MoE: (a) incremental TPOT reduction from the three design components; (b) detailed comparisons of components. as the average number of experts that can reside in GPU memory per MoE layer. We quantify cache effectiveness using expert cache utilization, defined as the fraction of GPU-resident expert-cache slots occupied by experts activated in the corresponding layer execution before miss compensation is triggered. We compute expert cache utilization for each MoE layer and report the average across layers, decoding iterations, and requests. We also report time to first token (TTFT) to characterize prefill performance, although prefill is not the optimization target of OLED-MoE. 
+
+Measurement protocol. OLED-MoE is a lossless system optimization: it changes only expert placement and miss handling, without modifying model computation, routing decisions, or generated outputs. Before collecting measure-ments, we warm up the expert cache once using dummy requests to exclude cold-start effects from the reported re-sults. We repeat each experiment three times and report the mean. 
+
+5.2 Overall Performance Overall results. We first evaluate the end-to-end decoding performance of OLED-MoE against prior expert offloading baselines. Figure 12 reports the average TPOT and expert cache utilization across LLaDA2.0-mini and LLaDA2.0-flash on GSM8K, GPQA, and HumanEval. We evaluate two cache budgets, 40 and 100, denoting the average number of experts cached per layer. Since LLaDA2.0-mini and LLaDA2.0-flash activate about 60 and 90 experts per layer on average, re-spectively (Figure 10c), cache size 40 represents a memory-constrained setting, whereas cache size 100 represents a relatively relaxed setting. Overall, OLED-MoE consistently achieves the lowest TPOT among all practical systems and approaches the ideal cache bound. Compared with the strongest traditional baseline, OLED-MoE reduces TPOT by 1.95 × on average and up to 3.73 × across all settings. This latency improvement is ac-companied by higher expert cache utilization: OLED-MoE improves utilization from 51.5% to 77.7% on average, cor-responding to a 26.2 percentage-point increase over the strongest baseline. These results confirm that OLED-MoE improves decoding performance primarily by making the limited GPU expert cache more useful. By retaining experts that are likely to be reused across denoising iterations, OLED-MoE avoids repeated CPU-GPU expert transfers and reduces miss-induced stalls on the decoding critical path. The benefit of OLED-MoE is more pronounced when ex-pert misses are more expensive. On LLaDA2.0-flash, OLED-MoE achieves an average TPOT reduction of 4.55 ×, com-pared with 1.64 × on LLaDA2.0-mini. This is because each expert miss in the larger model incurs higher transfer and stall cost. The latency variation across datasets mainly stems from differences in the average number of tokens the model can decode per iteration. 
+
+Gap to the ideal cache bound. We further compare OLED-MoE with the ideal cache bound defined in §5.1. As shown in Figure 13, the TPOT of OLED-MoE is only 1.93%–15.22% higher than the bound across the evaluated expert-cache capacities. At intermediate capacities, the expert-cache ca-pacity is comparable to the number of activated experts, making performance particularly sensitive to which experts are retained. Consequently, the prediction errors introduced when OLED-MoE estimates future expert reuse from the cur-rently observed routing information and token confidence become more visible. At very small capacities, both systems are severely capacity-constrained, whereas at large capaci-ties, OLED-MoE can retain most reusable experts; the gap therefore narrows in both cases. Overall, OLED-MoE cap-tures most of the performance benefit achievable through expert caching under the same capacity constraint. 
+
+Prefill performance. OLED-MoE targets repeated denois-ing iterations during decode rather than prefill, which occurs only once per request. As shown in Figure 14, long prefill sequences activate a large fraction of experts. Consequently, both OLED-MoE and FineMoE naturally achieve high ex-pert cache utilization without specialized cache-management policies. Miss compensation remains the dominant compo-nent of TTFT, comprising the H2D transfer and computation of cache-missed experts. EuroSys ’27, April 19–23, 2027, Rabat, Morocco Jingyuan Xiao et al. 1 2 4 8 16 32      
+
+> Batch size (BS)
+> 0200 400 600
+> TPOT (ms)
+> LLaDA2.0-mini
+> 124816 32
+> Batch size (BS)
+> 02000 4000 6000
+> LLaDA2.0-flash
+> 0% 25% 50% 75% 100% 0% 25% 50% 75% 100%
+> Ratio (%)
+> TPOT (Cache=40) TPOT (Cache=100) Cache Util (Cache=40) Cache Util (Cache=100) Expert activation
+
+(a) 1 2 4 8 16 32 64        
+
+> Block length
+> 025 50 75 100
+> TPOT (ms)
+> LLaDA2.0-mini
+> 124816 32 64
+> Block length
+> 0200 400 600
+> LLaDA2.0-flash
+> Cache=10 Cache=80 Cache=160 Cache=20 Cache=100 Cache=180 Cache=40 Cache=120 Cache=200 Cache=60 Cache=140 Minimum
+
+(b) 
+
+Figure 16. Effects of decoding configurations on expert offloading: (a) TPOT, expert activation ratio, and expert cache utilization of OLED-MoE across batch sizes; (b) TPOT of OLED-MoE across block lengths and expert-cache capacities, with circles marking the minimum TPOT under each capacity. 20 30 40 50 60 70 80 90 100 256 
+
+Cache Size 
+
+> 10 1
+> 10 2
+> 10 3
+> TPOT (ms)  LLaDA2.0-mini LLaDA2.0-flash
+
+(a) 16 32 64 128 
+
+PCIE (GB/s)  
+
+> 10 1
+> 10 2
+> 10 3
+> 10 4
+> TPOT (ms)  mini C40 mini C100 flash C40 flash C100
+
+(b) 
+
+Figure 17. Sensitivity of OLED-MoE to (a) GPU expert-cache budget and (b) PCIe bandwidth. 
+
+5.3 Ablation Study Performance breakdown. We conduct an ablation study to quantify the contribution of each major component in OLED-MoE. Starting from a simple inter-iteration caching baseline, we incrementally enable the proposed modules and measure the resulting TPOT. The evaluation uses a mixed workload sampled from GSM8K, HumanEval, and GPQA, with the block length fixed to 16. We evaluate LLaDA2.0-mini and LLaDA2.0-flash with average per-layer expert-cache capacities of 40 and 100. As shown in Figure 15a, each component further reduces TPOT. On average, +Priority , +LayerAdapt , and +Coop pro-vide additional TPOT reductions of 20.56%, 9.09%, and 9.14%, respectively. Compared with Naive-LRU , the full system re-duces TPOT by 53.7% at Cache=40, versus 34.5% at Cache=100, and by 50.5% on LLaDA2.0-flash, versus 37.8% on LLaDA2.0-mini. These results show that all components contribute to the end-to-end performance improvement, particularly when cache misses are more frequent or more expensive. 
+
+Mechanism-level analysis. Since Priority and LayerAdapt are designed to improve the effectiveness of the limited ex-pert cache, we further compare their expert cache utilization with alternative policies. For Coop, we evaluate whether reuse-aware dispatch improves the effectiveness of H2D Cache=40 Cache=100 
+
+> 0100 200 300
+> TPOT (ms)
+> 2.1-mini 2.0-mini 2.1-flash 2.0-flash
+
+(a) Cache=40 Cache=100 Cache=40 Cache=100 0246    
+
+> Policy overhead (ms)  LLaDA2.0-mini LLaDA2.0-flash
+> 3.70 ms
+> Forward 0.105 s
+> 3.69 ms
+> Forward 0.081 s
+> 6.03 ms
+> Forward 1.022 s
+> 5.75 ms
+> Forward 0.530 s 2.14% 0.45% 0.93% 2.79% 0.55% 1.19% 0.32% 0.11% 0.16% 0.63% 0.19% 0.26%
+> Priority LayerAdapt CPU split decision
+
+(b) 
+
+Figure 18. Generality and runtime overhead of OLED-MoE: (a) TPOT on LLaDA2.0 and LLaDA2.1 under cache sizes 40 and 100; (b) policy overhead per forward. transfers. We define the effective transfer ratio as the frac-tion of H2D-transferred experts that are retained in the GPU cache and reused in the next denoising iteration. The first column of Figure 15b compares Priority with LRU and LFU. At small expert-cache capacities, Priority achieves higher expert cache utilization than LRU and LFU because it weights the current routing information with token confi-dence, thereby better capturing inter-iteration routing stabil-ity and retaining experts that are more likely to be reused. As the cache capacity increases, the cache can retain a broader set of experts. Experts retained without accurate prioriti-zation may also produce incidental cache hits, causing the utilization gap between Priority and the two baselines to gradually narrow. The second column compares LayerAdapt with uniform cache allocation. LayerAdapt provides the clearest improve-ment when the average per-layer cache capacity is compa-rable to the number of activated experts. In this regime, the total cache capacity can cover a substantial portion of the active expert working sets, making demand-aware alloca-tion across heterogeneous layers more effective. When the cache capacity is severely constrained, both policies are sub-ject to similar capacity limitations. When the capacity is relatively ample, both can retain most useful experts. Their expert cache utilization therefore becomes closer in these two regimes. OLED-MoE: Accelerating dLLM via Locality-Aware Expert Offloading EuroSys ’27, April 19–23, 2027, Rabat, Morocco 
+
+Finally, the third column compares load- and reuse-aware dispatch with load-only dispatch. Incorporating expert reuse priority consistently increases the effective transfer ratio, in-dicating that a larger fraction of H2D-transferred experts are retained in the GPU cache and reused in the next denoising iteration. Therefore, reuse-aware dispatch not only balances the current workloads between the CPU and H2D paths, but also directs the limited transfer budget toward experts with greater near-term reuse value. 
+
+5.4 Sensitivity and Overhead Scaling with batch size. We evaluate OLED-MoE across batch sizes from 1 to 32 under expert-cache capacities of 40 and 100 experts per layer. As shown in Figure 16a, in-creasing the batch size increases the number of concurrently processed tokens and enlarges the union of activated ex-perts. Consequently, the expert activation ratio increases and the expert-level sparsity of the MoE model gradually decreases. Meanwhile, expert cache utilization approaches saturation because a large fraction of the cached experts are activated at larger batch sizes. Although a larger cache capacity continues to reduce TPOT, the increasing expert activation footprint narrows the headroom for expert-cache management. These results show that expert offloading is most effective for single-request and small-batch serving, where the active expert working set remains sufficiently sparse for selective cache retention. 
+
+Cache-dependent block length. Block length creates a trade-off between decoding parallelism and expert-offloading efficiency. A larger block processes more tokens per forward pass, but it also activates a larger expert working set and increases pressure on the limited GPU expert cache. We eval-uate block lengths from 1 to 64 across a broad range of cache capacities. Block length 1 provides an AR-style token-by-token execution reference under the same model, hardware, and memory constraints, while larger block lengths progres-sively expose the parallelism of semi-autoregressive decod-ing. As shown in Figure 16b, block length 1 incurs higher TPOT than the best semi-autoregressive configuration across the evaluated cache capacities, but the TPOT-minimizing block length shifts with the available cache. Smaller blocks are preferred under tight cache budgets, whereas larger caches can support longer blocks before their expanded ex-pert working sets dominate offloading cost. These results show that semi-autoregressive execution can outperform the AR-style reference under the same system constraints, while its block length should be selected jointly with the available expert-cache capacity. 
+
+Impact of cache capacity. We evaluate OLED-MoE un-der different expert-cache capacities on LLaDA2.0-mini and LLaDA2.0-flash, and include Cache=256 as the full-residency bound. As shown in Figure 17a, TPOT decreases as the expert-cache capacity increases. The reduction is particularly pro-nounced as the cache capacity approaches the number of activated experts, because each additional cache slot can retain an expert that would otherwise require miss compen-sation. Once most activated experts can reside on the GPU, further increases in capacity provide diminishing returns. At Cache=100, OLED-MoE uses only about 40% of the expert GPU memory required for full expert residency, while its TPOT is only 32% and 23% higher than the full-residency bound for LLaDA2.0-mini and LLaDA2.0-flash, respectively. The full-residency result for LLaDA2.0-flash is estimated because its complete expert set cannot fit on a single GPU. 
+
+Impact of PCIe bandwidth. We emulate effective PCIe bandwidths from 16 to 128 GB/s by scaling the H2D transfer latency inversely with the target bandwidth, and evaluate both models with Cache=40 and Cache=100. As shown in Figure 17b, TPOT decreases as the effective PCIe bandwidth increases, confirming that PCIe bandwidth is an important performance factor in expert-offloading scenarios. The re-duction is particularly pronounced under Cache=40, where the limited cache capacity results in more cache misses and a larger fraction of experts being transferred from the CPU to the GPU. Under Cache=100, more activated experts remain resident on the GPU, reducing H2D traffic and making TPOT less sensitive to PCIe bandwidth. 
+
+Generalization across model versions. We additionally evaluate OLED-MoE on LLaDA2.1-mini and LLaDA2.1-flash under Cache=40 and Cache=100, using the same experimen-tal settings as for LLaDA2.0. As shown in Figure 18a, increas-ing the expert-cache capacity consistently reduces TPOT across both LLaDA2.0 and LLaDA2.1, and the correspond-ing model variants exhibit comparable performance trends. Although this experiment does not include a full baseline comparison, the consistent behavior indicates that OLED-MoE is not specific to a single LLaDA release. This is consis-tent with our observation in §3.3 that inter-iteration expert locality arises from the iterative denoising process of semi-autoregressive dLLMs. 
+
+Runtime policy overhead. We measure the runtime cost of expert-priority computation, layer-adaptive cache allocation, and CPU/GPU split decisions. As shown in Figure 18b, these policies together add 3.69–6.03 ms per full-model forward, corresponding to 0.59%–4.53% of the forward latency across the evaluated models and expert-cache capacities. Expert-priority computation is the largest component, while layer adaptation and CPU/GPU split decisions contribute smaller fractions. The relative overhead is lower on LLaDA2.0-flash because its model forward is substantially longer. Overall, the online policies introduce limited runtime cost compared with the model computation they guide. EuroSys ’27, April 19–23, 2027, Rabat, Morocco Jingyuan Xiao et al. 
+
+6 Related Work 
+
+Expert offloading for MoE inference. Expert offload-ing has been widely studied for serving large-scale MoE LLMs under limited GPU memory. Existing systems im-prove offloading efficiency through predictive caching, ex-pert prefetching, routing-aware execution, or fine-grained ex-pert management [7, 15, 26, 29, 46, 63]. These techniques are primarily designed for autoregressive (AR) decoding, where each iteration activates a small expert set and intra-iteration prediction remains effective. In contrast, OLED-MoE tar-gets MoE-based dLLMs, whose block-wise decoding creates large concurrent expert activations and makes AR-oriented prefetching ineffective. OLED-MoE exploits inter-iteration expert locality to predict and retain reusable experts across denoising iterations. 
+
+CPU-GPU hybrid inference for MoE models. CPU-GPU hybrid MoE systems alleviate GPU memory pressure by combining GPU-side expert caching, CPU-side cache-miss handling, expert placement, and overlapped transfer and computation [19, 32, 60, 61, 65, 68]. These systems mainly op-timize CPU/GPU placement according to current execution or transfer cost. They do not account for the multi-iteration expert reuse pattern of semi-AR dLLM decoding, where trans-ferring a missed expert to the GPU can also improve future cache efficiency. OLED-MoE therefore introduces a dynamic load- and reuse-aware cooperative compensation engine that jointly considers current CPU-GPU load balance and future inter-iteration reuse probability. 
+
+Diffusion LLM inference acceleration. Recent work ac-celerates diffusion-based LLM inference through block dif-fusion, hierarchical caching, confidence-aware calibration, dynamic block or step control, pruning, early exiting, and speculative decoding [1, 6, 39, 41, 49, 50, 64]. These tech-niques reduce decoding computation or latency, but they do not address the memory pressure caused by large MoE expert weights. To our knowledge, OLED-MoE is the first expert offloading system designed specifically for MoE-based dLLMs, exploiting inter-iteration expert locality to improve offloading efficiency. 
+
+Orthogonal memory-saving techniques. KV cache of-floading and weight quantization are complementary to expert offloading. KV cache paging or offloading reduces attention-state memory [10, 18, 35, 42, 43, 62], while low-bit quantization reduces expert weight size and H2D transfer volume [16, 33]. OLED-MoE focuses on expert-weight of-floading and can be combined with these techniques through a unified memory manager that balances KV cache capacity, expert cache capacity, and quantization-induced compute overhead. 
+
+7 Conclusion 
+
+We presented OLED-MoE, an expert offloading system for MoE-based dLLM inference under constrained GPU memory. OLED-MoE addresses the mismatch between AR-oriented offloading and semi-AR dLLM execution by shifting the op-timization target from intra-iteration prefetching to inter-iteration expert retention. To improve GPU expert cache uti-lization, OLED-MoE combines temporal-locality-aware ex-pert retention, layer-adaptive cache allocation, and dynamic load- and reuse-aware cooperative compensation. Evalua-tion results show that OLED-MoE reduces TPOT by 1.23 ×–7.93 × and improves expert cache utilization by 1.44 ×–4.23 ×
+
+over state-of-the-art baselines, demonstrating that inter-iteration expert locality is an effective scheduling dimension for memory-constrained MoE-based dLLM serving. 
+
+Acknowledgments 
+
+We thank the anonymous reviewers and our shepherd for their insightful feedback. This work was supported by the National Natural Science Foundation of China under Grant No. 62572341. 
+
+References              
+
+> [1] Sudhanshu Agrawal, Risheek Garrepalli, Raghavv Goel, Christopher Lott, Fatih Porikli, and Mingu Lee. 2025. Structuring The Future: Diffusion LLM Speculative Decoding via Calibrated Draft Graphs.
+> arXiv preprint arXiv:2509.18085 (2025). [2] Tiwei Bie, Maosong Cao, Xiang Cao, Bingsen Chen, Fuyuan Chen, Kun Chen, Lun Du, Daozhuo Feng, Haibo Feng, Mingliang Gong, et al. 2026. Llada2.1: Speeding up text diffusion via token editing. arXiv preprint arXiv:2602.08676 (2026). [3] Tiwei Bie, Maosong Cao, Kun Chen, Lun Du, Mingliang Gong, Zhuochen Gong, Yanmei Gu, Jiaqi Hu, Zenan Huang, Zhenzhong Lan, et al. 2025. Llada2.0: Scaling up diffusion language models to 100b.
+> arXiv preprint arXiv:2512.15745 (2025). [4] Hongtao Chen, Weiyu Xie, Boxin Zhang, Jingqi Tang, Jiahao Wang, Jianwei Dong, Shaoyuan Chen, Ziwei Yuan, Chen Lin, Chengyu Qiu, et al. 2025. Ktransformers: Unleashing the full potential of cpu/gpu hybrid inference for moe models. In Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles . 1014–1029. [5] Hao Mark Chen, Zhiwen Mo, Royson Lee, Qianzhou Wang, Da Li, Shell Xu Hu, Wayne Luk, Timothy Hospedales, and Hongxiang Fan. 2026. Dynamic Expert Sharing: Decoupling Memory from Parallelism in Mixture-of-Experts Diffusion LLMs. arXiv preprint arXiv:2602.00879
+> (2026). [6] Jian Chen, Yesheng Liang, and Zhijian Liu. 2026. DFlash: Block Diffu-sion for Flash Speculative Decoding. arXiv preprint arXiv:2602.06036
+> (2026). [7] Keyu Chen, Qihang Zhou, Bin Qian, Zhenyu Wen, Wenchao Meng, and Shibo He. 2026. FIRM-MoE: Fine-Grained Expert Decomposition for Resource-Adaptive MoE Inference. In Proceedings of the AAAI Conference on Artificial Intelligence , Vol. 40. 20190–20198. [8] Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde De Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, et al. 2021. Evaluating large language models trained on code. arXiv preprint arXiv:2107.03374 (2021). [9] Shuang Cheng, Yihan Bian, Dawei Liu, Yuhua Jiang, Yihao Liu, Linfeng Zhang, Qian Yao, Zhongbo Tian, Wenhai Wang, Qipeng Guo, et al. 2026. Sdar: A synergistic diffusion-autoregression paradigm for scalable sequence generation. In Findings of the Association for Computational Linguistics: ACL 2026 . 22058–22075. [10] Minsik Cho, Mohammad Rastegari, and Devang Naik. 2024. Kv-runahead: Scalable causal llm inference by parallel key-value cache
+
+OLED-MoE: Accelerating dLLM via Locality-Aware Expert Offloading EuroSys ’27, April 19–23, 2027, Rabat, Morocco 
+
+generation. arXiv preprint arXiv:2405.05329 (2024). [11] Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Hee-woo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, et al. 2021. Training verifiers to solve math word problems. arXiv preprint arXiv:2110.14168 (2021). [12] Zhixu Du, Shiyu Li, Yuhao Wu, Xiangyu Jiang, Jingwei Sun, Qilin Zheng, Yongkai Wu, Ang Li, Hai H Li, and Yiran Chen. 2024. Sida: Sparsity-inspired data-aware serving for efficient and scalable large mixture-of-experts models. Proceedings of Machine Learning and Sys-tems 6 (2024), 224–238. [13] Yichao Fu, Peter Bailis, Ion Stoica, and Hao Zhang. 2024. Break the sequential dependency of llm inference using lookahead decoding. 
+
+arXiv preprint arXiv:2402.02057 (2024). [14] Yonggan Fu, Lexington Whalen, Zhifan Ye, Xin Dong, Shizhe Diao, Jingyu Liu, Chengyue Wu, Hao Zhang, Enze Xie, Song Han, et al. 2025. Efficient-dlm: From autoregressive to diffusion language models, and beyond in speed. arXiv preprint arXiv:2512.14067 (2025). [15] Xin He, Shunkang Zhang, Yuxin Wang, Haiyan Yin, Zihao Zeng, Shao-huai Shi, Zhenheng Tang, Xiaowen Chu, Ivor Tsang, and Ong Yew Soon. 2024. Expertflow: Optimized expert activation and token allocation for efficient mixture-of-experts inference. arXiv preprint arXiv:2410.17954 
+
+(2024). [16] Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W Ma-honey, Yakun S Shao, Kurt Keutzer, and Amir Gholami. 2024. Kvquant: Towards 10 million context length llm inference with kv cache quanti-zation. Advances in Neural Information Processing Systems 37 (2024), 1270–1303. [17] Lanxiang Hu, Siqi Kou, Yichao Fu, Samyam Rajbhandari, Tajana Ros-ing, Yuxiong He, Zhijie Deng, and Hao Zhang. 2025. Fast and ac-curate causal parallel decoding using jacobi forcing. arXiv preprint arXiv:2512.14681 (2025). [18] Yitao Hu, Xiulong Liu, Guotao Yang, Linxuan Li, Kai Zeng, Zhixin Zhao, Sheng Chen, Laiping Zhao, Wenxin Li, and Keqiu Li. 2025. TightLLM: Maximizing throughput for LLM inference via adaptive offloading policy. IEEE Trans. Comput. 74, 7 (2025), 2195–2209. [19] En-Ming Huang, Li-Shang Lin, and Chun-Yi Lee. 2026. Efficient CPU-GPU Collaborative Inference for MoE-based LLMs on Memory-Limited Systems. In 2026 31st Asia and South Pacific Design Automation Confer-ence (ASP-DAC) . IEEE, 333–340. [20] Keisuke Kamahori, Tian Tang, Yile Gu, Kan Zhu, and Baris Kasikci. 2025. Fiddler: Cpu-gpu orchestration for fast inference of mixture-of-experts models. In International Conference on Learning Representa-tions .[21] Minseo Kim, Coleman Hooper, Aditya Tomar, Chenfeng Xu, Mehrdad Farajtabar, Michael W Mahoney, Kurt Keutzer, and Amir Gholami. 2025. Beyond Next-Token Prediction: A Performance Characterization of Diffusion versus Autoregressive Language Models. arXiv preprint arXiv:2510.04146 (2025). [22] Minseo Kim, Chenfeng Xu, Coleman Hooper, Harman Singh, Ben Athi-waratkun, Ce Zhang, Kurt Keutzer, and Amir Gholami. 2025. CDLM: Consistency Diffusion Language Models For Faster Sampling. arXiv preprint arXiv:2511.19269 (2025). [23] Woojeong Kim, Junxiong Wang, Jing Nathan Yan, Mohamed Abdelfat-tah, and Alexander M Rush. 2025. OverFill: Two-Stage Models for Efficient Language Model Decoding. arXiv preprint arXiv:2508.08446 
+
+(2025). [24] Rui Kong, Yuanchun Li, Qingtian Feng, Weijun Wang, Xiaozhou Ye, Ye Ouyang, Linghe Kong, and Yunxin Liu. 2024. SwapMoE: Serving off-the-shelf MoE-based large language models with tunable memory budget. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) . 6710–6720. [25] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient memory management for large language model serving with pagedattention. In Proceedings of the 29th symposium on operating systems principles . 611–626. [26] Han Li, Jingwei Sun, Junqing Lin, and Guangzhong Sun. 2026. Com-mitMoE: Efficient Fallback-Free MoE Inference with Offloading Under GPU Memory Constraints. In Proceedings of the AAAI Conference on Artificial Intelligence , Vol. 40. 22904–22912. [27] Tianyi Li, Mingda Chen, Bowei Guo, and Zhiqiang Shen. 2025. Asurvey on diffusion language models. arXiv preprint arXiv:2508.10875 
+
+(2025). [28] Haokun Lin, Xinle Jia, Shaozhen Liu, Shujun Xia, Weitao Huang, Haobo Xu, Junyang Li, Yicheng Xiao, Xingrun Xing, Ziyu Guo, et al. 2026. Effi-cient Diffusion Language Models: A Comprehensive Survey. Authorea Preprints (2026). [29] Shuning Lin, Yifan He, and Yitong Chen. 2025. In-depth Analysis on Caching and Pre-fetching in Mixture of Experts Offloading. arXiv preprint arXiv:2511.05814 (2025). [30] Aixin Liu, Bei Feng, Bing Xue, Bingxuan Wang, Bochao Wu, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenyu Zhang, Chong Ruan, et al. 2024. Deepseek-v3 technical report. arXiv preprint arXiv:2412.19437 
+
+(2024). [31] Aixin Liu, Aoxue Mei, Bangcai Lin, Bing Xue, Bingxuan Wang, Bingzheng Xu, Bochao Wu, Bowei Zhang, Chaofan Lin, Chen Dong, et al. 2025. Deepseek-v3.2: Pushing the frontier of open large language models. arXiv preprint arXiv:2512.02556 (2025). [32] Wentao Liu, Yuhao Hu, Ruiting Zhou, Baochun Li, and Ne Wang. 2025. Remoe: Towards Efficient and Low-Cost MoE Inference in Serverless Computing. arXiv preprint arXiv:2512.18674 (2025). [33] Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu. 2024. Kivi: A tuning-free asymmetric 2bit quantization for kv cache. arXiv preprint arXiv:2402.02750 (2024). [34] Yuxin Ma, Lun Du, Lanning Wei, Kun Chen, Qian Xu, Kangyu Wang, Guofeng Feng, Guoshan Lu, Lin Liu, Xiaojing Qi, et al. 2025. dinfer: An efficient inference framework for diffusion language models. arXiv preprint arXiv:2510.08666 (2025). [35] Sean Nian, Jiahao Fang, Qilong Feng, Zhiyu Wu, and Fan Lai. 2026. CacheFlow: Efficient LLM Serving with 3D-Parallel KV Cache Restora-tion. arXiv:2604.25080 [cs.DC] https://arxiv.org/abs/2604.25080 
+
+[36] Shen Nie, Fengqi Zhu, Zebin You, Xiaolu Zhang, Jingyang Ou, Jun Hu, Jun Zhou, Yankai Lin, Ji-Rong Wen, and Chongxuan Li. 2025. Large language diffusion models. arXiv preprint arXiv:2502.09992 (2025). [37] Radical Numerics. 2025. RND1-Base-0910. Hugging Face model repos-itory. https://huggingface.co/radicalnumerics/RND1-Base-0910 Ac-cessed: September 15, 2026. [38] David Rein, Betty Li Hou, Asa Cooper Stickland, Jackson Petty, Richard Yuanzhe Pang, Julien Dirani, Julian Michael, and Samuel R Bowman. 2023. Gpqa: A graduate-level google-proof q&a benchmark. 
+
+arXiv preprint arXiv:2311.12022 (2023). [39] Jameson Sandler, Jacob K Christopher, Thomas Hartvigsen, and Ferdi-nando Fioretto. 2025. Specdiff-2: Scaling diffusion drafter alignment for faster speculative decoding. arXiv preprint arXiv:2511.00606 (2025). [40] Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. 2017. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. arXiv preprint arXiv:1701.06538 (2017). [41] Jucheng Shen, Gaurav Sarkar, Yeonju Ro, Sharath Nittur Sridhar, Zhangyang Wang, Aditya Akella, and Souvik Kundu. 2025. Im-proving the Throughput of Diffusion-based Large Language Models via a Training-Free Confidence-Aware Calibration. arXiv preprint arXiv:2512.07173 (2025). [42] Hanshi Sun, Li-Wen Chang, Wenlei Bao, Size Zheng, Ningxin Zheng, Xin Liu, Harry Dong, Yuejie Chi, and Beidi Chen. 2024. Shadowkv: Kv cache in shadows for high-throughput long-context llm inference. 
+
+arXiv preprint arXiv:2410.21465 (2024). EuroSys ’27, April 19–23, 2027, Rabat, Morocco Jingyuan Xiao et al. 
+
+[43] Jiaming Tang, Yilong Zhao, Kan Zhu, Guangxuan Xiao, Baris Kasikci, and Song Han. 2024. Quest: Query-aware sparsity for efficient long-context llm inference. arXiv preprint arXiv:2406.10774 (2024). [44] Qwen Team. 2026. Qwen3.5-omni technical report. arXiv preprint arXiv:2604.15804 (2026). [45] Chiung-Yi Tseng, Danyang Zhang, Ziqian Bi, and Junhao Song. 2025. Diffusion-based large language models survey. TechRxiv (2025). [46] Liujianfu Wang, Yuyang Du, Yuchen Pan, Soung Chang Liew, Ji-acheng Liu, and Kexin Chen. 2025. OD-MoE: On-Demand Expert Loading for Cacheless Edge-Distributed MoE Inference. arXiv preprint arXiv:2512.03927 (2025). [47] Yuqing Wang, Tianwei Xiong, Daquan Zhou, Zhijie Lin, Yang Zhao, Bingyi Kang, Jiashi Feng, and Xihui Liu. 2024. Loong: Generating minute-level long videos with autoregressive language models. arXiv preprint arXiv:2410.02757 (2024). [48] Linye Wei, Zixiang Luo, Pingzhi Tang, and Meng Li. 2026. TEAM: Temporal-Spatial Consistency Guided Expert Activation for MoE Dif-fusion Language Model Acceleration. arXiv preprint arXiv:2602.08404 
+
+(2026). [49] Chengyue Wu, Hao Zhang, Shuchen Xue, Shizhe Diao, Yonggan Fu, Zhijian Liu, Pavlo Molchanov, Ping Luo, Song Han, and Enze Xie. 2025. Fast-dllm v2: Efficient block-diffusion llm. arXiv preprint arXiv:2509.26328 (2025). [50] Zhongyu Xiao, Zhiwei Hao, Jianyuan Guo, Yong Luo, Jia Liu, Jie Xu, and Han Hu. 2026. Streaming-dLLM: Accelerating Diffusion LLMs via Suffix Pruning and Dynamic Decoding. arXiv preprint arXiv:2601.17917 
+
+(2026). [51] Shenghao Xie, Wenqiang Zu, Mingyang Zhao, Duo Su, Shilong Liu, Ruohua Shi, Guoqi Li, Shanghang Zhang, and Lei Ma. 2024. Towards unifying understanding and generation in the era of vision foundation models: A survey from the autoregression perspective. arXiv preprint arXiv:2410.22217 (2024). [52] Jing Xiong, Gongye Liu, Lun Huang, Chengyue Wu, Taiqiang Wu, Yao Mu, Yuan Yao, Hui Shen, Zhongwei Wan, Jinfa Huang, et al. 2024. Au-toregressive models in vision: A survey. arXiv preprint arXiv:2411.05902 
+
+(2024). [53] Leyang Xue, Yao Fu, Zhan Lu, Luo Mai, and Mahesh Marina. 2024. Moe-infinity: Efficient moe inference on personal machines with sparsity-aware expert cache. arXiv preprint arXiv:2401.14361 (2024). [54] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, et al. 2025. Qwen3 technical report. arXiv preprint arXiv:2505.09388 (2025). [55] Jinjun Yi, Zhixin Zhao, Yitao Hu, Ke Yan, Weiwei Sun, Hao Wang, Laiping Zhao, Yuhao Zhang, Wenxin Li, and Keqiu Li. 2026. PAT: Accelerating LLM Decoding via Prefix-Aware Attention with Resource Efficient Multi-Tile Kernel. In Proceedings of the 31st ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 . 1396–1412. [56] Zebin You, Shen Nie, Xiaolu Zhang, Jun Hu, Jun Zhou, Zhiwu Lu, Ji-Rong Wen, and Chongxuan Li. 2025. Llada-v: Large language diffusion models with visual instruction tuning. arXiv preprint arXiv:2505.16933 
+
+(2025). [57] Hanfei Yu, Xingqi Cui, Hong Zhang, Hao Wang, and Hao Wang. 2026. Taming latency-memory trade-off in MoE-based LLM serving via fine-grained expert offloading. In Proceedings of the 21st European Confer-ence on Computer Systems . 176–191. [58] Runpeng Yu, Qi Li, and Xinchao Wang. 2025. Discrete diffusion in large language and multimodal models: A survey. arXiv preprint arXiv:2506.13759 (2025). [59] Aohan Zeng, Xin Lv, Zhenyu Hou, Zhengxiao Du, Qinkai Zheng, Bin Chen, Da Yin, Chendi Ge, Chenghua Huang, Chengxing Xie, et al. 2026. Glm-5: from vibe coding to agentic engineering. arXiv preprint arXiv:2602.15763 (2026). [60] Yujie Zhang, Shivam Aggarwal, and Tulika Mitra. 2025. Daop: Data-aware offloading and predictive pre-calculation for efficient moe infer-ence. In 2025 Design, Automation & Test in Europe Conference (DATE) .IEEE, 1–7. [61] Yuning Zhang, Grant Pinkert, Nan Yang, Yanli Li, and Dong Yuan. 2025. DuoServe-MoE: Dual-Phase Expert Prefetch and Cache Scheduling for Efficient MoE LLM Inference. arXiv preprint arXiv:2509.07379 (2025). [62] Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Ré, Clark Barrett, et al. 2023. H2o: Heavy-hitter oracle for efficient generative inference of large language models. Advances in Neural Information Processing Systems 36 (2023), 34661–34710. [63] Yushu Zhao, Yubin Qin, Yang Wang, Xiaolong Yang, Huiming Han, Shaojun Wei, Yang Hu, and Shouyi Yin. 2026. MoBiLE: Efficient Mixture-of-Experts Inference on Consumer GPU with Mixture of Big Little Experts. In 2026 31st Asia and South Pacific Design Automation Conference (ASP-DAC) . IEEE, 999–1005. [64] Liang Zheng, Bowen Shi, Yitao Hu, Jiawei Zhang, Ruofan Li, Guotao Yang, Zhixin Zhao, Zhengchao Wang, Sheng Chen, Wenxin Li, et al. 2026. Mosaic: Unlocking Over 30 × Context Length for Diffusion LLMs Inference via Global Memory Planning and Dynamic Peak Taming. In 
+
+Forty-third International Conference on Machine Learning .[65] Shuzhang Zhong, Yanfan Sun, Ling Liang, Runsheng Wang, Ru Huang, and Meng Li. 2025. Hybrimoe: Hybrid cpu-gpu scheduling and cache management for efficient moe inference. In 2025 62nd ACM/IEEE Design Automation Conference (DAC) . IEEE, 1–7. [66] Fengqi Zhu, Rongzhen Wang, Shen Nie, Xiaolu Zhang, Chunwei Wu, Jun Hu, Jun Zhou, Jianfei Chen, Yankai Lin, Ji-Rong Wen, et al. 2025. Llada 1.5: Variance-reduced preference optimization for large language diffusion models. arXiv preprint arXiv:2505.19223 (2025). [67] Fengqi Zhu, Zebin You, Yipeng Xing, Zenan Huang, Lin Liu, Yihong Zhuang, Guoshan Lu, Kangyu Wang, Xudong Wang, Lanning Wei, et al. 2025. Llada-moe: A sparse moe diffusion language model. arXiv preprint arXiv:2509.24389 (2025). [68] Zeyu Zhu, Gang Li, Peisong Wang, Zitao Mo, Minnan Pei, Zhuoran Song, Xiaoyao Liang, and Jian Cheng. 2026. DALI: A Workload-Aware Offloading Framework for Efficient MoE Inference on Local PCs. arXiv preprint arXiv:2602.03495 (2026).

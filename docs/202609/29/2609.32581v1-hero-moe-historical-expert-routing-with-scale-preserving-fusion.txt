@@ -1,0 +1,1364 @@
+Title: HERO-MoE: Historical Expert Routing with Scale-Preserving Fusion
+
+URL Source: https://arxiv.org/pdf/2609.32581v1
+
+Published Time: Tue, 29 Sep 2026 01:25:37 GMT
+
+Number of Pages: 21
+
+Markdown Content:
+HERO-MoE 
+
+# HERO-M OE: H ISTORICAL EXPERT ROUTING WITH SCALE -P RESERVING FUSION 
+
+Junxiang Qiu 1, Zhengsu Chen 2, Xinting Hu 1,* , Shuo Wang 1, Hengheng Zhang 2
+
+Shaofeng Zhang 1, Changcheng Li 1, Boyu Shi 3, Qi Tian 2,* 1University of Science and Technology of China 2Huawei Inc. 3Southeast University 
+
+qiujx@mail.ustc.edu.cn , xinting@ustc.edu.cn tian.qi1@huawei.com 
+
+> *
+
+Corresponding authors 
+
+## ABSTRACT 
+
+Mixture-of-Experts (MoE) architectures have become a standard way to scale model capacity while keeping computation sparse, yet routing remains a key determinant of MoE quality and training behavior. Prior empirical studies sug-gest that MoE routing reflects input semantics and upstream computation across depth, but standard routers do not explicitly use the routing distributions produced by preceding layers. We propose HERO-MoE , Historical Expert RO uting with Scale-Preserving Fusion, a routing framework that injects historical routing pri-ors into MoE routers by reusing detached, dense routing distributions collected from preceding MoE layers. The key idea is simple: HERO-MoE preserves the original token-conditioned routing branch and adds a residual historical routing contribution before the standard softmax and top-k dispatch. To stabilize this his-torical signal, HERO-MoE introduces a scale-preserving fusion mechanism that matches the magnitude of historical routing memory to the current hidden repre-sentation and accounts for the number of visible historical layers, without intro-ducing an auxiliary routing loss or a fusion-specific tuning parameter. By reusing routing distributions already computed by preceding MoE layers, HERO-MoE improves training-loss reduction with modest end-to-end overhead. The result-ing router remains compatible with standard sparse dispatch, including top-k and group-limited routing, and can be inserted into existing MoE backbones with min-imal architectural changes. Experiments on an approximately 8B-parameter MoE model with 0.5B active parameters, trained from scratch on 100B tokens, show that HERO-MoE reduces the final loss from 1.6393 to 1.6184, while peak mem-ory and FLOPs increase by only 0.44% and 0.64%, respectively. 
+
+## 1 INTRODUCTION 
+
+Mixture-of-Experts (MoE) (Liu et al., 2024b; Zhou et al., 2022) has become a widely adopted paradigm for scaling large language models, because it increases model capacity without increasing the computation of every token proportionally. By routing each token to only a small subset of ex-perts, MoE architectures achieve a favorable trade-off between parameter scale and computational efficiency, and have demonstrated strong performance in language modeling, translation, and long-context reasoning. From early sparsely gated models to modern large-scale sparse Transformers, the central mechanism has remained the same: a router selects a small number of experts for each token, thereby determining how expert specialization emerges and how model capacity is utilized (Jacobs et al., 1991; Shazeer et al., 2017; Lepikhin et al., 2020; Liu et al., 2024a; Fedus et al., 2022; Du et al., 2022; Zoph et al., 2022). Consequently, the routing mechanism has become one of the most important components affecting the quality and optimization behavior of sparse MoE models. Prior empirical studies consistently show that MoE routing reflects input semantics and upstream computation, with structured routing patterns and cross-layer effects extending across depth (Ol-son et al., 2025; Muennighoff et al., 2025; Li et al., 2026). These findings indicate that preceding routing distributions contain token-specific and computation-aware signals that can complement the 1arXiv:2609.32581v1 [cs.CL] 26 Sep 2026 HERO-MoE current hidden representation. Although a standard router computes logits from the current hidden representation, which carries information from preceding computation, it does not explicitly take the routing distributions produced by preceding layers as additional inputs. Treating routing history as an explicit prior can therefore provide the current router with a direct signal about the same to-ken’s previous expert assignments, enabling later expert selection to use both current token features and the token’s preceding routing trajectory. Existing work has begun to exploit related routing structure through indirect regularization or by modifying the routing pathway. Regularization-based methods encourage consistent, non-overlapping, or complementary expert assignments (Omi et al., 2025; Guo et al., 2026; Hu et al., 2026), whereas context-aware routing methods share, propagate, or recurrently update routing-related states across layers (Qiu et al., 2025; Gu et al., 2025; Huang et al., 2026). However, these approaches either require additional regularization terms, loss weights, and method-specific hyperparameter tuning, or modify the routing pathway itself. Directly injecting preceding routing distributions as historical priors while preserving the original current-token rout-ing branch and standard sparse dispatch therefore remains underexplored. This leaves an important design gap in how to exploit routing history without sacrificing the simplicity and compatibility of the standard MoE routing pipeline. To fill this gap, we propose HERO-MoE, Historical Expert Routing with Scale-Preserving Fusion. The key idea is simple: HERO-MoE reuses the detached, dense routing distributions produced by preceding MoE layers within the same pipeline-parallel stage (Huang et al., 2019) as historical priors for the current router. It preserves the original token-conditioned routing branch and adds a residual logit contribution derived from the routing history before the standard softmax and top-k dispatch. Thus, the router can exploit how the same token was routed in preceding layers without changing the standard sparse dispatch procedure or introducing an additional training objective. The main challenge lies in the scale of this seemingly simple fusion. As the number of visible historical layers grows, directly combining unnormalized routing history can make its contribution either too weak or too dominant, while also causing layer-dependent variations in the router input. HERO-MoE addresses this issue with scale-preserving normalization and depth-aware initialization, which align the historical and current representations and maintain a comparable initial logit scale across layers. Since the historical distributions are detached from the computation graph, the method introduces modest additional computation and does not backpropagate through previous routing decisions. We evaluate HERO-MoE on an approximately 8B-parameter MoE model with 0.5B active parame-ters trained from scratch on 100B tokens. HERO-MoE reduces the final training loss from 1.6393 to 1.6184 and improves the average score from 36.57 to 37.42 across 13 general benchmarks, with improvements on 9 tasks. The additional end-to-end cost remains modest: compared with the base-line, HERO-MoE increases total step FLOPs by only 0.64%, peak memory by 0.44%, and total training time by 3.85%. These results show that historical routing can improve both MoE opti-mization and downstream generalization without requiring an auxiliary routing loss or additional method-specific tuning. Furthermore, the learned historical router provides an interpretable view of layer-wise routing dependencies and expert-level cooperative or competitive relations. In summary, our contributions are threefold: • We identify and exploit non-trivial cross-layer dependencies in MoE routing by proposing HERO-MoE, a historical expert routing framework that injects stage-local routing priors into the current router. • We introduce a scale-preserving historical fusion mechanism with depth-aware initializa-tion, which stabilizes the magnitude of historical routing signals without requiring an addi-tional fusion-specific hyperparameter or auxiliary routing loss. • We demonstrate that HERO-MoE improves training loss and downstream benchmark per-formance with modest end-to-end overhead, while also providing an interpretable visual-ization of cross-layer and inter-expert routing relationships. 
+
+## 2 RELATED WORK 
+
+In this section, we review studies on MoE routing along two related threads: sparse routing with load balancing and specialization regularization, and context-aware system-level routing designs. 2HERO-MoE 2.1 SPARSE MOE R OUTING AND LOAD BALANCING 
+
+Mixture-of-Experts research dates back to early conditional computation and hierarchical expert models (Jacobs et al., 1991; Jordan & Jacobs, 1994), and was later scaled to modern neural net-works with sparsely gated routing (Shazeer et al., 2017). Subsequent work such as GShard, Switch Transformers, GLaM, and ST-MoE demonstrated that sparse top-k routing can substantially im-prove parameter efficiency and training scalability in large language models (Lepikhin et al., 2020; Fedus et al., 2022; Du et al., 2022; Zoph et al., 2022). However, these routers still rely primarily on the current token representation when making dispatch decisions, which makes them vulnerable to expert collapse, uneven utilization, and unstable training dynamics. To mitigate these issues, a num-ber of balancing strategies were proposed, including expert-choice routing and auxiliary-loss-free balancing (Zhou et al., 2022; Wang et al., 2024). These methods improve load balance, but they still treat routing as a mostly local decision problem and do not explicitly model how routing behavior evolves across depth. Recent work also shows that auxiliary regularization losses can improve specialization and rout-ing consistency without changing the router architecture. Load Balancing Mixture of Experts with Similarity Preserving Routers introduces a similarity-preserving load-balancing loss that encourages consistent expert choices for similar inputs (Omi et al., 2025). Advancing Expert Specialization for Better MoE adds orthogonality and variance losses to reduce expert overlap and sharpen routing decisions (Guo et al., 2026). Synergistic Intra- and Cross-Layer Regularization Losses for MoE Expert Specialization combines intra-layer specialization and cross-layer coupling losses to pro-mote complementary expert usage across depth (Hu et al., 2026). These methods are effective, but they incur additional loss weights and hyperparameter tuning overhead; furthermore, the optimal parameters of each individual method require extra adjustment when different methods operate in conjunction, whereas HERO-MOE improves routing mainly by injecting historical routing priors through a scale-preserving router parameterization. 2.2 CONTEXT -A WARE AND SYSTEM -A WARE ROUTING 
+
+A growing line of work argues that MoE routing should exploit more than the current hidden state alone. RMoE introduces layerwise recurrent routing and shows that cross-layer dependencies can improve expert selection and parameter efficiency (Qiu et al., 2025). Omni-Router shares routing decisions across MoE layers to encourage structured expert usage in speech models (Gu et al., 2025), while MCF-MOE incorporates multi-level context to obtain more consistent expert selection across layers (Huang et al., 2026). Complementary analyses on shared routing geometry and similarity-preserving routers further suggest that routers learn reusable relational structure, and that preserving such structure can reduce redundancy and improve balancing (Labzin et al., 2026; Omi et al., 2025; Ahrac et al., 2026). In parallel, system-oriented MoE frameworks such as DeepSpeed-MoE, Fast-MoE, Tutel, and MegaBlocks improve training and inference efficiency through better parallelism, dispatch, and kernel design (Rajbhandari et al., 2022; He et al., 2021; Hwang et al., 2023; Gale et al., 2023). Unlike these methods, HERO-MoE integrates historical routing context directly into the router while preserving the standard sparse dispatch procedure, making the routing policy more aware of cross-layer routing structure. 
+
+## 3 METHOD 
+
+In this section, we formalize the complete HERO-MoE framework. We first provide an overview of the routing pipeline, and then describe the router parameterization, scale-preserving initialization strategy, and stage-local historical routing mechanism in detail. Figure 1 illustrates the overall routing flow of HERO-MoE. For each MoE layer, the current to-ken representation is processed by the original router branch, while the historical routing memory collected from preceding layers is fed into the residual router branch. The two branches produce original router logits and residual historical logits, which are added to obtain the final router logits. The resulting logits are converted into routing probabilities for top-k expert selection and weighted expert aggregation. Meanwhile, the dense routing output of the current layer is concatenated with the previous history to form the updated historical memory for subsequent MoE layers. 3HERO-MoE Router Logits Residual Logits 
+
+𝐀 𝐀 (𝐀) 
+
+𝐀 (𝐀) 
+
+> 𝐀
+
+Router FFNs Router Output Layer Norm Router FFNs Router Output Layer Norm History 𝐀 (𝐀) 
+
+Token 𝐀 (𝐀) 
+
+Residual Router 𝐀 𝐀 (𝐀) 
+
+Router 𝐀 𝐀 (𝐀) 
+
+> top-𝐀
+
+FFN 1 FFN 2 FFN 3 FFN 4 History 𝐀 (𝐀+1) C 
+
+> Addition Multiplication
+> CConcat Router Calculation Decoder
+
+Router Output Token 𝐀 (𝐀) History 𝐀 (𝐀) 
+
+𝐀 𝐀 (𝐀) Hadamard Product 
+
+𝐀 (𝐀) Softmax 
+
+Figure 1: Pipeline of HERO-MoE, including the original router branch, historical residual branch, sparse dispatch, and history update. 3.1 PARAMETERIZATION 
+
+Consider a Transformer with L MoE layers. Let X(l) ∈ RN ×d denote the token hidden represen-tations entering the l-th MoE layer, where N is the sequence length or batch token count, d is the hidden dimension, l ∈ { 1, . . . , L } is the layer index, L is the total number of MoE layers, and E is the total number of experts. We use t ∈ { 1, . . . , N } for the token index and e ∈ { 1, . . . , E } for the expert index. The t-th row of X(l) is denoted by x(l) 
+
+> t
+
+.In a conventional sparse MoE layer, the router computes expert logits solely from the current hidden representations. We denote this original routing pathway by the subscript O and compute its logits as 
+
+Z(l) 
+
+> O
+
+= X(l)W (l)⊤ 
+
+> O
+
+∈ RN ×E , W (l) 
+
+> O
+
+∈ RE×d, (1) where W (l) 
+
+> O
+
+is the trainable weight block corresponding to the original router. Given a router logit matrix Z(l), where Z(l) = Z(l) 
+
+> O
+
+for a conventional MoE layer, the standard softmax-based sparse MoE dispatch procedure first converts the logit vector of token t, denoted by 
+
+Z(l) 
+
+> t
+
+, into a probability distribution over the E experts: 
+
+Q(l) 
+
+> t
+
+= softmax 
+
+
+
+Z(l)
+
+> t
+
+
+
+∈ RE . (2) For each token, let k be the number of selected experts. The operator TopK( ·, k ) returns the indices of the k largest entries, yielding the selected expert set 
+
+At = TopK 
+
+
+
+Q(l) 
+
+> t
+
+, k 
+
+
+
+, |A t| = k. (3) For a selected expert e ∈ A t, using e′ as a dummy expert index, the selected probabilities are converted into normalized routing weights as 
+
+wt,e = Q(l)
+
+> t,e
+
+P 
+
+> e′∈A t
+
+Q(l) 
+
+> t,e ′
+
++ ϵ , e ∈ A t, (4) where ϵ > 0 is a small constant for numerical stability. The outputs of the selected expert networks are then aggregated according to these normalized weights: 
+
+y(l) 
+
+> t
+
+= X
+
+> e∈A t
+
+wt,e fe
+
+
+
+x(l)
+
+> t
+
+
+
+, (5) 4HERO-MoE where fe(·) denotes the network of expert e and y(l) 
+
+> t
+
+is the output for token t.To incorporate routing history while preserving this standard MoE pathway, we propose the history-aware residual router, referred to as HERO-M OE. Let Ml denote the number of preceding MoE layers whose routing distributions are visible to layer l, let H(l) ∈ RN ×MlE denote the corre-sponding concatenated routing memory, and let ρ(l) ∈ RN ×1 denote a token-wise scale-preserving coefficient vector broadcast along the feature dimension. We use ⊙ for element-wise multiplication with row-wise broadcasting. The construction of H(l) and the computation of ρ(l) are detailed in Sections 3.3 and 3.2, respectively. The final router logits are defined as 
+
+Z(l) = Z(l) 
+
+> O
+
++ Z(l) 
+
+> R
+
+, Z(l) 
+
+> R
+
+=
+
+
+
+ρ(l) ⊙ H(l)
+
+W (l)⊤ 
+
+> R
+
+, W (l) 
+
+> R
+
+∈ RE×MlE , (6) where the subscript R denotes the residual routing branch and W (l) 
+
+> R
+
+is its trainable weight block. In the implementation, X(l) and ρ(l) ⊙ H(l) are concatenated along the feature dimension and passed through a single linear projection whose weight is conceptually partitioned as [W (l) 
+
+> O
+
+∥W (l) 
+
+> R
+
+]; the additive form above is algebraically equivalent to this implementation. When no historical layer is available, Ml = 0 and Z(l) 
+
+> R
+
+= 0, so Z(l) = Z(l) 
+
+> O
+
+. The resulting logits Z(l) are then passed to the configured sparse-MoE routing policy; the standard softmax, top-k selection, and weighted aggregation above describe the default path. 3.2 INITIALIZATION AND SCALING STRATEGY 
+
+The original and residual routing branches receive inputs with different effective dimensions. The original branch takes the current hidden representation of dimension d, while the residual branch takes a concatenated routing history whose dimension can grow with the depth of the network. Without an appropriate initialization scale, the residual logits could become increasingly large in deeper layers as more historical routing features are incorporated, leading to a depth-dependent routing scale and overly confident initial assignments. To keep the initial magnitude of the combined router logits comparable across layers, we use a depth-aware initialization bound 
+
+bl = 1
+
+pd + ( l − 1) E . (7) The term d+( l−1) E represents the current hidden dimension together with the maximum historical feature dimension available before layer l in a single-stage setting. In the implementation, the router weight is a single matrix 
+
+W (l) = W (l) 
+
+> O
+
+∥W (l)
+
+> R
+
+ ∈ RE×(d+MlE), (8) where the residual block is omitted when Ml = 0 . Its entries are initialized from the same uniform distribution: 
+
+W (l) ∼ U (−bl, b l), (9) where U(−bl, b l) denotes the uniform distribution on [−bl, b l]. The bound depends on the global layer index l rather than the number of locally visible layers, so that the initialization of a given layer is not changed by the choice of pipeline partition. The first MoE layer has no preceding history and therefore uses only the original router block. We further align the magnitude of the historical routing memory with that of the current hidden representation. When Ml > 0, let RMS( ·) denote the root-mean-square magnitude computed inde-pendently for each row. We define the token-wise scale-preserving coefficient as 
+
+ρ(l) = RMS( X(l))RMS( H(l)) + ϵ ·
+
+r l − 1
+
+Ml
+
+, (10) where ϵ > 0 is a small constant for numerical stability. The first factor performs dynamic magnitude alignment, while the second factor compensates for the reduction in visible historical layers intro-duced by pipeline parallelism. For any representation vector u ∈ RD with i-th component ui, the RMS magnitude is 
+
+RMS( u) = 
+
+vuut 1
+
+D
+
+> D
+
+X
+
+> i=1
+
+u2 
+
+> i
+
+. (11) 5HERO-MoE In the implementation, the RMS statistics are detached from the gradient graph, so ρ(l) acts as a stop-gradient scaling factor. Thus, ρ(l) calibrates the effective energy of the historical input across depths and pipeline partitions, while the initialization strategy keeps the initial router-logit scale comparable. 3.3 STAGE -L OCAL HISTORICAL ROUTING 
+
+In large-scale distributed training, deep models are typically partitioned across multiple pipeline (Huang et al., 2019) stages. Transmitting historical routing features across pipeline stage bound-aries would introduce additional communication overhead and may disrupt the execution schedule. Therefore, HERO-M OE restricts historical routing retrieval to the current pipeline stage. For layer 
+
+l, we define the set of visible predecessor layers as 
+
+S(l) = { j | j < l, layer j resides on the same pipeline stage as layer l }. (12) The number of visible historical layers is 
+
+Ml = |S (l)|. (13) Thus, only preceding layers on the same pipeline stage contribute to the historical routing memory, avoiding cross-stage communication while preserving the execution schedule. For each historical layer j ∈ S (l), we retrieve its dense, pre-Top-k routing probability distribution: 
+
+Q(j) = StopGrad 
+
+
+
+softmax 
+
+
+
+Z(j) 
+
+∈ RN ×E . (14) Here, Z(j) denotes the router logits computed from the current representation at layer j and its available historical routing input. The distribution Q(j) is stored immediately after these logits are computed and before the subsequent configured top-k routing policy is applied. The operator 
+
+StopGrad( ·) detaches its input from the gradient graph, preventing gradients from the current router from propagating through previous routing decisions. Enumerate the visible predecessor indices as j1, . . . , j Ml , where jm is the m-th visible predecessor for m ∈ { 1, . . . , M l}. The historical routing memory is constructed by concatenating their routing distributions along the feature dimension: 
+
+H(l) =
+
+h
+
+Q(j1), Q(j2), . . . , Q(jMl )i
+
+∈ RN ×MlE , (15) where {j1, . . . , j Ml } = S(l). The t-th row of H(l) corresponds to the routing history of the same token represented by the t-th row of X(l). At layer l, this history is scaled and mapped to Z(l) 
+
+> R
+
+,added to Z(l) 
+
+> O
+
+, and then passed through the standard sparse MoE routing procedure described in Section 3. 
+
+## 4 EXPERIMENTS 
+
+In this section, we conduct empirical evaluation of HERO-MoE. We first detail the experimental setup including datasets, model configurations and evaluation benchmarks, then present the effec-tiveness results and further analyze the learned inter-layer routing patterns. All training runs were performed on NPUs, each with 64 GB of NPU memory. 4.1 EXPERIMENT SETTINGS 
+
+Datasets . The training dataset includes open-source datasets: dclm (Li et al., 2024b), map-cc (Du et al., 2024), ultrachat (Ding et al., 2023), tuluv3 (Lambert et al., 2024), finemath (Liu et al., 2024c), megamath (Zhou et al., 2025), as well as high-quality proprietary self-collected datasets related to education that are not publicly available. 
+
+Model Configuration . The experimental evaluation defaults to a MoE model built with our custom architecture (close to Deepseek-MoE (Liu et al., 2024b)), which has approximately 8B total param-eters and 0.5B activated parameters. Pre-training with random initialization adopts sequences of 4K 6HERO-MoE 
+
+Figure 2: Training loss of the Baseline, RCP, HERO-MoE, historical-window ablations, and the no-scaling ablation. tokens, with a total training corpus of roughly 100B tokens. Specifically, the model comprises 30 Transformer layers with a hidden dimension of 1024. The attention layer adopts Multi-Head Latent Attention (Liu et al., 2024a) (MLA, 16 attention heads, Query LoRA rank of 512). The feed-forward layer employs an MoE architecture with 128 experts (intermediate size of 640), dynamically routing to Top-4 experts per token. The learning rate follows a cosine decay schedule from 2 × 10 −3 to 
+
+5 × 10 −5 with a global batch size of 1024 across 25,000 training steps. The training results before introducing HERO-MoE are denoted as Baseline. 
+
+Evaluation Metrics . The general benchmarks cover 13 typical task categories, including mathe-matical reasoning (GSM8K (Cobbe et al., 2021), MathQA (Amini et al., 2019), MATH (Hendrycks et al., 2021)), commonsense question answering (ARC-C, ARC-C-ZH, ARC-E (Clark et al., 2018)), comprehensive cognitive reasoning (MMLU (Hendrycks et al., 2020), CMMLU (Li et al., 2024a), BBH (Suzgun et al., 2023)), text coherence assessment (LAMBADA (Paperno et al., 2016)), code generation (HumanEval (Chen, 2021)), and domain-specific tasks (HellaSwag (Zellers et al., 2019), PiPA (Kim et al., 2025)), which span both English and Chinese bilingual scenarios. 4.2 EFFECTIVENESS OF HERO-M OE
+
+Training Loss . Figure 2(a) presents the full training-loss trajectories of different routing-enhancement methods, with the inset providing a zoomed-in view of the final training stage. Here, the baseline denotes the raw MoE model without historical routing, RCP (Hu et al., 2026) denotes the adjacent-layer route consolidation method, and mask1, mask3, mask5, and mask10 denote ablation variants that use only recent historical layers. The no-scaling ablation removes the scale-preserving factor in Eq. (10) while retaining the historical routing branch. The historical-routing variants gen-erally achieve lower final losses than the baseline. Full HERO-MoE achieves the lowest final loss, around 1.6184 compared with 1.6393 for the baseline, while mask10 performs very closely, indicat-ing that a medium-range history captures most of the benefit. The no-scaling variant also benefits from historical routing, but converges to a higher final loss than the full method, showing that the scale-preserving operation is important for effectively incorporating routing history. RCP also im-proves over the baseline, but remains weaker than HERO-MoE and mask10, showing that, in our setting, HERO-MoE achieves lower training loss without introducing an additional loss objective or requiring hyperparameter tuning. Figure 2(b) reports the loss advantage over the baseline throughout training. The full HERO-MoE method maintains the largest advantage among the compared variants, whereas the no-scaling ab-lation exhibits a smaller improvement, further demonstrating the value of the scale-preserving op-eration. The ablation results also show that an overly short history limits the performance gain: mask1 provides a noticeably smaller improvement, suggesting that routing decisions benefit from richer historical trajectories beyond the immediately preceding layer. Moreover, the advantage of HERO-MoE over the baseline continues to increase during training, whereas the improvement of 7HERO-MoE Table 1: General benchmark comparison between the baseline MoE and HERO-MoE.                                                         
+
+> Model GSM8K MathQA MATH ARC-C ARC-C-ZH ARC-E HellaSwag BBH MMLU CMMLU HumanEval LAMBADA PIPA Avg. Baseline 10.99 30.99 8.14 35.32 30.97 70.96 40.62 29.3 42.1 43.2 15.24 45.55 72.03 36.57
+> HERO-MoE 12.21 30.95 9.6 37.63 31.83 70.92 42.01 29.09 42.22 42.38 18.9 46.52 72.2 37.42
+> ∆1.22 −0.04 1.46 2.31 0.86 −0.04 1.39 −0.21 0.12 −0.82 3.66 0.97 0.17 0.85
+
+Figure 3: Layer-wise historical dependencies, distance-wise strong coupling ratios, and a represen-tative expert-level coupling matrix learned by HERO-MoE. RCP saturates earlier. These results indicate that HERO-MoE provides sustained benefits for long-term MoE optimization. 
+
+General Benchmarks . Table 1 compares the baseline MoE and HERO-MoE on multiple general benchmarks. Overall, our method improves the average score from 36.57 to 37.42, bringing an average gain of +0.85. Among the 13 tasks, HERO-MoE achieves improvements on 9 tasks. The most notable gains appear on HumanEval (+3.66), ARC-C (+2.31), MATH (+1.46), HellaSwag (+1.39), and GSM8K (+1.22). These tasks usually require stronger reasoning, code generation, or complex semantic modeling abilities, indicating that HERO-MoE improves not only the training loss but also downstream task performance. Meanwhile, HERO-MoE shows slight drops on MathQA, ARC-E, BBH, and CMMLU, suggesting that historical routing enhancement is not monotonically beneficial for all tasks. One possible reason is that historical routing changes the expert specializa-tion pattern, making its benefit less obvious on some knowledge-oriented or multiple-choice tasks. Overall, by introducing historical routing information, HERO-MoE improves both the training be-havior and generalization performance of MoE models. The average performance gain is stable, with especially clear benefits on mathematics, coding, and complex reasoning tasks. 4.3 FINDINGS OF HERO-M OEFigure 3(a) visualizes the layer-wise dependency strength learned by the historical routing branch in HERO-MoE. Each lower-triangular entry represents the routing dependency from a predecessor layer p to a target layer l, where darker green indicates a stronger influence of the historical layer on the current router. We observe that the learned dependencies are not limited to adjacent layers, but extend across multiple preceding layers. Although entries near the diagonal are generally stronger, visible non-zero dependencies also appear between more distant layers. This result suggests that routing history forms a cross-depth trajectory rather than a purely adjacent-layer effect, providing useful routing priors for subsequent MoE layers. To quantify how expert-level interactions vary with layer distance, Figure 3(b) reports the fraction of residual-router weight entries exhibiting strong negative or positive coupling at each inter-layer dis-tances ∆ = l − p. Under this fixed global threshold, adjacent-layer pairs have the largest fraction of strongly coupled weight entries, while this fraction generally decreases over intermediate distances. However, the ratio rises again for larger distances, especially at ∆ = 13 and ∆ = 14 , indicating that while short-range interactions dominate overall, a non-negligible subset of distant layer pairs 8HERO-MoE Table 2: Time, memory and FLOPs comparison between Baseline and HERO-MoE.                         
+
+> Method Peak Memory FLOPs (Router only) FLOPs (Total) Forward Time Router Step Time Total Train Time
+> Baseline 5440.8 MiB 1.55 T 211.83 T 32.579 ms 0.14 s / iter 71.88 h HERO-MoE 5464.9 MiB 2.90 T 213.18 T 37.984 ms 0.54 s / iter 74.65 h
+> ∆+0.44% +87.50% +0.64% +16.59% +281.14% +3.85%
+
+still exhibits strong expert-level dependencies. Across distances, negative couplings account for the larger proportion, suggesting that cross-layer routing history often encodes expert competition or suppression in addition to cooperative relationships. Figure 3(c) provides a representative expert-level coupling matrix from Layer 8 to Layer 9. The horizontal axis denotes source-layer experts, and the vertical axis denotes target-layer experts. Each entry measures the influence of a source expert on a target expert: red indicates positive cooperation, blue indicates negative competition, and white indicates a near-neutral relation. Vertical red and blue patterns indicate source experts that broadly promote or suppress multiple target experts, whereas vertical white patterns indicate source experts with weak influence on most subsequent experts. Horizontal white patterns indicate target experts that are relatively insensitive to historical expert choices and may be determined primarily by the current token representation. Scattered dark red and dark blue entries further reveal strong pairwise cooperative and competitive relations between specific expert pairs. Additional expert-level coupling matrices for other layer pairs are provided in Appendix Figure 4. Overall, Figure 3 provides a hierarchical view of the routing structures learned by HERO-MoE and offers a direct perspective for studying cross-layer routing dynamics, expert specialization, and expert composition mechanisms in sparse MoE models. 4.4 COST OF HERO-M OEAs shown in Table 2, we evaluate the computational cost of HERO-MoE against the Baseline. HERO-MoE introduces only a small memory overhead, with peak training memory increasing by 0.44% (+24.2 MiB). The expanded gating dimension increases the standalone router FLOPs from 1.55 T to 2.90 T (+87.50%) and the router step time from 0.14 s/iter to 0.54 s/iter. However, be-cause routing accounts for only a small fraction of the full model computation, the total model step FLOPs increase from 211.83 T to 213.18 T (+0.64%). The end-to-end forward latency increases by 5.405 ms ( ≈ 0.18 ms per layer), and the overall training wall-clock time increases from 71.88 h to 74.65 h over 25,000 steps, corresponding to a 3.85% overhead. These measurements show that HERO-MoE introduces noticeable router-side overhead but maintains modest end-to-end training overhead in our evaluated setting. 
+
+## 5 CONCLUSION 
+
+In this paper, we introduced HERO-MoE, a historical expert routing framework for sparse Mixture-of-Experts models. Instead of making routing decisions solely from the current token representa-tion, HERO-MoE reuses detached routing distributions from preceding MoE layers within the same pipeline stage and injects them into the current router through a scale-preserving historical residual branch. This design keeps the standard sparse dispatch procedure unchanged, avoids cross-stage communication, and introduces historical routing priors without adding an auxiliary routing loss. Experiments show that HERO-MoE improves both training dynamics and downstream performance. Compared with the baseline MoE, HERO-MoE reduces the final training loss from 1.6393 to 1.6184 and improves the average benchmark score from 36.57 to 37.42 across 13 evaluation tasks. Ablation studies further show that using richer historical routing trajectories is more effective than relying only on very short history windows. In addition, the trained historical router provides a direct way to visualize layer-wise routing dependencies and expert-level cooperative or competitive relations, offering new insights into how sparse expert models organize routing behavior across depth. Overall, our results suggest that routing history is a useful and underexplored signal for improv-ing MoE training. By incorporating historical routing information in a lightweight and stage-local 9HERO-MoE manner, HERO-MoE provides a simple, practical, and interpretable direction for building more ef-fective sparse expert models. A current limitation is that routing information is not shared across pipeline-parallel stages, which may limit HERO-MoE’s effectiveness at high pipeline-parallel de-grees. Future work will extend HERO-MoE to support cross-stage information transfer. 
+
+## AI A SSISTANCE 
+
+The AI support mainly covers text fluency optimization, logical structure sorting and grammar cor-rection, and all related outputs have been manually verified and revised by the authors. 
+
+## REFERENCES 
+
+Sagi Ahrac, Noya Hochwald, and Mor Geva. Routers learn the geometry of their experts: Geometric coupling in sparse mixture-of-experts. arXiv preprint arXiv:2605.12476 , 2026. Aida Amini, Saadia Gabriel, Shanchuan Lin, Rik Koncel-Kedziorski, Yejin Choi, and Hannaneh Hajishirzi. Mathqa: Towards interpretable math word problem solving with operation-based for-malisms. In Proceedings of the 2019 conference of the North American chapter of the association for computational linguistics: Human language technologies, volume 1 (long and short papers) ,pp. 2357–2367, 2019. Mark Chen. Evaluating large language models trained on code. arXiv preprint arXiv:2107.03374 ,2021. Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. Think you have solved question answering? try arc, the ai2 reasoning challenge. 
+
+arXiv preprint arXiv:1803.05457 , 2018. Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, et al. Training verifiers to solve math word problems. arXiv preprint arXiv:2110.14168 , 2021. Ning Ding, Yulin Chen, Bokai Xu, Yujia Qin, Shengding Hu, Zhiyuan Liu, Maosong Sun, and Bowen Zhou. Enhancing chat language models by scaling high-quality instructional conversa-tions. In Proceedings of the 2023 Conference on Empirical Methods in Natural Language Pro-cessing , pp. 3029–3051, 2023. Nan Du, Yanping Huang, Andrew M Dai, Simon Tong, Dmitry Lepikhin, Yuanzhong Xu, Maxim Krikun, Yanqi Zhou, Adams Wei Yu, Orhan Firat, et al. Glam: Efficient scaling of language models with mixture-of-experts. In International conference on machine learning , pp. 5547– 5569. PMLR, 2022. Xinrun Du, Zhouliang Yu, Songyang Gao, Ding Pan, Yuyang Cheng, Ziyang Ma, Ruibin Yuan, Xingwei Qu, Jiaheng Liu, Tianyu Zheng, et al. Chinese tiny llm: Pretraining a chinese-centric large language model. arXiv preprint arXiv:2404.04167 , 2024. William Fedus, Barret Zoph, and Noam Shazeer. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23(120):1–39, 2022. Trevor Gale, Deepak Narayanan, Cliff Young, and Matei Zaharia. Megablocks: Efficient sparse training with mixture-of-experts. Proceedings of Machine Learning and Systems , 5:288–304, 2023. Zijin Gu, Tatiana Likhomanenko, and Navdeep Jaitly. Omni-router: Sharing routing decisions in sparse mixture-of-experts for speech recognition. In 2025 IEEE Automatic Speech Recognition and Understanding Workshop (ASRU) , pp. 1–8. IEEE, 2025. Hongcan Guo, Haolang Lu, Guoshun Nan, Bolun Chu, Jialin Zhuang, Yuan Yang, Wenhao Che, Xinye Cao, Sicong Leng, Qimei Cui, et al. Advancing expert specialization for better moe. 
+
+Advances in Neural Information Processing Systems , 38:48767–48809, 2026. 10 HERO-MoE Jiaao He, Jiezhong Qiu, Aohan Zeng, Zhilin Yang, Jidong Zhai, and Jie Tang. Fastmoe: A fast mixture-of-expert training system. arXiv preprint arXiv:2103.13262 , 2021. Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. Measuring massive multitask language understanding. arXiv preprint arXiv:2009.03300 , 2020. Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. Measuring mathematical problem solving with the math dataset. arXiv preprint arXiv:2103.03874 , 2021. Rizhen Hu, Yuan Cao, Boao Kong, Mou Sun, and Kun Yuan. Synergistic intra-and cross-layer regularization losses for moe expert specialization. arXiv preprint arXiv:2602.14159 , 2026. Shuhan Huang, Naifan Zhang, Yuanbo Tang, Yang Li, and Wai Kin Victor Chan. Multi-level context modeling for consistent expert selection in mixture-of-experts. arXiv preprint arXiv:2607.16427 ,2026. Yanping Huang, Youlong Cheng, Ankur Bapna, Orhan Firat, Dehao Chen, Mia Chen, HyoukJoong Lee, Jiquan Ngiam, Quoc V Le, Yonghui Wu, et al. Gpipe: Efficient training of giant neural networks using pipeline parallelism. Advances in neural information processing systems , 32, 2019. Changho Hwang, Wei Cui, Yifan Xiong, Ziyue Yang, Ze Liu, Han Hu, Zilong Wang, Rafael Salas, Jithin Jose, Prabhat Ram, et al. Tutel: Adaptive mixture-of-experts at scale. Proceedings of Machine Learning and Systems , 5:269–287, 2023. Robert A Jacobs, Michael I Jordan, Steven J Nowlan, and Geoffrey E Hinton. Adaptive mixtures of local experts. Neural computation , 3(1):79–87, 1991. Michael I Jordan and Robert A Jacobs. Hierarchical mixtures of experts and the em algorithm. 
+
+Neural computation , 6(2):181–214, 1994. Takyoung Kim, Janvijay Singh, Shuhaib Mehri, Emre Can Acikgoz, Sagnik Mukherjee, Nimet Beyza Bozdag, Sumuk Shashidhar, Gokhan Tur, and Dilek Hakkani-T¨ ur. Pipa: A unified evaluation protocol for diagnosing interactive planning agents. arXiv preprint arXiv:2505.01592 ,2025. Kirill Labzin, Stepan Kulibaba, Artem Dzhalilov, and Artem Gorokhov. Evidence for shared routing geometry and dynamics in sparse mixture-of-experts. arXiv preprint arXiv:2609.02404 , 2026. Nathan Lambert, Jacob Morrison, Valentina Pyatkin, Shengyi Huang, Hamish Ivison, Faeze Brah-man, Lester James V Miranda, Alisa Liu, Nouha Dziri, Shane Lyu, et al. Tulu 3: Pushing frontiers in open language model post-training. arXiv preprint arXiv:2411.15124 , 2024. Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu, Dehao Chen, Orhan Firat, Yanping Huang, Maxim Krikun, Noam Shazeer, and Zhifeng Chen. Gshard: Scaling giant models with conditional computation and automatic sharding. arXiv preprint arXiv:2006.16668 , 2020. Haonan Li, Yixuan Zhang, Fajri Koto, Yifei Yang, Hai Zhao, Yeyun Gong, Nan Duan, and Timothy Baldwin. Cmmlu: Measuring massive multitask language understanding in chinese. In Findings of the Association for Computational Linguistics: ACL 2024 , pp. 11260–11285, 2024a. Jeffrey Li, Alex Fang, Georgios Smyrnis, Maor Ivgi, Matt Jordan, Samir Yitzhak Gadre, Hritik Bansal, Etash Guha, Sedrick Scott Keh, Kushal Arora, et al. Datacomp-lm: In search of the next generation of training sets for language models. Advances in Neural Information Processing Systems , 37:14200–14282, 2024b. Wengang Li, Lingqi Zhang, Toshio Endo, and Mohamed Wahib. Understanding cross-layer con-tributions to mixture-of-experts routing in llms. In The Fourteenth International Conference on Learning Representations , 2026. 11 HERO-MoE Aixin Liu, Bei Feng, Bin Wang, Bingxuan Wang, Bo Liu, Chenggang Zhao, Chengqi Dengr, Chong Ruan, Damai Dai, Daya Guo, et al. Deepseek-v2: A strong, economical, and efficient mixture-of-experts language model. arXiv preprint arXiv:2405.04434 , 2024a. Aixin Liu, Bei Feng, Bing Xue, Bingxuan Wang, Bochao Wu, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenyu Zhang, Chong Ruan, et al. Deepseek-v3 technical report. arXiv preprint arXiv:2412.19437 , 2024b. Yan Liu, Renren Jin, Ling Shi, Zheng Yao, and Deyi Xiong. Finemath: A fine-grained mathematical evaluation benchmark for chinese large language models. ACM Transactions on Asian and Low-Resource Language Information Processing , 2024c. Niklas Muennighoff, Luca Soldaini, Dirk Groeneveld, Kyle Lo, Jacob Morrison, Sewon Min, Wei-jia Shi, Pete Walsh, Oyvind Tafjord, Nathan Lambert, et al. Olmoe: Open mixture-of-experts language models. In International Conference on Learning Representations , volume 2025, pp. 62061–62121, 2025. Matthew Lyle Olson, Neale Ratzlaff, Musashi Hinck, Man Luo, Sungduk Yu, Chendi Xue, and Vasudev Lal. Probing semantic routing in large mixture-of-expert models. In EMNLP (Findings) ,pp. 18263–18278, 2025. Nabil Omi, Siddhartha Sen, and Ali Farhadi. Load balancing mixture of experts with similarity preserving routers. arXiv preprint arXiv:2506.14038 , 2025. Denis Paperno, Germ´ an Kruszewski, Angeliki Lazaridou, Ngoc-Quan Pham, Raffaella Bernardi, Sandro Pezzelle, Marco Baroni, Gemma Boleda, and Raquel Fern´ andez. The lambada dataset: Word prediction requiring a broad discourse context. In Proceedings of the 54th annual meeting of the association for computational linguistics (volume 1: Long papers) , pp. 1525–1534, 2016. Zihan Qiu, Zeyu Huang, Shuang Cheng, Yizhi Zhou, Ivan Titov, Jie Fu, et al. Layerwise recurrent router for mixture-of-experts. In International Conference on Learning Representations , volume 2025, pp. 14179–14205, 2025. Samyam Rajbhandari, Conglong Li, Zhewei Yao, Minjia Zhang, Reza Yazdani Aminabadi, Am-mar Ahmad Awan, Jeff Rasley, and Yuxiong He. Deepspeed-moe: Advancing mixture-of-experts inference and training to power next-generation ai scale. In International conference on machine learning , pp. 18332–18346. PMLR, 2022. Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. 
+
+arXiv preprint arXiv:1701.06538 , 2017. Mirac Suzgun, Nathan Scales, Nathanael Sch¨ arli, Sebastian Gehrmann, Yi Tay, Hyung Won Chung, Aakanksha Chowdhery, Quoc Le, Ed Chi, Denny Zhou, et al. Challenging big-bench tasks and whether chain-of-thought can solve them. In Findings of the Association for Computational Lin-guistics: ACL 2023 , pp. 13003–13051, 2023. Lean Wang, Huazuo Gao, Chenggang Zhao, Xu Sun, and Damai Dai. Auxiliary-loss-free load balancing strategy for mixture-of-experts. arXiv preprint arXiv:2408.15664 , 2024. An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388 , 2025. Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. Hellaswag: Can a ma-chine really finish your sentence? arXiv preprint arXiv:1905.07830 , 2019. Fan Zhou, Zengzhi Wang, Nikhil Ranjan, Zhoujun Cheng, Liping Tang, Guowei He, Zhengzhong Liu, and Eric P Xing. Megamath: Pushing the limits of open math corpora. arXiv preprint arXiv:2504.02807 , 2025. Yanqi Zhou, Tao Lei, Hanxiao Liu, Nan Du, Yanping Huang, Vincent Zhao, Andrew M Dai, Quoc V Le, James Laudon, et al. Mixture-of-experts with expert choice routing. Advances in Neural Information Processing Systems , 35:7103–7114, 2022. 12 HERO-MoE Barret Zoph, Irwan Bello, Sameer Kumar, Nan Du, Yanping Huang, Jeff Dean, Noam Shazeer, and William Fedus. St-moe: Designing stable and transferable sparse expert models. arXiv preprint arXiv:2202.08906 , 2022. 13 HERO-MoE 
+
+Figure 4: Expert-level coupling matrices for all adjacent MoE-layer pairs learned by HERO-MoE. 
+
+## APPENDIX A MORE EXPERT -LEVEL SAMPLES 
+
+To complement the representative coupling matrix shown in Figure 3(c), Figure 4 presents the expert-level coupling matrices for all adjacent MoE-layer pairs, and the later fourteen plots are mul-tiplied by the second factor in Eq. (10). Across different layer pairs, the matrices exhibit structured positive and negative regions rather than unstructured noise, indicating that the historical routing branch captures non-trivial cooperation and competition between experts. These patterns are not identical across depth: some source experts exert broad promoting or suppressing effects on mul-tiple target experts, whereas others have only localized or weak influence. Likewise, several target experts remain relatively insensitive to the preceding routing state, suggesting that their assign-ments are determined primarily by the current token representation. Overall, Figure 4 shows that the coupling observed in Figure 3(c) is not an isolated case, but reflects a broader, layer-dependent organization of cross-layer expert interactions learned by HERO-MoE. 
+
+## B EXPERT ROUTING DYNAMICS 
+
+Figure 5 illustrates the layer-wise expert activation distribution across all 30 layers and 128 ex-perts, evaluated on multiple benchmarks. In the baseline model, Expert 94 in Layer 18 monopo-lizes 13.74% of all tokens, creating a severe bottleneck and exacerbating the straggler problem in distributed All-to-All communication. In contrast, HERO-MoE reduces the peak expert load by 31.2%, down to 9.45%, thereby effectively alleviating cluster communication congestion. More im-portantly, HERO-MoE accelerates model training convergence while maintaining balanced expert utilization. 
+
+## C ADDITIONAL RESULTS ON QWEN 3
+
+Figure 6(a) compares the training loss of Qwen3 (Yang et al., 2025) with and without HERO-MoE under the Qwen3 experimental configuration. HERO-MoE generally achieves a lower loss, espe-cially during the later training stage, reducing the final loss from 1.9056 to 1.8985. Figure 6(b) reports the loss advantage over the original Qwen3 model, computed as the Qwen3 loss minus the loss of Qwen3 with HERO-MoE. Without model-specific tuning, although the advantage fluctuates 14 HERO-MoE 
+
+Figure 5: Expert utilization frequency across 30 layers and 128 experts. 
+
+Figure 6: Training loss and loss advantage of Qwen3 with HERO-MoE. considerably during early training, it remains predominantly positive and continues to increase dur-ing the later stage. These results further demonstrate the generality of HERO-MoE across MoE models with different architectures. 
+
+## D MATHEMATICAL PROPERTIES OF HERO-M OE
+
+This appendix formalizes the structural properties of HERO-MoE. We use the same notation as in the method section. In particular, let S(l) be the set of preceding MoE layers on the same pipeline stage as layer l, and let Ml = |S (l)|. The results below concern the explicit historical routing path. They establish structural and optimization properties of the proposed parameterization; improvements in training loss, expert utilization, and downstream accuracy remain empirical claims. D.1 NOTATION AND ASSUMPTIONS 
+
+For Ml > 0, write the detached historical distributions as 
+
+Q(j) = StopGrad 
+
+
+
+softmax 
+
+
+
+Z(j) 
+
+∈ RN ×E , j ∈ S (l), (16) and define 
+
+H(l) =
+
+h
+
+Q(j1), Q(j2), . . . , Q(jMl )i
+
+∈ RN ×MlE . (17) 15 HERO-MoE For a token row, let 
+
+rx = RMS 
+
+
+
+x(l)
+
+> t
+
+
+
+, rh = RMS 
+
+
+
+h(l)
+
+> t
+
+
+
+. (18) Define the scale-preserving coefficient as 
+
+ρ(l) 
+
+> t
+
+= rx
+
+rh + ϵ
+
+r l − 1
+
+Ml
+
+, ϵ > 0. (19) When an exact identity is stated, we first consider the idealized limit ϵ = 0 and then give the corresponding expression for the finite-ϵ case. D.2 HISTORY -AWARE ROUTER DECOMPOSITION 
+
+Proposition 1 (Baseline recovery). If Ml = 0 , HERO-MoE exactly reduces to the conventional linear MoE router. If Ml > 0, the history-aware router is algebraically equivalent to an original-state branch plus a historical residual branch. 
+
+Proof. Partition the router weight as 
+
+W (l) =
+
+h
+
+W (l) 
+
+> O
+
+W (l)
+
+> R
+
+i
+
+, W (l) 
+
+> O
+
+∈ RE×d, W (l) 
+
+> R
+
+∈ RE×MlE . (20) The input to the single linear projection is 
+
+U (l) =
+
+h
+
+X(l) ρ(l) ⊙ H(l)i
+
+. (21) Block matrix multiplication gives 
+
+Z(l) = U (l)W (l)⊤
+
+= X(l)W (l)⊤ 
+
+> O
+
++
+
+
+
+ρ(l) ⊙ H(l)
+
+W (l)⊤ 
+
+> R
+
+. (22) When Ml = 0 , the second block is absent, so Z(l) = X(l)W (l)⊤ 
+
+> O
+
+, which is the baseline router. □
+
+Corollary 1 (Unchanged sparse dispatch). HERO-MoE changes only the logits supplied to the configured routing operator. Consequently, the subsequent softmax, top-k selection, group-limited selection, capacity handling, and token dispatch operations are unchanged. In particular, for any routing operator R acting on router logits, 
+
+HERO -MoE routing = R
+
+
+
+Z(l) 
+
+> O
+
++ Z(l)
+
+> R
+
+
+
+, (23) with the same operator R as in the baseline model. D.3 GRADIENT ISOLATION OF HISTORICAL ROUTING 
+
+Proposition 2 (Stop-gradient isolation). Let θj denote parameters that produce the router logits 
+
+Z(j) of a preceding layer. Along the explicit historical path, the current layer satisfies 
+
+∂H(l)
+
+∂θ j
+
+= 0, ∂Z(l)
+
+> R
+
+∂θ j
+
+= 0. (24) 
+
+Proof. For every visible predecessor j, the historical routing distribution is 
+
+Q(j) = StopGrad 
+
+
+
+softmax 
+
+
+
+Z(j) 
+
+. (25) By definition of the stop-gradient operator, its value is preserved in the forward pass while its deriva-tive with respect to its input is zero. Therefore, 
+
+∂Q(j)
+
+∂θ j
+
+= 0. (26) Concatenation is linear with respect to its inputs, so the same property holds for H(l). Since the RMS statistics used in ρ(l) are also treated as stop-gradient quantities, the product ρ(l) ⊙H(l) has no gradient through the explicit historical path. Multiplication by the trainable matrix W (l)⊤ 
+
+> R
+
+therefore yields Eq. (24). This statement does not remove gradients that may reach earlier layers through the ordinary hidden-state path X(l). □
+
+16 HERO-MoE D.4 SCALE -PRESERVING HISTORICAL FUSION 
+
+Proposition 3 (RMS calibration identity). For a token with rh > 0, the scaled historical vector 
+
+eh(l) 
+
+> t
+
+= ρ(l) 
+
+> t
+
+h(l) 
+
+> t
+
+(27) satisfies 
+
+RMS 
+
+eh(l)
+
+> t
+
+
+
+= rx
+
+r l − 1
+
+Ml
+
+rh
+
+rh + ϵ . (28) In the idealized case ϵ = 0 ,
+
+RMS 
+
+eh(l)
+
+> t
+
+
+
+= rx
+
+r l − 1
+
+Ml
+
+. (29) 
+
+Proof. The coefficient ρ(l) 
+
+> t
+
+is a nonnegative scalar shared by all components of the token row. Hence 
+
+RMS 
+
+
+
+ρ(l) 
+
+> t
+
+h(l)
+
+> t
+
+
+
+= ρ(l) 
+
+> t
+
+RMS 
+
+
+
+h(l)
+
+> t
+
+
+
+= ρ(l) 
+
+> t
+
+rh. (30) Substituting Eq. (19) proves Eq. (28), and setting ϵ = 0 proves Eq. (29). □
+
+Corollary 2 (Equivalent historical energy). Let the historical vector have dimension MlE. For 
+
+ϵ = 0 ,
+
+eh(l) 
+
+> t
+> 22
+
+= ( l − 1) Er 2
+
+> x
+
+. (31) Thus, after RMS alignment, the visible history has the same squared energy as l −1 virtual historical blocks of width E, regardless of the number Ml of blocks that are locally visible. For ϵ > 0, the finite-ϵ expression is 
+
+eh(l)
+
+> t
+> 22
+
+= ( l − 1) Er 2
+
+> x
+
+ rh
+
+rh + ϵ
+
+2
+
+, (32) which differs from the ideal identity only by the numerical-stability factor in parentheses. If rh = 0 ,the historical vector is already zero; the positive ϵ prevents an undefined division but cannot recover information that is absent from the history tensor. 
+
+Proof. By definition of RMS for a vector in RMlE ,
+
+eh(l)
+
+> t
+> 22
+
+= MlE RMS 
+
+eh(l)
+
+> t
+
+2
+
+. (33) Substitution of Eq. (28) gives 
+
+eh(l)
+
+> t
+> 22
+
+= MlE
+
+"
+
+rx
+
+r l − 1
+
+Ml
+
+rh
+
+rh + ϵ
+
+#2
+
+, (34) which simplifies to Eq. (32). Setting ϵ = 0 gives Eq. (31). □
+
+Interpretation. The factor p(l − 1) /M l is therefore an energy compensation term. When pipeline parallelism exposes fewer predecessor layers ( Ml < l − 1), the visible history is ampli-fied so that its total effective energy remains comparable to a single-stage router with l − 1 historical blocks. This does not claim that the individual expert probabilities become uniform or that routing load is automatically balanced; those are separate learned properties. D.5 INITIALIZATION AND LOGIT -SCALE STABILITY 
+
+Proposition 4 (Depth-independent initial logit variance). For a layer with Ml > 0, assume that the entries of the router weight are independent and sampled from 
+
+w(l) 
+
+> e,i
+
+∼ U (−bl, b l), bl = 1
+
+pd + ( l − 1) E , (35) and that the weights are independent of the router input. Suppose further that, for some σ2 
+
+> x
+
+> 0,
+
+E
+
+
+
+x(l)
+
+> t
+> 22
+
+
+
+= dσ 2
+
+> x
+
+, E
+
+eh(l)
+
+> t
+> 22
+
+
+
+= ( l − 1) Eσ 2
+
+> x
+
+. (36) 17 HERO-MoE Then, under the idealized ϵ = 0 calibration, every initial router logit has variance 
+
+Var 
+
+
+
+Z(l)
+
+> t,e
+
+
+
+= σ2
+
+> x
+
+3 , (37) independently of the layer depth l and the number of locally visible history layers Ml.When Ml = 0 , the historical branch is absent. Under the same initialization bound, the router receives only the current hidden representation, and the logit variance becomes 
+
+Var 
+
+
+
+Z(l)
+
+> t,e
+
+
+
+= dd + ( l − 1) Eσ2
+
+> x
+
+3 . (38) For the first layer, where l = 1 , this reduces to σ2
+
+> x
+
+/3.
+
+Proof. Let 
+
+u(l) 
+
+> t
+
+=
+
+h
+
+x(l) 
+
+> t
+
+eh(l)
+
+> t
+
+i
+
+(39) and let Dl = d + ( l − 1) E. For a uniform random variable on [−bl, b l], the variance is b2 
+
+> l
+
+/3. Since the weights have zero mean and are independent of the input, 
+
+Var 
+
+
+
+Z(l)
+
+> t,e
+
+
+
+= b2
+
+> l
+
+3 E
+
+
+
+u(l)
+
+> t
+> 22
+
+
+
+= 13Dl
+
+ dσ 2 
+
+> x
+
++ ( l − 1) Eσ 2
+
+> x
+
+
+
+= σ2
+
+> x
+
+3 .
+
+(40) For layers with Ml > 0, the number of locally visible history layers does not appear in the final expression because Eq. (31) calibrates the effective historical energy to (l − 1) Eσ 2
+
+> x
+
+. □
+
+Remark. Proposition 4 is a variance calculation under explicit independence and second-moment assumptions; it is not a guarantee about the trained network. When ϵ > 0, the historical energy is attenuated by the factor in Eq. (32). Under the same assumptions, the historical contribution to the initial router-logit variance is therefore reduced by the corresponding factor. D.6 BRANCH -WISE INITIAL LOGIT VARIANCE DECOMPOSITION 
+
+The preceding analysis characterizes the variance of the combined router logits. We further de-compose this variance into contributions from the original current-token branch and the historical residual branch. Consider a layer with Ml > 0 and the idealized calibration ϵ = 0 . For token t and expert e, write 
+
+Z(l) 
+
+> O,t,e
+
+= x(l)
+
+> t
+
+
+
+w(l)
+
+> O,e
+
+⊤
+
+, Z(l) 
+
+> R,t,e
+
+= eh(l)
+
+> t
+
+
+
+w(l)
+
+> R,e
+
+⊤
+
+, (41) so that 
+
+Z(l) 
+
+> t,e
+
+= Z(l) 
+
+> O,t,e
+
++ Z(l)
+
+> R,t,e
+
+. (42) 
+
+Proposition 5 (Branch-wise variance decomposition). Under the assumptions of Proposition 4, let 
+
+Dl = d + ( l − 1) E. 
+
+Assume that the entries of the original and residual router weight blocks are independently sampled from U(−1/√Dl, 1/√Dl). Then the initial logit variances of the two branches are 
+
+Var 
+
+
+
+Z(l)
+
+> O,t,e
+
+
+
+= dd + ( l − 1) Eσ2
+
+> x
+
+3 , (43) and 
+
+Var 
+
+
+
+Z(l)
+
+> R,t,e
+
+
+
+= (l − 1) Ed + ( l − 1) Eσ2
+
+> x
+
+3 . (44) 18 HERO-MoE Moreover, the two branches are uncorrelated at initialization: 
+
+Cov 
+
+
+
+Z(l)
+
+> O,t,e
+
+, Z (l)
+
+> R,t,e
+
+
+
+= 0 . (45) Consequently, 
+
+Var 
+
+
+
+Z(l)
+
+> t,e
+
+
+
+= Var 
+
+
+
+Z(l)
+
+> O,t,e
+
+
+
++ Var 
+
+
+
+Z(l)
+
+> R,t,e
+
+
+
+= σ2
+
+> x
+
+3 . (46) 
+
+Proof. Because the entries of each router weight block have variance 1/(3 Dl), the original branch satisfies 
+
+Var 
+
+
+
+Z(l)
+
+> O,t,e
+
+
+
+= 13Dl
+
+E
+
+
+
+x(l)
+
+> t
+> 22
+
+
+
+= dσ 2
+
+> x
+
+3Dl
+
+= dd + ( l − 1) Eσ2
+
+> x
+
+3 .
+
+(47) Similarly, using the idealized energy identity in Eq. (31), 
+
+Var 
+
+
+
+Z(l)
+
+> R,t,e
+
+
+
+= 13Dl
+
+E
+
+eh(l)
+
+> t
+> 22
+
+
+
+= (l − 1) Eσ 2
+
+> x
+
+3Dl
+
+= (l − 1) Ed + ( l − 1) Eσ2
+
+> x
+
+3 .
+
+(48) The covariance is zero because the two weight blocks are independently sampled and have zero mean. Adding the two branch variances gives Eq. (46). □
+
+Interpretation. The scale-preserving initialization keeps the total initial router-logit variance in-dependent of layer depth, but it does not force the original and historical branches to have equal contributions. Their idealized variance fractions are 
+
+η(l) 
+
+> O
+
+= dd + ( l − 1) E , η(l) 
+
+> R
+
+= (l − 1) Ed + ( l − 1) E , η(l) 
+
+> O
+
++ η(l) 
+
+> R
+
+= 1 . (49) Thus, under the global fan-in used by HERO-MoE, the relative contribution of the historical branch increases with depth while the total logit scale remains controlled. The number of locally visible history layers Ml does not appear in these idealized variance fractions because the scale-preserving factor compensates for the corresponding historical energy. With finite ϵ > 0, the historical contri-bution is attenuated in a token-dependent manner, and the exact residual-branch variance depends on the distribution of rh.D.7 THEORETICAL IMPLICATIONS 
+
+The preceding propositions establish the following properties of HERO-MoE: 1. The proposed router is a strict extension of the baseline router: removing historical infor-mation recovers the original routing function exactly. 2. Historical routing priors provide an additional decision signal without creating an explicit gradient path through earlier routing distributions. 3. For layers with Ml > 0, the factor p(l − 1) /M l compensates for the number of visible historical layers, making the calibrated effective historical energy independent of Ml in the idealized ϵ = 0 setting. 4. The historical branch modifies only the router logits. Therefore, any standard sparse routing operator can be applied after the proposed router without changing its definition. Together, these results provide a theoretical explanation for the three design goals of HERO-MoE: compatibility with standard sparse MoE routing, decoupling of historical priors from earlier router gradients, and calibrated historical signal magnitude across depth and different numbers of visible historical layers. 19 HERO-MoE 
+
+Algorithm 1: Depth-aware Initialization of the HERO-MoE Router 
+
+Input : Total number of MoE layers L, current layer index l, hidden dimension d, number of experts E, pipeline-stage assignment π(·)
+
+Output: Router weight W (l)
+
+// 1. Determine the visible historical layers 
+
+S(l) ← { j | j < l, π (j) = π(l)};
+
+Ml ← |S (l)|;// 2. Determine the physical router dimension 
+
+Dl ← d + MlE;// Dl = d when no preceding layer is visible // 3. Use the global depth to determine the initialization scale 
+
+bl ← 1
+
+pd + ( l − 1) E ;// 4. Initialize the single concatenated router matrix Initialize each entry W (l) 
+
+> e,i
+
+∼ U (−bl, b l) for e ∈ { 1, . . . , E } and i ∈ { 1, . . . , D l};
+
+if Ml = 0 then 
+
+W (l) 
+
+> O
+
+← W (l);
+
+W (l) 
+
+> R
+
+← ∅ ;
+
+else 
+
+Partition W (l) as W (l) =
+
+h
+
+W (l) 
+
+> O
+
+W (l)
+
+> R
+
+i
+
+;
+
+W (l) 
+
+> O
+
+∈ RE×d, W (l) 
+
+> R
+
+∈ RE×MlE ;
+
+return W (l)
+
+Algorithm 2: Stage-local Historical Routing in HERO-MoE 
+
+Input : Current hidden states X(l) ∈ RN ×d, current layer index l, pipeline-stage assignment π(·), preceding router logits 
+
+{Z(j)}j<l , router weight W (l), numerical constant ϵ > 0, sparse routing configuration C
+
+Output: Router logits Z(l), routing weights G(l), selected expert indices I(l), dense routing distribution Q(l)
+
+// 1. Identify stage-local routing history 
+
+S(l) ← { j | j < l, π (j) = π(l)};
+
+Ml ← |S (l)|;
+
+if Ml = 0 then 
+
+U (l) ← X(l);
+
+else 
+
+// 2. Collect detached dense routing distributions Enumerate S(l) = {j1, j 2, . . . , j Ml };
+
+for m ← 1 to Ml do 
+
+Q(jm ) ← StopGrad 
+
+
+
+softmax 
+
+
+
+Z(jm ) 
+
+;
+
+H(l) ←
+
+h
+
+Q(j1), Q(j2), . . . , Q(jMl )i
+
+;// 3. Apply token-wise scale-preserving fusion 
+
+rx ← RMS 
+
+
+
+X(l)
+
+;
+
+rh ← RMS 
+
+
+
+H(l)
+
+;
+
+ρ(l) ← rx
+
+rh + ϵ
+
+s
+
+l − 1
+
+Ml
+
+;
+
+fH(l) ← ρ(l) ⊙ H(l);// 4. Concatenate current features and historical features 
+
+U (l) ←
+
+h
+
+X(l) fH(l)i
+
+;// 5. Compute history-aware router logits 
+
+Z(l) ← U (l)W (l)⊤;// 6. Form dense routing probabilities for the current layer 
+
+Q(l) ← softmax 
+
+
+
+Z(l)
+
+;// 7. Apply the configured sparse routing policy 
+
+(G(l), I(l)) ← SparseRoute 
+
+
+
+Z(l), Q(l), C
+
+
+
+;// C may specify top-k, group-limited routing, capacity, and top-k weight normalization 
+
+return Z(l), G(l), I(l), Q(l)
+
+## E ALGORITHM OF HERO-M OE
+
+The pseudocode of HERO-MoE is divided into two procedures. Algorithm 1 initializes the history-aware router with a depth-aware global fan-in. Algorithm 2 performs stage-local history retrieval, scale-preserving fusion, router-logit computation, and standard sparse expert selection. 20 HERO-MoE 
+
+## F VISUALIZATION AND STATISTICAL DETAILS 
+
+This section describes the data processing and statistics used to generate Figures 3. 
+
+Layer-wise dependency and expert-level coupling. The routing analysis uses the trained router weights of a 30-layer MoE model with E = 128 experts and hidden dimension d = 1024 . The model is partitioned into two pipeline-parallel stages, with 15 layers per stage. The implementation uses zero-based layer indices 0, . . . , 29 , whereas the equations in the main text use one-based layer indices. Thus, an implementation layer index l0 corresponds to the mathematical layer index l =
+
+l0 + 1 .For a target layer l and a preceding layer p located in the same pipeline-parallel stage, let 
+
+W (l,p )R ∈ RE×E
+
+denote the residual-router weight block associated with the routing history from layer p to layer l.For each visible predecessor, the block is extracted from the columns following the first d current-token features. The layer-wise dependency strength shown in Figure 3(a) is computed as 
+
+Dl,p = W (l,p )R F
+
+r l − 1
+
+Ml
+
+, p < l, (50) where Ml is the number of preceding layers visible on the same pipeline-parallel stage. The multi-plier is the implementation equivalent of the depth-compensation factor in Eq. (10); it is computed as pl0/M l using the zero-based layer index l0. Entries corresponding to cross-stage layer pairs are set to zero because HERO-MoE uses stage-local routing history. Therefore, Figure 3(a) contains two independent 15 × 15 diagonal blocks. To quantify how strong expert-level interactions vary with layer distance, we define 
+
+W∆ =
+
+
+
+W (l,p )R
+
+
+
+> a,b
+
+: l − p = ∆ , p and l are in the same stage 
+
+
+
+, (51) where ∆ ∈ { 1, . . . , 14 } and a, b ∈ { 1, . . . , E }. A single global threshold is computed from all historical-router entries: 
+
+τ = Percentile 90 
+
+(
+
+|w| : w ∈
+
+> 14
+
+[
+
+> ∆=1
+
+W∆
+
+)! 
+
+. (52) For each inter-layer distance ∆, the negative and positive strong-coupling ratios are then calculated as 
+
+r− 
+
+> ∆
+
+= 100 
+
+|W ∆|
+
+X
+
+> w∈W ∆
+
+⊮[w < −τ ], r+∆ = 100 
+
+|W ∆|
+
+X
+
+> w∈W ∆
+
+⊮[w > τ ]. (53) Figure 3(b) visualizes r− 
+
+> ∆
+
+and r+∆ as stacked bars. Thus, this panel reports the fraction of strongly negative or positive coupling entries among all expert-pair weights at a given layer distance, rather than the fraction of activated experts. Finally, Figure 3(c) visualizes the raw residual weight block for the implementation pair Layer 8 
+
+→ Layer 9. The horizontal axis corresponds to source experts, and the vertical axis corresponds to target experts. The color range is symmetric around zero and is clipped at the 99.8th percentile of the absolute matrix values to reduce the influence of extreme entries. Positive and negative colors there-fore indicate the signs of learned residual-router coefficients. These signs serve as a weight-based structural proxy for positive and negative routing influence, rather than a direct causal measurement of expert cooperation or competition. 21
