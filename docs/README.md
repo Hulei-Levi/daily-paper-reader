@@ -6,27 +6,26 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-09-30
-- 运行时间：2026-09-30 23:06:35 UTC
+- 最新运行日期：2026-10-01
+- 运行时间：2026-10-01 22:53:58 UTC
 - 运行状态：成功
-- 本次总论文数：2
+- 本次总论文数：1
 - 精读区：0
-- 速读区：2
+- 速读区：1
 
 ### 今日简报（AI）
-2026-09-30 日报精选 2 篇速读：MoE 推理加速与机器人世界模型各有新招。最值得关注 SlimWise 按 Prefill/Decode 分阶段裁剪专家（7.0/10），以及 RoboFL 用联邦专家组装世界动作模型（6.0/10）。普通读者可先看 SlimWise 了解大模型降本思路，再顺带扫一眼 RoboFL 的联邦机器人方向。
-- 详情：[/202609/30/README](/202609/30/README)
+日报：今天0精读、1速读，唯一收录的是《Overview of the TREC 2025 Million Large Language Models track》（6.0/10）。  
+最值得看的是TREC 2025“百万级大语言模型”赛道综述，适合快速了解该评测track的整体设置。  
+普通读者可先把它当作百万级LLM评测的入门导览，若关注具体任务与结果再深入原文。
+- 详情：[/202610/01/README](/202610/01/README)
 
 ### 精读区论文标签
 - 本次无精读推荐。
 
 ### 速读区论文标签
-1. [SlimWise: Decoupling Expert Pruning Across Prefill and Decode for Efficient MoE Serving](/202609/30/2609.34117v1-slimwise-decoupling-expert-pruning-across-prefill-and-decode-for-efficient-moe-serving)  
-   标签：评分：7.0/10、query:moe-special
-   evidence：面向高效MoE服务，在预填充与解码阶段解耦专家剪枝
-2. [RoboFL: Federated Expert Assembly for World Action Models](/202609/30/2609.34968v1-robofl-federated-expert-assembly-for-world-action-models)  
+1. [Overview of the TREC 2025 Million Large Language Models track](/202610/01/2609.31921v1-overview-of-the-trec-2025-million-large-language-models-track)  
    标签：评分：6.0/10、query:moe-special
-   evidence：联邦聚合中的MoE式路由与专家专业化稀释问题
+   evidence：面向百万专业化LLM的检索式专长推断与专家选择
 
 
 <div class="dpr-home-promo-card">
