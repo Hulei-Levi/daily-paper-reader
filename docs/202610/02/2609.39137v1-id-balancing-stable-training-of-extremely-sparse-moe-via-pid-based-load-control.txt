@@ -1,0 +1,1012 @@
+Title: ID Balancing: Stable Training of Extremely Sparse MoE via PID-Based Load Control
+
+URL Source: https://arxiv.org/pdf/2609.39137v1
+
+Published Time: Thu, 01 Oct 2026 01:05:34 GMT
+
+Number of Pages: 19
+
+Markdown Content:
+2026-10-01 
+
+# ID Balancing: Stable Training of Extremely Sparse MoE via PID-Based Load Control 
+
+Peng Jin ∗, Zihan Qiu ∗, Zekun Wang ∗, Bo Zheng ∗,
+
+Yang Xu , Tian Xie , Xiao Li , Huaqing Zhang , Haoran Lian , Rui Men ,
+
+Dayiheng Liu †
+
+Qwen Team, Alibaba Token Hub, Alibaba Group 
+
+> ∗
+
+Equal contribution. †Corresponding authors. 
+
+## Abstract 
+
+Scaling Large Language Models (LLMs) via Mixture-of-Experts (MoE) enables mas-sive parameter growth with nearly constant per-token computation. However, further scaling the parameter count requires increasingly sparse routing, where expert load im-balance becomes more severe. This imbalance reduces parameter utilization and train-ing efficiency, and can undermine training stability, becoming a bottleneck to reliable scaling. In this work, we unify two representative auxiliary-loss-free methods as incom-plete Proportional–Integral–Derivative (PID) controllers: DeepSeek’s loss-free method acts as a fixed-step integral controller, while Kimi K3’s Quantile Balancing functions as a generalized proportional controller. Building on this control perspective, we propose ID Balancing, an Integral–Derivative controller. It scales its integral term with load er-ror and activates its derivative term only when imbalance worsens, enabling stronger corrections for large or worsening errors and smaller updates near balance. Evaluated across Top-10 , Top-5, and Top-3 routing over 768 experts, ID Balancing reduces worst-case backbone MaxVio and training-average backbone MinVio by over 50% and 12% ,respectively, relative to the best baselines in the Top-3 setting. When the total parame-ter count increases from 18.9 B to 69.9 B (Top-10 -of-768 ), ID Balancing’s worst-case back-bone MaxVio remains nearly unchanged and is approximately 89.6% lower than that of the auxiliary-loss baseline. ID Balancing also maintains competitive language-modeling and downstream performance. The advantages of ID Balancing grow as sparsity in-creases, making it a promising solution for scaling larger, sparser MoE models. Top-10 of 768 1.3% Top-5 of 768 0.65% Top-3 of 768 0.39%       
+
+> 10 20 50 100 200
+> Worst backbone MaxVio ↓
+> 16.42 50.48 70.76 69.07 115.82 211.19 10.13 21.16 31.11
+> 8.36 10.33 15.33
+> (a) MaxVio vs. sparsity
+> Top-10 of 768 1.3% Top-5 of 768 0.65% Top-3 of 768 0.39%
+> 0.3 0.4 0.5 0.6 0.7 0.8
+> Avg. backbone MinVio ↓
+> 0.54 0.58 0.62 0.56 0.67 0.74 0.39 0.52 0.64
+> 0.38 0.46 0.55
+> (b) MinVio vs. sparsity
+> 1.03B active 18.9B total 3.2B active 69.9B total
+> 10 20 50 100
+> Worst backbone MaxVio ↓
+> 16.42 75.03 69.07 75.04 10.13 12.86
+> 8.36 7.79
+> (c) MaxVio vs. model size
+> Auxiliary loss DeepSeek loss-free Quantile Balancing ID Balancing (ours)
+
+Figure 1: ID Balancing maintains load control as routing becomes sparser and model capacity grows. (a) Worst backbone MaxVio for Top-10 , Top-5, and Top-3 routing over 768 experts. (b) Training-average backbone MinVio, expressed as a decimal ratio, across the same settings. Models in (a) and (b) have 
+
+18.9 B total parameters and are trained on 120 B tokens. (c) Worst backbone MaxVio as total parameters increase from 18.9 B to 69.9 B ( 1.03 B to 3.2 B active) under fixed Top-10 -of-768 routing, using the first 30 kand 50 k steps of the small and large models, respectively. 
+
+## 1 Introduction 
+
+Mixture-of-Experts (MoE) provides an efficient way to scale large language models (LLMs) through sparse expert activation (Jacobs et al., 1991; Roller et al., 2021). For each token, a router selects only K
+
+experts from a pool of E. With K fixed, adding experts increases total capacity without increasing the number of expert evaluations per token. This allows model capacity to grow under a fixed per-token 1arXiv:2609.39137v1 [cs.LG] 30 Sep 2026 0 5 10 15 20 25 30 
+
+Training step (k)         
+
+> 10 0
+> 10 1
+> 10 2
+> Mean MaxVio ↓
+> (a) Overloaded experts during training
+> 24 27 30 0.60 0.75 0.90 tail zoom (22–30k): ID Balancing lowest
+> Auxiliary loss DeepSeek loss-free Quantile Balancing ID Balancing (ours)
+> 0510 15 20 25 30
+
+Training step (k) 
+
+> 0.4 0.5 0.6 0.7 0.8 0.9 1.0
+> Mean MinVio ↓
+> (b) Underloaded experts during training
+> Auxiliary loss DeepSeek loss-free Quantile Balancing ID Balancing (ours)
+
+Figure 2: ID Balancing limits transient overload and sustained underload in highly sparse MoE train-ing. Results use Top-3-of-768 routing in an 18.9 B-parameter model trained on 120 B tokens, with metrics averaged over 20 backbone layers. (a) Mean MaxVio on a logarithmic scale ( ↓). (b) Mean MinVio ( ↓). ID Balancing achieves the lowest training-average underload. compute budget. As the expert pool expands, the active fraction K/E decreases, making extremely sparse routing a natural direction for MoE scaling (Dai et al., 2024; Puigcerver et al., 2024). As routing becomes sparser, maintaining balanced expert loads becomes more difficult. Small changes near the Top-K selection boundary alter token assignments, making expert loads sensitive to router scores (Lepikhin et al., 2021; Zhou et al., 2022). Overloaded experts slow down MoE computation (He et al., 2022; 2021; Nie et al., 2022), while underloaded experts receive insufficient training and leave part of the model capacity unused. This imbalance limits both training efficiency and the benefits of adding more experts. Fig. 1 illustrates these challenges as routing becomes sparser or model capacity grows. Effective load control is therefore a key requirement for reliably training larger, sparser MoE models. Existing auxiliary-loss-free methods (Wang et al., 2024b; Liu et al., 2024; Team et al., 2026) adjust ex-pert biases using routing feedback. We interpret these updates through a unified Proportional–Integral– Derivative (PID) framework (Johnson & Moradi, 2005), where expert biases form the control state and deviations from uniform load provide the feedback signal. DeepSeek’s loss-free method acts as a fixed-step integral controller, applying the same correction to small and large load errors. Kimi K3’s Quantile Balancing acts as a generalized proportional controller, setting the bias from a target computed on the current batch without explicitly accumulating past load errors. Fig. 2 illustrates the transient overload and sustained underload observed under Top-3-of-768 routing. This control perspective links their up-date methods to their limitations and motivates a more adaptive response: corrections should scale with the load error and respond when the imbalance worsens .Building on this control perspective, we propose ID Balancing, an Integral– Derivative controller for sta-ble training of highly sparse MoE models. Its integral term applies larger corrections to larger load errors and smaller corrections near balance. Its derivative term uses changes in load error to add an extra cor-rection only when the imbalance worsens. ID Balancing accumulates these corrections in the expert bias and omits the proportional term. Re-centering after each update removes the common bias component without changing routing decisions. The method requires only O(E) token-count feedback per layer and adds no balancing gradient to the language-modeling objective. We evaluate ID Balancing with Top-10 , Top-5, and Top-3 routing over 768 experts and model sizes up to 
+
+69.9 B total parameters. We also test load control at a constant learning rate 2.3 × the standard peak. In the Top-3 setting, ID Balancing reduces worst-case backbone MaxVio (Wang et al., 2024b) and training-average backbone MinVio by more than 50% and 12% , respectively, relative to the best baselines. Under fixed Top-10 -of-768 routing, its worst-case backbone MaxVio remains nearly unchanged as total param-eters increase from 18.9 B to 69.9 B. These load-control improvements are accompanied by competitive language-modeling and downstream performance. Our contributions are: 
+
+• We propose a unified PID view of auxiliary-loss-free MoE balancing that connects existing update methods to their control behavior. Under this view, DeepSeek’s loss-free method acts as fixed-step integral control, while Quantile Balancing acts as generalized proportional control. 
+
+• We propose ID Balancing, combining a magnitude-aware integral term with a worsening-gated deriva-tive term. The method adjusts expert biases using only O(E) token-count feedback per layer, without 2adding a balancing gradient to the language-modeling objective. 
+
+• We validate ID Balancing across routing sparsities, model scales, and training conditions. Further analyses show effective load control during continued pretraining, improved backbone load balance, and fewer inactive experts at inference. 
+
+## 2 Loss-Free Balancing as PID Control 
+
+Section 2.1 introduces the three PID branches. We then formulate MoE load balancing as a control prob-lem in Section 2.2 and examine the two methods in Section 2.3. 
+
+2.1 The PID Controller 
+
+A Proportional–Integral–Derivative (PID) controller (Podlubny, 1994; Ang et al., 2005; Visioli, 2006; Shah & Agashe, 2016; Aström & Hägglund, 2005) uses feedback to drive a system toward a target. At step t,it computes the error et as the target minus the measured output and produces a control signal ut. The proportional branch responds to the current error, the integral branch accumulates past errors, and the derivative branch responds to changes in error (Isaksson & Graebe, 2002). A standard discrete-time form is: 
+
+ut = Kp et
+
+︸ ︷︷ ︸ 
+
+> proportional
+
++ Ki
+
+∑ 
+
+> τ≤t
+
+eτ
+
+︸ ︷︷ ︸
+
+> integral
+
++ Kd (et − et−1)
+
+︸ ︷︷ ︸
+
+> derivative
+
+, (1) where Kp, Ki, Kd ≥ 0 are the gains of the three branches, and τ indexes the steps up to t. Eq. 1 is linear in the error. For MoE balancing, we use a generalized PID view that preserves the temporal roles of the three branches while allowing nonlinear feedback transformations. This view provides a common basis for comparing how expert-bias updates use feedback over time. 
+
+2.2 Load Balancing as a Control Problem 
+
+Consider an MoE layer with E routed experts and a Top-K router. For a token representation x ∈ Rd, the router computes logits z = Wrx, where d is the hidden size and Wr ∈ RE×d is the router weight matrix. An activation function σ maps each logit to an expert score si = σ(zi). Loss-free methods maintain a non-trainable bias bi for each expert and select experts using: 
+
+T (x) = TopK i∈[E](si + bi) , (2) where [E] = {1, . . . , E} and T (x) contains the indices of the K largest biased scores. The router obtains combination weights by normalizing the selected experts’ original scores si, without the biases. At training step t, let n(t) 
+
+> i
+
+be the number of tokens assigned to expert i. The uniform target load and normalized load error are: 
+
+¯n(t) = 1
+
+E
+
+> E
+
+∑
+
+> i=1
+
+n(t) 
+
+> i
+
+, e(t) 
+
+> i
+
+= ¯n(t) − n(t)
+
+> i
+
+¯n(t) , (3) where ¯n(t) > 0 for any nonempty batch. Negative errors indicate overload, while positive errors indicate underload. MaxVio and MinVio measure the largest deviations in these two directions, as defined in Eq. 13. These quantities define a feedback loop with uniform load as the target. The bias vector b(t)
+
+serves as both the persistent controller state and the routing input, while the token-count vector n(t) is the measured output. After each step, the controller uses the error vector e(t) to update the bias, which changes routing decisions and expert loads at the next step. 
+
+2.3 Existing Methods through a PID Lens 
+
+We compare expert-bias updates by how they use routing feedback over time. Let P(t), I(t), D(t) ∈ RE
+
+denote the proportional, integral, and derivative contributions. In a PID form, the next bias is: 
+
+b(t+1) = P(t) + I(t) + D(t). (4) The proportional branch uses the current measurement or a target computed from the current batch. The integral branch accumulates past load errors, while the derivative branch uses the error change 
+
+e(t) − e(t−1). These temporal roles define the branches, allowing nonlinear feedback transformations rather than requiring the linear dependence in Eq. 1. 3Algorithm 1 ID Balancing bias update, one MoE layer, per training iteration. 
+
+Require: expert count E, active experts K, integral gain Ki, derivative gain Kd 
+
+> 1:
+
+bi ← 0, eprev  
+
+> i
+
+← 0 for all i ∈ [E] ▷ bias and previous error  
+
+> 2:
+
+for each training iteration do  
+
+> 3:
+
+route the batch by T (x) = TopK i∈[E](si + bi) ▷ Eq. 2; bias frozen during the step  
+
+> 4:
+
+ni ← number of tokens assigned to expert i ▷ summed over microbatches and the data-parallel group  
+
+> 5:
+
+¯n ← 1
+
+> E
+
+∑Ei=1 ni ▷ uniform target load  
+
+> 6:
+
+for each expert i ∈ [E] do  
+
+> 7:
+
+ei ← ( ¯n − ni)/ ¯ n ▷ normalized load error, Eq. 3  
+
+> 8:
+
+∆ei ← ei − eprev  
+
+> i
+> 9:
+
+gi ← 1[ eprev  
+
+> i
+
+∆ei > 0 ] ▷ 1 iff the imbalance is worsening ( eprev  
+
+> i
+
+not yet updated)  
+
+> 10:
+
+bi ← bi + Ki ei + Kd gi ∆ei ▷ accumulate integral + gated derivative  
+
+> 11:
+
+eprev  
+
+> i
+
+← ei 
+
+> 12:
+
+end for  
+
+> 13:
+
+bi ← bi − 1
+
+> E
+
+∑Ej=1 bj for all i ∈ [E] ▷ center to zero mean  
+
+> 14:
+
+end for 
+
+In MoE routing, the bias b(t) is both a persistent controller state and the control input to the next Top-K
+
+decision. Eq. 4 uses the position form , which directly gives the next bias. The same update can also be written in an incremental form by adding ∆b(t) = b(t+1) − b(t) to the current bias. We use this generalized PID model as an interpretation of how a method uses feedback, not as a claim that every method follows the linear rule in Eq. 1. Under this view, DeepSeek loss-free maps to integral control, while Quantile Balancing can be interpreted as a generalized proportional controller. 
+
+DeepSeek’s loss-free method as fixed-step integral control. DeepSeek’s loss-free method (Wang et al., 2024b; Liu et al., 2024) updates each expert bias according to the sign of its load error. Starting from 
+
+b(0) = 0, the update is: 
+
+b(t+1) = b(t) + η sign (e(t)) = η ∑ 
+
+> τ≤t
+
+sign (e(τ )) = I(t), (5) where η > 0 is the step size and sign (·) acts elementwise. The update raises the bias of underloaded experts and lowers that of overloaded experts. The cumulative sum in Eq. 5 shows that the bias stores past sign errors. Under our generalized PID view, this corresponds to fixed-step integral control with 
+
+P(t) = D(t) = 0. However, the sign operation discards error magnitude: every nonzero error receives a correction of size η, regardless of the severity of the imbalance. 
+
+Quantile Balancing as generalized proportional control. Quantile Balancing (Team et al., 2026) com-putes a target bias from the current batch’s score distribution. Let S(t) ∈ Rm×E contain the scores for m
+
+tokens, where S(t) 
+
+> i,j
+
+is the score of expert j for token i. The method sets the next bias directly to this target: 
+
+b(t+1) = Q(S(t), b(t)) = P(t). (6) The corresponding increment, Q(S(t), b(t)) − b(t), corrects the deviation from the current target. Following Kimi K3, the target assigns approximately q = mK /E tokens to each expert. For token i, let 
+
+α(t) 
+
+> i
+
+be the (K+1)-th largest biased score S(t) 
+
+> i,r
+
++ b(t) 
+
+> r
+
+over r ∈ [E]. The target bias for expert j is: 
+
+Qj (S(t), b(t)) = − quantile 1−K/E
+
+({ S(t) 
+
+> i,j
+
+− α(t) 
+
+> i
+
+}mi=1
+
+), (7) where S(t) 
+
+> i,j
+
+− α(t) 
+
+> i
+
+is the score margin relative to the current cutoff. With these cutoffs held fixed, the target places approximately K/E of the biased margins above zero, matching the desired load q. Ties and integer rounding affect the exact count. 1 The target changes with the batch score distribution and depends on the current bias through α(t) 
+
+> i
+
+. The update therefore retains state dependence, but does not explicitly accumulate past load errors. Under our generalized PID view, this direct response to a batch-dependent target forms a nonlinear proportional branch with I(t) = D(t) = 0.
+
+> 1At scale, we estimate the quantile from a per-expert margin histogram (Team et al., 2026).
+
+40 5 10 15 20 25 30 
+
+Training step (k)         
+
+> 10 0
+> 10 1
+> 10 2
+> Worst MaxVio ↓
+> (a) Worst-case overloaded expert during training
+> 24 27 30 1.0 1.1 1.2 tail zoom (22–30k): I-only settles lower
+> DeepSeek loss-free Magnitude-aware integral (I only)
+> 0510 15 20 25 30
+
+Training step (k) 
+
+> 0.4 0.5 0.6 0.7 0.8 0.9 1.0
+> Mean MinVio ↓
+> (b) Underloaded experts during training
+> DeepSeek loss-free Magnitude-aware integral (I only)
+
+Figure 3: Magnitude-aware integral control reduces early overload and sustained underload. We com-pare the integral-only update with DeepSeek’s loss-free method in an 18.9 B model using Top-3-of-768 
+
+routing and 120 B training tokens. (a) Maximum MaxVio across the 20 backbone layers, shown on a log-arithmic scale ( ↓). (b) Mean MinVio across the same layers ( ↓). 
+
+Auxiliary loss as gradient-based balancing. Auxiliary-loss methods (Shazeer et al., 2017; Lepikhin et al., 2021; Xue et al., 2024) encourage balanced expert loads by adding a differentiable term to the training objective. For a batch of T tokens, a common form is: 
+
+Laux = α
+
+> E
+
+∑
+
+> i=1
+
+fi Pi, fi = 1
+
+T
+
+∑
+
+> x
+
+1[i ∈ T (x)] , Pi = 1
+
+T
+
+∑
+
+> x
+
+pi(x), (8) where the sums cover all tokens in the batch and 1[·] is the indicator function. Here, fi is the fraction of tokens assigned to expert i, and Pi is its average router probability, with pi(x) = softmax i(Wrx). The coefficient α controls the loss strength and absorbs constant scaling factors. The balancing loss updates the router weights Wr through the same optimization process as the language-modeling objective. It in-fluences token assignments through gradients on these weights, without maintaining a separate control bias. This places auxiliary-loss balancing outside the expert-bias control family in Eq. 4. 
+
+Implications for load control. DeepSeek’s loss-free method uses a fixed step regardless of error mag-nitude, creating a trade-off between response speed and precision. Its limited response to large errors is consistent with the early mean MaxVio spike of 132 in Fig. 2. Near balance, the same step risks overshoot-ing the target. Quantile Balancing instead follows a target derived from each batch’s score distribution. Changes in this target help explain its larger late-stage bias drift in Fig. 5. These observations motivate corrections that scale with the load error and respond more strongly when the imbalance worsens. 
+
+## 3 ID Balancing 
+
+Building on the control view in Section 2.3, ID Balancing responds to both the magnitude and the evo-lution of load errors. It changes only the expert-bias update, retaining the routing rule in Eq. 2 and the normalized error in Eq. 3. The controller combines a magnitude-aware integral term with a derivative term that activates only when the imbalance worsens. It omits the proportional term and re-centers the bias after each update to remove its common component. Algorithm 1 gives the complete update. 
+
+Magnitude-aware integral term. DeepSeek’s loss-free method uses only the sign of the load error, giv-ing every nonzero error the same correction size. To adapt the response to the severity of the imbalance, we scale the update by the normalized error itself: 
+
+b(t+1) 
+
+> i
+
+= b(t) 
+
+> i
+
++ Ki e(t) 
+
+> i
+
+, (9) where Ki ≥ 0 is the integral gain shared by all experts. The correction grows with |e(t) 
+
+> i
+
+| and shrinks as the expert approaches its target load. Since the bias accumulates these corrections, the update retains the memory of integral control. The integral update also preserves a zero-mean bias when initialized at b(0) = 0, because ∑ 
+
+> i
+
+e(t) 
+
+> i
+
+= 0 by Eq. 3. The fixed-sign update lacks this property: ∑ 
+
+> i
+
+sign (e(t) 
+
+> i
+
+) is 50 5 10 15 20 25 30 
+
+Training step (k)       
+
+> 0.2 0.3 0.4 0.5
+> Gate-active fraction ̄  g
+> (a) Gate activity during training
+> 0.0 2.5 5.0 7.5 10.0 12.5 15.0
+
+Training step (k)       
+
+> 0.7 0.8 0.9 1.0
+> Mean MaxVio ↓
+> (b) Mean overload during training
+> Magnitude-aware integral (I only) Magnitude-aware integral + gated derivative
+> 0.0 2.5 5.0 7.5 10.0 12.5 15.0
+
+Training step (k) 
+
+> 0.125 0.130 0.135 0.140
+> Magnitude-aware integral (I only) Magnitude-aware integral + gated derivative
+> Top-10% expert freq
+> (c) Top-10% routing frequency during training
+
+Figure 4: The worsening-gated derivative term reduces early overload and expert concentration. We compare magnitude-aware integral control with and without the derivative term in an 18.9 B model using Top-3-of-768 routing and 120 B training tokens. Metrics are averaged over 20 backbone layers. (a) ¯g(t)
+
+is the fraction of active gates averaged over the 20 backbone layers. (b) Mean MaxVio ( ↓). (c) Share of token assignments routed to the busiest 10% of experts ( → 0.10 ), with a balanced target of 0.10 .26→27k 27→28k 28→29k 29→30k 
+
+Checkpoint interval (last 5k steps) 
+
+> 0.002 0.004 0.006 0.008
+> Mean |Δ b| per 1k ↓
+
+(a) Bias drift in late training       
+
+> 0510 15 20 25 30
+
+Training step (k) 
+
+> 10 0
+> 10 1
+> Mean MaxVio ↓
+
+(b) Mean overload during training       
+
+> DeepSeek loss-free Quantile Balancing (EMA 0) Quantile Balancing (EMA 0.3) Quantile Balancing (EMA 0.5) Quantile Balancing (EMA 0.8) Quantile Balancing (EMA 0.95) ID Balancing (ours)
+> 0510 15 20 25 30
+
+Training step (k) 
+
+> 0.4 0.6 0.8 1.0
+> Mean MinVio ↓
+
+(c) Underloaded experts during training 
+
+Figure 5: EMA smoothing reduces bias drift but slows load correction in Quantile Balancing. We compare the original update ( ρ = 0), its EMA variants, DeepSeek’s loss-free method, and ID Balancing in an 18.9 B model using Top-3-of-768 routing and 120 B training tokens. All other comparisons use Quantile Balancing without EMA. (a) Mean absolute bias change |∆b| between checkpoints 1k steps apart during the final 5k steps ( ↓). (b) Mean MaxVio on a logarithmic scale ( ↓). (c) Mean MinVio ( ↓). generally nonzero, allowing the common bias component to drift. Fig. 3 compares the two integral up-dates. Scaling by error magnitude reduces the worst-layer MaxVio peak and lowers sustained underload, showing stronger early correction and better expert utilization. 
+
+Worsening-gated derivative term. The integral term responds to error magnitude but does not distin-guish growing from shrinking errors of the same size. To capture this difference, we compute the change in error: 
+
+∆e(t)
+
+i = e(t)
+
+i − e(t−1)
+
+i , (10) where e(−1)
+
+i = 0. We retain only changes that move an existing imbalance farther from zero: 
+
+g(t)
+
+i = 1
+
+[
+
+e(t−1)
+
+i ∆e(t)
+
+i > 0
+
+]
+
+∈ { 0, 1 }, (11) where 1[·] is the indicator function. The gate opens when the previous error and its change have the same sign, so the imbalance grows without crossing zero. It remains closed when the error is unchanged, moves toward zero, or crosses zero. It is also closed at the first step. The correction Kdg(t)
+
+i ∆e(t)
+
+i is accu-mulated in the bias alongside the integral update. It uses the error difference as its input, but differs from a classical derivative output by being both gated and accumulated. Fig. 4 shows that the active-gate frac-tion decreases from about 0.38 early in training to 0.25 later. Adding the gated correction lowers early load violations, while the trajectories approach those of the integral-only update as training progresses. 
+
+Why ID Balancing omits the proportional term. ID Balancing sets Kp = 0 and controls expert loads through accumulated bias corrections. Under the generalized PID view in Section 2.3, Quantile Balanc-ing follows a target computed from the current batch. As the score distribution changes, so does the target, leading to larger late-stage bias changes in our experiments. Smaller changes in relative expert biases limit perturbations to the Top-K selection boundary, helping stabilize routing. Smoother bias tra-jectories are also desirable for weight merging, such as averaging nearby checkpoints, where the merged weights must remain compatible with the routing state. Lower bias drift may reduce this mismatch 6Table 1: ID Balancing improves backbone load control while maintaining competitive LM loss. We compare Top-3, Top-5, and Top-10 routing over 768 experts in 18.9 B models trained on 120 B tokens. All summaries use the same 30 k-step window. Backbone Last1k and Avg. metrics are averaged over 20 layers, while Worst MaxVio is the maximum across layers and steps. MTP metrics are reported separately.                                                                                                                                                       
+
+> Backbone MTP Module Method Act./Total LM MaxVio ↓MinVio ↓MaxVio ↓MinVio ↓
+> loss Last1k Avg. Worst Last1k Avg. Last1k Avg. Worst Last1k Avg.
+> Top-3 of 768 experts, 120B tokens
+> Auxiliary loss 0.87B / 18.9B 1.7527 1.4809 1.7239 70.76 0.5462 0.6232 3.8952 4.4639 43.38 0.6580 0.7502 DeepSeek loss-free 1.7426 0.7314 1.9356 211.19 0.7487 0.7441 0.7477 0.8930 17.32 0.6868 0.6533 Quantile Balancing 1.7432 0.8093 0.7985 31.11 0.6504 0.6373 1.8777 1.2071 30.89 0.7106 0.7083
+> ID Balancing 1.7426 0.7026 0.7931 15.33 0.5266 0.5480 1.0165 0.9698 33.42 0.5832 0.5782 Top-5 of 768 experts, 120B tokens
+> Auxiliary loss 0.91B / 18.9B 1.7378 1.0296 1.2925 50.48 0.4537 0.5836 2.8407 3.1892 42.60 0.6006 0.6851 DeepSeek loss-free 1.7280 0.5821 1.4814 115.82 0.6741 0.6725 0.6515 0.7284 15.75 0.5517 0.5376 Quantile Balancing 1.7303 0.6376 0.6394 21.16 0.5335 0.5232 1.2480 0.8683 7.73 0.5516 0.5698
+> ID Balancing 1.7299 0.5404 0.6498 10.33 0.4238 0.4601 0.7808 0.7710 28.76 0.4754 0.4750 Top-10 of 768 experts, 120B tokens
+> Auxiliary loss 1.03B / 18.9B 1.7180 0.6862 1.0342 16.42 0.3631 0.5446 2.0145 2.2781 22.74 0.4511 0.5589 DeepSeek loss-free 1.7121 0.4418 0.9715 69.07 0.5534 0.5571 0.5828 0.6066 14.79 0.4752 0.4237 Quantile Balancing 1.7133 0.4776 0.4832 10.13 0.4060 0.3914 0.8642 0.6878 5.16 0.4443 0.4263
+> ID Balancing 1.7118 0.3863 0.5110 8.36 0.3282 0.3800 0.6070 0.5942 21.98 0.4938 0.3842
+
+risk by keeping the routing states of the source checkpoints closer. To examine the trade-off between bias smoothing and load control, we add exponential moving average (EMA) smoothing (Winters, 1960; Hunter, 1986) to Quantile Balancing only as a diagnostic: b(t+1) = ρ b(t) + ( 1 − ρ) Q(S(t), b(t)). Here, 
+
+0 ≤ ρ < 1 controls the smoothing strength, and ρ = 0 recovers the original update without EMA. Fig. 5 shows that stronger smoothing reduces bias drift but weakens early load control. ID Balancing achieves low bias drift and effective load balance through its integral and gated derivative updates, with-out additional EMA smoothing. 
+
+Zero-mean centering step. The integral update has zero mean because ∑ 
+
+> i
+
+e(t) 
+
+> i
+
+= 0. Gating does not preserve this property: ∑ 
+
+> i
+
+g(t) 
+
+> i
+
+∆e(t) 
+
+> i
+
+is generally nonzero, allowing the mean bias to drift as derivative corrections accumulate. Adding the same constant to every expert bias leaves the score ranking and the selected set T (x) unchanged. We therefore remove this common component after each update. This centering removes common bias drift but does not bound the differences between expert biases. 
+
+The complete ID Balancing update. Combining the integral and gated derivative corrections with re-centering gives: 
+
+˜b(t+1) 
+
+> i
+
+= b(t) 
+
+> i
+
++ Ki e(t)
+
+> i
+
+︸ ︷︷ ︸ 
+
+> magnitude-aware integral
+
++ Kd g(t) 
+
+> i
+
+∆e(t)
+
+> i
+
+︸ ︷︷ ︸
+
+> worsening-gated derivative
+
+,
+
+b(t+1) 
+
+> i
+
+= ˜b(t+1) 
+
+> i
+
+− 1
+
+E
+
+> E
+
+∑
+
+> j=1
+
+˜b(t+1) 
+
+> j
+
+.
+
+(12) where ˜b(t+1) 
+
+> i
+
+is the bias before re-centering and Kd ≥ 0 is the derivative gain. The second line ensures 
+
+∑ 
+
+> i
+
+b(t+1) 
+
+> i
+
+= 0. The resulting bias controls routing at the next step. 
+
+## 4 Experiments 
+
+Section 4.1 evaluates load balance and model quality during standard and continued pretraining, fol-lowed by downstream evaluation. Section 4.2 examines higher learning rates and optimization dynam-ics. We then analyze layer-wise load balance and inference-time expert utilization in Section 4.3. Fi-nally, Section 4.4 isolates the effects of the integral and derivative gains and motivates the default setting 
+
+Ki = Kd = 6 × 10 −3.
+
+4.1 Model Quality Small-model validation. Our main comparison uses the Qwen-3.8-Next (Qiu et al., 2026) architecture with 20 Transformer layers, one multi-token prediction (MTP) module (Gloeckle et al., 2024), and 768 
+
+75 6 7 8 9 10 
+
+Training step (k)              
+
+> 1.045 1.050 1.055 1.060
+> LM loss ↓
+> (a) LM loss during CPT (Top-8 of 256 experts)
+> ID Balancing (ours, Ki=Kd= 6 × 10 −3 )ID Balancing (ours, Ki=Kd= 6 × 10 −6 )Bias frozen
+> 0246810
+
+Training step (k)      
+
+> 123
+> Mean MaxVio ↓
+> (b) Overloaded experts during CPT (Top-8 of 256 experts)
+> 0246810
+
+Training step (k)      
+
+> 0.4 0.6 0.8 1.0
+> Mean MinVio ↓
+> (c) Underloaded experts during CPT (Top-8 of 256 experts)
+> 5678910
+
+Training step (k)              
+
+> 1.010 1.015 1.020 1.025
+> LM loss ↓
+> (d) LM loss during CPT (Top-10 of 768 experts)
+> ID Balancing (ours, Ki=Kd= 6 × 10 −3 )ID Balancing (ours, Ki=Kd= 6 × 10 −6 )Bias frozen
+> 0246810
+
+Training step (k)      
+
+> 246
+> Mean MaxVio ↓
+> (e) Overloaded experts during CPT (Top-10 of 768 experts)
+> 0246810
+
+Training step (k) 
+
+> 0.6 0.7 0.8 0.9 1.0
+> Mean MinVio ↓
+> (f) Underloaded experts during CPT (Top-10 of 768 experts)
+
+Figure 6: Reduced ID Balancing gains limit load drift while retaining competitive LM loss during continued pretraining. We compare full gains ( Ki = Kd = 6 × 10 −3), gains reduced by 1000 × (6 ×
+
+10 −6), and a frozen bias in 28 -layer models at a constant learning rate of 3 × 10 −5. The frozen setting matches the continued-pretraining baselines for DeepSeek’s loss-free method and Quantile Balancing. The top and bottom rows use Top-8-of-256 and Top-10 -of-768 routing, respectively. (a, d) LM loss with 
+
+201 -step smoothing ( ↓). (b, e) Mean MaxVio ( ↓). (c, f) Mean MinVio ( ↓). routed experts per MoE layer. The model has approximately 18.9 B total parameters and 0.87 –1.03 B ac-tive parameters, depending on the routing setting. We train Top-3, Top-5, and Top-10 variants on 120 Btokens with a global batch size of 1024 . The learning rate peaks at 2.54 × 10 −3 and follows cosine decay to 3 × 10 −5. All comparisons use the same 30 k-step window, with backbone and MTP load metrics re-ported separately. We compare Auxiliary loss, DeepSeek’s loss-free method, Quantile Balancing, and ID Balancing using the same architecture, data, and optimizer settings. DeepSeek’s loss-free method uses a bias-update step size of η = 0.001 , following the DeepSeek-V3 technical report (Liu et al., 2024). The Auxiliary loss baseline uses a balancing coefficient of α = 0.05 , except in the coefficient sweep in Fig. 8. Quantile Balancing uses its original update without EMA, except in the diagnostic experiment in Fig. 5. The main ID Balancing runs use Ki = Kd = 6 × 10 −3, with gain ablations in Section 4.4. For contin-ued pretraining, we reduce both gains by 1000 × to 6 × 10 −6, as examined in Fig. 6. We measure expert overload and underload relative to the uniform target ¯n(t) defined in Eq. 3: 
+
+MaxVio (t) = max i n(t) 
+
+> i
+
+− ¯n(t)
+
+¯n(t) , MinVio (t) = ¯n(t) − min i n(t)
+
+> i
+
+¯n(t) , (13) where n(t) 
+
+> i
+
+is the token count of expert i at step t. Here, max i n(t) 
+
+> i
+
+and min i n(t) 
+
+> i
+
+are the largest and smallest numbers of tokens assigned to any of the E routed experts in the layer at step t, respectively. MaxVio measures the largest relative overload and is bounded by E/K − 1. MinVio measures the largest relative deficit and lies in [0, 1 ], reaching 1 when an expert receives no tokens. Lower values are better for both metrics. Last1k and Avg. denote means over the final 1k steps and the full training window, respectively. Backbone values are averaged over the 20 layers, except Worst MaxVio, which takes the maximum over both layers and steps. MTP metrics are computed separately, and LM loss is averaged over the final 1ksteps. Act./Total lists active and total parameter counts. Darker green indicates lower LM loss, darker red indicates larger load violations, and bold marks the best value in each column within a block. Tab. 1 shows similar LM loss among the three bias-based methods, with a maximum gap of 0.0023 , while Aux-iliary loss has the highest loss in every setting. The differences in backbone load balance are larger. ID Balancing achieves the lowest Worst and Last1k MaxVio, as well as the lowest Last1k and Avg. MinVio, across all three routing settings. In Top-3, it reduces Worst MaxVio from 211.19 for DeepSeek’s method and 31.11 for Quantile Balancing to 15.33 . Quantile Balancing retains lower Avg. backbone MaxVio in Top-5 and Top-10 , while ID Balancing is best in Top-3.8Table 2: ID Balancing maintains competitive downstream performance. Results use Top-8-of-256 and Top-10 -of-768 routing. Avg. is the mean across nine benchmarks covering knowledge, STEM, reasoning, multilingual understanding, and code generation. Block headers list active and total parameter counts. Higher scores are better, and bold marks the best result in each column within a block.                                                                                               
+
+> Method Knowledge STEM Reasoning Multilingual Code Avg.
+> MMLU MMLU-Pro SuperGPQA MATH GSM8K BBH MMMLU EvalPlus MultiPL-E
+> Top-8 of 256 experts, 3.0B / 24.8B, 560B tokens
+> Auxiliary loss 68.00 47.10 27.36 47.12 74.94 69.57 59.82 51.51 46.22 54.63 DeepSeek loss-free 70.08 47.23 27.43 45.84 76.54 71.09 60.61 53.96 46.66 55.49 Quantile Balancing 70.49 48.06 27.61 48.54 74.37 69.94 60.17 52.27 42.46 54.88
+> ID Balancing 69.58 48.19 27.52 47.92 74.49 72.91 60.78 56.48 44.40 55.81 Top-10 of 768 experts, 3.2B / 69.9B, 560B tokens
+> Auxiliary loss 71.67 50.91 30.15 50.74 79.08 71.09 63.62 56.55 49.28 58.12 DeepSeek loss-free 72.02 50.11 30.10 50.72 77.37 72.47 64.07 57.65 51.52 58.45 Quantile Balancing 72.37 51.14 30.40 50.86 75.40 73.42 64.13 57.94 51.41 58.56
+> ID Balancing 72.09 51.46 29.95 50.30 78.17 73.96 63.58 56.90 51.52 58.66
+
+Table 3: ID Balancing and Quantile Balancing maintain load control at a higher learning rate. Results use a 1.03 B-active/ 18.9 B-total model with Top-10 -of-768 routing, trained on 120 B tokens at a constant learning rate of 5.86 × 10 −3 (2.3 × the standard peak). Both methods yield lower backbone load violations than Auxiliary loss and DeepSeek’s loss-free method.                                                                 
+
+> Backbone MTP Module Method LM MaxVio ↓MinVio ↓MaxVio ↓MinVio ↓
+> loss Last1k Avg. Worst Last1k Avg. Last1k Avg. Worst Last1k Avg. Auxiliary loss 2.0099 3.1383 2.8379 20.89 0.8423 0.8458 3.5640 3.0533 4.83 0.6569 0.7130 DeepSeek loss-free 2.0031 1.3755 1.7811 72.54 0.8730 0.8269 0.5033 0.7124 17.98 0.6105 0.5514 Quantile Balancing 2.0009 0.5021 0.4979 2.96 0.4083 0.3938 0.6243 0.5836 10.77 0.4346 0.4308
+> ID Balancing 2.0007 0.6437 0.7274 11.97 0.4828 0.4950 0.4642 0.5068 7.20 0.3940 0.3927
+
+Maintaining active load control during continued pretraining. DeepSeek’s loss-free method freezes expert biases during continued pretraining (Liu et al., 2024). This avoids routing changes caused by bias updates but also removes active load correction (Gupta et al., 2023). As the model adapts to a new data distribution, expert loads may shift while the bias remains fixed (Gururangan et al., 2020; Ke et al., 2023). We therefore examine whether smaller ID Balancing gains preserve active load control without disrupting adaptation. We compare full gains ( Ki = Kd = 6 × 10 −3), gains reduced by 1000 ×
+
+(Ki = Kd = 6 × 10 −6), and a frozen bias in two 28 -layer models using Top-8-of-256 and Top-10 -of-768 
+
+routing. Fig. 6 shows the trade-off. Full gains yield the highest LM loss, while freezing the bias leaves substantial load imbalance. With Top-8-of-256 routing, the frozen baseline reaches mean MaxVio of 2.2 –
+
+2.5 and MinVio of about 0.83 . With Top-10 -of-768 routing, MaxVio remains between 6 and 7, and MinVio reaches about 0.95 , indicating severe expert underuse. The reduced gains maintain LM loss within 0.001 
+
+of the frozen baseline during the second half of continued pretraining, while improving load balance. Mean MaxVio settles near 1 with Top-8-of-256 routing and falls from about 6 to 1.4 with Top-10 -of-768 
+
+routing. These results show that small bias updates correct load drift while retaining LM performance close to that of a frozen bias. We use the reduced gains as the default for continued pretraining. The DeepSeek and Quantile Balancing baselines keep their expert biases frozen during this stage. 
+
+Downstream quality. We evaluate models trained on 560 B tokens across nine benchmarks. The eval-uated models use Top-8-of-256 and Top-10 -of-768 routing. MMLU (5-shot) (Hendrycks et al., 2021a), MMLU-Pro (5-shot, Chain of Thought) (Wang et al., 2024c), and SuperGPQA (5-shot, Chain of Thought) (Du et al., 2026) assess general knowledge. MATH (4-shot, Chain of Thought) (Hendrycks et al., 2021b) and GSM8K (4-shot, Chain of Thought) (Cobbe et al., 2021) assess mathematical problem solving, while BBH (3-shot, Chain of Thought) (Suzgun et al., 2023) evaluates reasoning. MMMLU (5-shot) (OpenAI, 2024) evaluates multilingual understanding, while EvalPlus (0-shot; the average over HumanEval (Chen et al., 2021), MBPP (Austin et al., 2021), HumanEval+ and MBPP+) and MultiPL-E (0-shot; Python, C++, Java, PHP, TypeScript, C#, Bash, JavaScript) (Cassano et al., 2023) evaluate code generation. Tab. 2 shows that ID Balancing achieves an average score of 55.81 under Top-8-of-256 routing. Under Top-10 -of-768 routing, ID Balancing improves the average score from 58.12 to 58.66 relative to Auxiliary loss and scores higher than this baseline on five of the nine benchmarks. These results show that ID Balancing maintains competitive downstream quality alongside improved load balance. 90 5 10 15 20 25 30 
+
+Training step (k) 
+
+> 10 0
+> 10 1
+> Mean MaxVio ↓
+
+(a) Overloaded experts during training       
+
+> Auxiliary loss DeepSeek loss-free Quantile Balancing ID Balancing (ours)
+> 0510 15 20 25 30
+
+Training step (k) 
+
+> 0.4 0.5 0.6 0.7 0.8 0.9 1.0
+> Mean MinVio ↓
+
+(b) Underloaded experts during training 
+
+> Auxiliary loss DeepSeek loss-free Quantile Balancing ID Balancing (ours)
+
+Figure 7: ID Balancing and Quantile Balancing maintain lower backbone overload and underload at a higher learning rate. Results use Top-10 -of-768 routing and 120 B training tokens at a constant learning rate of 5.86 × 10 −3 (2.3 × the standard peak). Metrics are averaged over 20 backbone layers. (a) Mean MaxVio on a logarithmic scale ( ↓), showing a large early spike for DeepSeek’s loss-free method. (b) 
+
+Mean MinVio ( ↓), showing more severe underload for Auxiliary loss and DeepSeek’s loss-free method. 0 5 10 15 20 25 30 
+
+Training step (k)          
+
+> 2.0 2.2 2.4 2.6 2.8 3.0
+> LM loss ↓
+> (a) Language-modeling loss during training
+> Auxiliary loss ( α= 0.05) Auxiliary loss ( α= 0.10) Auxiliary loss ( α= 0.50)
+> 0510 15 20 25 30
+
+Training step (k)          
+
+> 10 0
+> 10 1
+> 10 2
+> Mean MaxVio ↓
+> (b) Overloaded experts during training
+> Auxiliary loss ( α= 0.05) Auxiliary loss ( α= 0.10) Auxiliary loss ( α= 0.50)
+> 0510 15 20 25 30
+
+Training step (k)    
+
+> 0.2 0.4 0.6 0.8 1.0
+> Mean MinVio ↓
+> (c) Underloaded experts during training
+> Auxiliary loss ( α= 0.05) Auxiliary loss ( α= 0.10) Auxiliary loss ( α= 0.50)
+
+Figure 8: Larger auxiliary-loss coefficients worsen LM loss and load balance at a higher learning rate. 
+
+We compare α ∈ { 0.05, 0.10, 0.50 } in a 1.03 B-active/ 18.9 B-total model with Top-10 -of-768 routing at a constant learning rate of 5.86 × 10 −3 (2.3 × the standard peak). Training targets 120 B tokens, but both larger-α runs terminate before 30 k steps. Load metrics are averaged over 20 backbone layers. (a) LM loss ( ↓), with higher values at larger coefficients. (b) Mean MaxVio on a logarithmic scale ( ↓), exceeding 
+
+50 for α = 0.50 . (c) Mean MinVio ( ↓), reaching 1.0 for both larger coefficients. 
+
+4.2 Training Stability 
+
+Building on the standard-training results in Section 4.1, we examine load control at a higher learning rate. We also track gradient norms and MoE-output magnitudes to assess training dynamics beyond load balance. 
+
+Load control at a higher learning rate. We train the Top-10 -of-768 model for 120 B tokens at a constant learning rate of 5.86 × 10 −3, or 2.3 × the standard peak. This tests load control while the learning rate remains high throughout training. Tab. 3 and Fig. 7 show that ID Balancing and Quantile Balancing maintain lower backbone load violations than Auxiliary loss and DeepSeek’s loss-free method. Their Last1k backbone MaxVio values are 0.6437 and 0.5021 , compared with 3.1383 and 1.3755 for the two baselines. Quantile Balancing gives the strongest backbone balance, while ID Balancing achieves the lowest LM loss of 2.0007 and the lowest Last1k and Avg. MTP MaxVio of 0.4642 and 0.5068 . These results show effective load control at the tested learning rate, with different trade-offs between backbone and MTP balance. Auxiliary loss updates the router weights Wr through the same optimization process as the LM objective. Increasing its coefficient does not restore load balance in the tested range. Fig. 8 compares α ∈ { 0.05, 0.10, 0.50 }: larger coefficients yield higher LM loss, reaching about 2.45 for α =
+
+0.50 , compared with about 2.01 for α = 0.05 . At α = 0.50 , mean MaxVio exceeds 50 . Both larger-coefficient runs reach mean MinVio of 1.0 and terminate before 30 k steps. The bias-based methods avoid balancing gradients, but differ in their response to load errors. DeepSeek’s fixed-step update gives the same correction to every nonzero error, limiting its response to severe imbalance. Its worst backbone 10 10 15 20 25 30 35 40 45 50 
+
+Training step (k)        
+
+> 0.035 0.040 0.045 0.050 0.055 0.060
+> Grad-norm ↓
+> (a) Steady-state grad-norm during training
+> 48 49 50 0.0420 0.0425 0.0430 tail zoom (48--50k)
+> Auxiliary loss DeepSeek loss-free Quantile Balancing ID Balancing (ours)
+> 010 20 30 40 50
+
+Training step (k)   
+
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> Mean MoE-output magnitude
+> (b) MoE-output magnitude during training
+> 40 45 50 0.50 0.55 0.60 tail zoom (40--50k)
+> Auxiliary loss DeepSeek loss-free Quantile Balancing ID Balancing (ours)
+
+Figure 9: Load-balancing methods show distinct gradient and activation dynamics. Results use a 3.0 B-active/ 24.8 B-total model with Top-8-of-256 routing over 50 k steps. (a) Global gradient norm. ID Balanc-ing and Quantile Balancing have lower, smoother trajectories, while DeepSeek’s loss-free method shows stronger late-stage fluctuations. (b) MoE-output magnitude averaged over the 28 backbone layers. MaxVio reaches 72.54 . ID Balancing scales corrections with the error magnitude, consistent with the lower transient overload observed in Fig. 3. Quantile Balancing directly updates the bias toward the current batch’s target and achieves the tightest backbone balance in this stress test. The comparison highlights two effective responses: error-scaled accumulation and direct batch-wise target correction. 
+
+Gradient and activation dynamics. We examine the global gradient norm and mean MoE-output mag-nitude in a Top-8-of-256 model with 3.0 B active and 24.8 B total parameters. Fig. 9 reports both signals, with output magnitudes averaged over the 28 backbone layers (Wang et al., 2024a; Xiong et al., 2020). ID Balancing and Quantile Balancing end with gradient norms near 0.043 , below Auxiliary loss at 0.050 
+
+and DeepSeek’s loss-free method at 0.049 . DeepSeek’s method also shows stronger late-stage fluctua-tions. MoE-output magnitudes rise early and then decline, with Quantile Balancing ending near 0.54 
+
+and the other methods near 0.51 –0.52 . ID Balancing thus maintains a lower, smoother gradient norm while retaining an output scale close to those of Auxiliary loss and DeepSeek’s loss-free method. 
+
+4.3 Model Characteristics Training-time characteristics. Fig. 10 complements the aggregate results in Tab. 1 by reporting MaxVio and MinVio for all 20 backbone layers under Top-3-of-768 routing. The top and bottom rows show the training average and the final 1k-step average, respectively. Auxiliary loss shows substantial variation in both metrics across layers, with only modest improvement in the final 1k steps. DeepSeek’s loss-free method has particularly high training-average overload in deeper layers: MaxVio reaches about 6.0 
+
+at layer 19 , compared with 0.9 over the final 1k steps. Despite this lower late-stage overload, MinVio remains near 1.0 in several layers, indicating persistent underutilization. Quantile Balancing and ID Balancing maintain more consistent load control across layers, with smaller differences between their training-average and final-stage profiles. ID Balancing achieves lower or comparable MaxVio and lower MinVio than Quantile Balancing across all 20 layers. Its aggregate advantage therefore reflects improve-ments throughout the backbone. For all four methods, MinVio generally increases in deeper layers. ID Balancing limits underload but does not eliminate this shared depth-wise trend. 
+
+Expert utilization at inference. We evaluate expert utilization in continued-pretrained models by record-ing layer-wise loads and router scores in prefill mode on nine downstream benchmarks. Each layer value is averaged over the benchmarks. The evaluated models use Top-8-of-256 and Top-10 -of-768 rout-ing. Models within each setting share the same architecture. ID Balancing uses Ki = Kd = 6 × 10 −6
+
+during continued pretraining. Fig. 11(a, d) reports the inactive-expert ratio , the fraction of experts re-ceiving no evaluation token. Under Top-8-of-256 routing, its average ratio is 3.1% , compared with 3.5% 
+
+for DeepSeek’s loss-free method, 4.1% for Quantile Balancing, and 4.7% for Auxiliary loss. Under Top-
+
+10 -of-768 routing, it reduces the average ratio from 8.4% to 6.4% and the first-layer ratio from 9.3% to 
+
+2.6% relative to Auxiliary loss. These results show fewer unused experts on the evaluation data, con-sistent with the lower training-time MinVio in Fig. 10. Under Top-8-of-256 routing, inactive ratios gen-erally increase in deeper layers across methods. Fig. 11(b, e) reports the top-K gating-score entropy, 11 0 4 8 12 16 19 
+
+Layer index 
+
+> 123456
+> Mean MaxVio ↓
+
+(a) Per-layer MaxVio (training avg.)      
+
+> Auxiliary loss DeepSeek loss-free Quantile Balancing ID Balancing (ours)
+> 04812 16 19
+
+Layer index 
+
+> 0.4 0.5 0.6 0.7 0.8 0.9 1.0
+> Mean MinVio ↓
+
+(b) Per-layer MinVio (training avg.)      
+
+> 04812 16 19
+
+Layer index 
+
+> 123456
+> Mean MaxVio ↓
+
+(c) Per-layer MaxVio (last 1k steps)      
+
+> Auxiliary loss DeepSeek loss-free Quantile Balancing ID Balancing (ours)
+> 04812 16 19
+
+Layer index 
+
+> 0.4 0.5 0.6 0.7 0.8 0.9 1.0
+> Mean MinVio ↓
+
+(d) Per-layer MinVio (last 1k steps) Figure 10: ID Balancing maintains consistent overload and underload control across layers. Results use Top-3-of-768 routing over 30 k steps and cover all 20 backbone layers. The top and bottom rows show the training average and the final 1k-step average, respectively. (a, c) MaxVio ( ↓). (b, d) MinVio ( ↓). ID Balancing achieves lower or comparable MaxVio and lower MinVio than Quantile Balancing across all layers. MinVio generally increases with depth for all four methods. 
+
+Htop-K = − ∑Ki=1 wi log wi in nats, where wi is the normalized combination weight of selected expert i.Higher entropy indicates a more even mixture over selected experts. Under Top-8-of-256 routing, the loss-free methods have slightly higher entropy than Auxiliary loss on average across layers, while differences among DeepSeek’s loss-free method, Quantile Balancing, and ID Balancing are small. Fig. 11(c, f) re-ports the full-pool selection-score entropy, Hfull = − ∑Ee=1 pe log pe. For Auxiliary loss, pe is the softmax probability over router logits. For the loss-free methods, it is obtained by clamping the biased sigmoid score σ(ze) + be to non-negative values and normalizing across experts. Higher entropy indicates a flat-ter score distribution. Its absolute values are not directly comparable across these score families. Under Top-8-of-256 routing, the loss-free score distributions become sharper with depth, while Auxiliary loss shows the opposite trend. 
+
+4.4 Ablations Integral gain Ki in isolation. With Kd = 0, we vary Ki ∈ { 3, 6, 9 } × 10 −3. Fig. 12 shows that the smallest gain corrects early backbone imbalance more slowly, while the trajectories become similar later. Increasing Ki from 3 × 10 −3 to 6 × 10 −3 reduces training-average backbone MaxVio from 0.9459 to 0.8003 
+
+and worst-case MaxVio from 23.26 to 14.96 (Tab. 4). A further increase to 9 × 10 −3 lowers the average only slightly, to 0.7872 , but raises worst-case backbone MaxVio to 20.13 and worst-case MTP MaxVio from 
+
+15.18 to 35.56 . The smallest gain retains the lowest LM loss and several final-stage and MTP load metrics. We therefore choose Ki = 6 × 10 −3 for its stronger early correction and lowest worst-case backbone MaxVio, while avoiding the larger MTP violations at 9 × 10 −3.12 0 5 10 15 20 25 
+
+Layer index      
+
+> 0.0 2.5 5.0 7.5 10.0
+> Inactive-expert ratio (%)  (a) Inactive experts at inference (Top-8 of 256 experts)
+> Auxiliary loss DeepSeek loss-free Quantile Balancing ID Balancing (ours)
+> 0510 15 20 25
+
+Layer index      
+
+> 1.85 1.90 1.95 2.00
+> Gating-score entropy  Htop-k (nats)  (b) Gating-score entropy (Top-8 of 256 experts)
+> 0510 15 20 25
+
+Layer index      
+
+> 4.8 5.0 5.2
+> Selection-score entropy  Hfull  (nats)
+> (c) Selection-score entropy (Top-8 of 256 experts)
+> 0510 15 20 25
+
+Layer index      
+
+> 0510
+> Inactive-expert ratio (%)  (d) Inactive experts at inference (Top-10 of 768 experts)
+> Auxiliary loss DeepSeek loss-free Quantile Balancing ID Balancing (ours)
+> 0510 15 20 25
+
+Layer index      
+
+> 2.0 2.1 2.2
+> Gating-score entropy  Htop-k (nats)  (e) Gating-score entropy (Top-10 of 768 experts)
+> 0510 15 20 25
+
+Layer index 
+
+> 5.8 6.0 6.2 6.4
+> Selection-score entropy  Hfull  (nats)
+> (f) Selection-score entropy (Top-10 of 768 experts)
+
+Figure 11: ID Balancing reduces expert inactivity relative to Auxiliary loss. Results are averaged by layer over nine downstream benchmarks. The top and bottom rows use Top-8-of-256 and Top-10 -of-768 
+
+routing, respectively. (a, d) Inactive-expert ratio, the fraction of experts receiving no evaluation token (↓). (b, e) Top-K gating-score entropy, where a larger value means a more even mixture over selected experts. (c, f) Full-pool selection-score entropy, where a larger value means a flatter selection-score distribution. Table 4: An integral gain of Ki = 6 × 10 −3 yields the lowest worst-case backbone MaxVio among the tested gains. Results use a 0.87 B-active/ 18.9 B-total model with Top-3-of-768 routing over 30 k steps. We fix Kd = 0 and vary Ki ∈ { 3, 6, 9 } × 10 −3. Increasing Ki to 9 × 10 −3 further reduces training-average backbone violations but worsens MTP balance. Lower values are better for all metrics. 
+
+Backbone MTP module Setting LM MaxVio ↓ MinVio ↓ MaxVio ↓ MinVio ↓
+
+loss Last1k Avg. Worst Last1k Avg. Last1k Avg. Worst Last1k Avg. 
+
+Integral gain Ki, integral term only, Kd=0
+
+Ki = 3 × 10 −3 1.7422 0.6759 0.9459 23.26 0.5190 0.5777 0.6375 0.7991 9.14 0.5603 0.5775 
+
+Ki = 6 × 10 −3 1.7431 0.6924 0.8003 14.96 0.5233 0.5527 0.8557 0.8862 15.18 0.5848 0.5714 
+
+Ki = 9 × 10 −3 1.7429 0.6831 0.7872 20.13 0.5263 0.5436 0.9222 1.0388 35.56 0.6279 0.5800 
+
+Derivative gain Kd and early load control. With Ki = 6 × 10 −3, we vary Kd ∈ { 0, 3, 6, 12 } × 10 −3,using Kd = 0 as the integral-only baseline. Adding the derivative term improves early backbone load control, while later trajectories remain similar (Fig. 13(a)). The default Kd = 6 × 10 −3 reduces mean backbone MaxVio from 2.0020 to 1.9330 over 0–1k steps and from 0.9059 to 0.8612 over 1–5k steps, with lower MinVio in both intervals (Tab. 5). Over 1–5k steps, it also reduces the sampled cumulative excess above layer-mean MaxVio Vt = 1 by 57.9% relative to the integral-only baseline, using unsmoothed observations (Fig. 13(b)). These early gains come with a trade-off in MTP balance. Larger derivative gains reduce backbone overload over 1–5k steps but increase MTP overload. At the default gain, training-average MTP MaxVio rises from 0.8862 to 0.9698 , while training-average backbone MaxVio improves only modestly, from 0.8003 to 0.7931 . We choose Kd = 6 × 10 −3 because it provides stronger backbone control over 1–5k steps than 3 × 10 −3, with less MTP overload than 12 × 10 −3. It also yields the lowest LM loss and training-average backbone MinVio among the tested gains. 
+
+## 5 Related Work 
+
+Sparse mixture-of-experts. Transformer architectures and large-scale pretraining have driven progress in language modeling (Vaswani et al., 2017; Radford et al., 2019; Brown et al., 2020), followed by instruc-13 Table 5: Larger derivative gains reduce backbone overload over 1–5k steps but increase MTP overload. 
+
+Results use a 0.87 B-active/ 18.9 B-total model with Top-3-of-768 routing over 30 k steps. We fix Ki =
+
+6 × 10 −3 and vary Kd ∈ { 0, 3, 6, 12 } × 10 −3, with Kd = 0 as the integral-only baseline. Load metrics summarize the indicated early intervals and the full training window (Avg.).                                                                                                   
+
+> Backbone MTP module Setting LM 0–1k steps 1–5k steps Avg. 0–5k steps Avg. loss MaxVio ↓MinVio ↓MaxVio ↓MinVio ↓MaxVio ↓MinVio ↓MaxVio ↓MinVio ↓MaxVio ↓MinVio ↓
+> Derivative gain Kd, fixed Ki=6×10 −3
+> Kd=0(I only) 1.7431 2.0020 0.7955 0.9059 0.5989 0.8003 0.5527 1.4965 0.6222 0.8862 0.5714
+> Kd=3×10 −31.7428 1.8900 0.7853 0.8869 0.5992 0.7910 0.5485 1.7454 0.6201 0.9459 0.5799
+> Kd=6×10 −31.7426 1.9330 0.7791 0.8612 0.5899 0.7931 0.5480 1.7724 0.6336 0.9698 0.5782
+> Kd=12 ×10 −31.7427 1.8100 0.7644 0.8131 0.5833 0.7812 0.5501 2.0382 0.6048 1.0922 0.5660 0510 15 20 25 30
+
+Training step (k) 
+
+> 0.4 0.6 0.8 1.0 1.2 1.4 1.6 1.8 2.0
+> Mean MaxVio ↓
+
+(a) Backbone MaxVio ( Ki sweep)          
+
+> Ki= 3×10 −3
+> Ki= 6×10 −3
+> Ki= 9×10 −3
+> 0510 15 20 25 30
+
+Training step (k) 
+
+> 0.45 0.50 0.55 0.60 0.65 0.70
+> Mean MinVio ↓
+
+(b) Backbone MinVio ( Ki sweep)    
+
+> Ki= 3×10 −3
+> Ki= 6×10 −3
+> Ki= 9×10 −3
+
+Figure 12: A small integral gain responds slowly to the early imbalance, while larger gains converge to similar backbone trajectories. Results use Top-3-of-768 routing over 30 k steps with Kd = 0. We compare Ki ∈ { 3, 6, 9 } × 10 −3. (a) Mean backbone MaxVio ( ↓). (b) Mean backbone MinVio ( ↓). tion tuning and conversational models (Ouyang et al., 2022; OpenAI, 2022; Achiam et al., 2023). Sparse MoE models extend this scaling direction by increasing total capacity through conditional expert activa-tion, with a smaller increase in per-token computation (Du et al., 2022; Rajbhandari et al., 2022; Muen-nighoff et al., 2025; Puigcerver et al., 2024; He, 2024; Yang et al., 2025a). Switch Transformer (Fedus et al., 2022) and GShard (Lepikhin et al., 2021) use Top-1 and Top-2 routing, respectively, while BASE Lay-ers (Lewis et al., 2021), Hash Layers (Roller et al., 2021), and Expert Choice (Zhou et al., 2022) explore alternative token–expert assignments. Sparse activation also extends beyond standard feed-forward ex-perts: MoH (Jin et al., 2025b) applies selective activation to attention heads, and MoE++ (Jin et al., 2025a) combines feed-forward and zero-computation experts. Our work addresses the load-control challenge that arises as the active fraction of a Top-K MoE decreases. 
+
+Balancing through an auxiliary loss. Auxiliary-loss methods encourage balanced routing by combin-ing each expert’s token fraction with its average router probability (Fedus et al., 2022). The resulting gradients update the same router weights as the language-modeling objective, introducing a trade-off between the two objectives (Yu et al., 2020; Sener & Koltun, 2018; Liu et al., 2021). System-level ap-proaches such as LocMoE (Li et al., 2024) and MegaBlocks (Gale et al., 2023) further address efficient MoE execution. ID Balancing controls expert selection through a separate bias update, without adding a balancing gradient to the training objective. 
+
+Auxiliary-loss-free balancing. Auxiliary-loss-free methods add an expert-specific bias for Top-K se-lection and exclude it from the combination weights (Wang et al., 2024b; Liu et al., 2024). DeepSeek’s loss-free method updates this bias using the sign of the load error. Its fixed step discards error magni-tude, creating a trade-off between correcting large errors and avoiding overshoot near balance. Kimi K3’s Quantile Balancing (Team et al., 2026) instead computes a batch-dependent target bias from quantiles of router-score margins. At inference, the learned bias is frozen and routing uses ordinary Top-K selec-tion. We propose a generalized PID view that organizes these updates by how they use feedback over time: DeepSeek’s loss-free method acts as fixed-step integral control, while Quantile Balancing acts as generalized proportional control. This view motivates ID Balancing, which combines magnitude-aware integral control with a worsening-gated derivative correction. 14 0 2 4 6 8 10 
+
+Training step (k)          
+
+> 0.4 0.6 0.8 1.0 1.2 1.4 1.6 1.8 2.0
+> Mean MaxVio ↓
+> (a) Backbone MaxVio ( Kdsweep)
+> Kd= 0 (I only)
+> Kd= 3×10 −3
+> Kd= 6×10 −3
+> Kd= 12×10 −3
+> 12345
+
+Training step (k) 
+
+> 020 40 60 80 100 120 140
+> Sampled excess ( V > 1) ↓
+> (b) Cumulative excess overload
+
+Figure 13: The derivative term reduces early backbone overload. Results use Top-3-of-768 routing with 
+
+Ki = 6 × 10 −3 and Kd ∈ { 0, 3, 6, 12 } × 10 −3, where Kd = 0 is the integral-only baseline. Let Vt denote mean MaxVio over the 20 backbone layers. (a) Vt over the first 10 k steps, smoothed with a five-point moving average. (b) Cumulative excess above Vt = 1 over 1–5k steps. 
+
+## 6 Conclusion 
+
+Effective load control is essential to using the capacity of larger, sparser MoE models. We propose a gen-eralized PID view of auxiliary-loss-free balancing and use it to develop ID Balancing, which combines magnitude-aware integral control with a worsening-gated derivative correction and zero-mean bias cen-tering. The method requires only O(E) token-count feedback per layer and adds no balancing gradient to the language-modeling objective. Experiments across routing sparsities, model sizes, and learning-rate settings show effective load control while maintaining competitive language-modeling and downstream performance. Reduced gains retain active load correction during continued pretraining, and further anal-yses show consistent backbone load control across layers and fewer inactive experts on evaluation data. These results support ID Balancing as a practical approach to load control for larger, sparser MoE models. 
+
+## Limitations 
+
+Our evaluation covers several routing sparsities, model sizes, and training conditions within a family of decoder-only MoE models using fixed Top-K routing. Extending the evaluation to other architec-tures and routing methods is a natural next step. The accumulated worsening-gated derivative update is supported empirically. The scaling experiments compare complete model configurations that differ in depth, width, active and total parameters, and training duration, so they assess load control across configurations without isolating the effect of model size alone. 
+
+## References 
+
+Josh Achiam, Steven Adler, Sandhini Agarwal, Lama Ahmad, Ilge Akkaya, Florencia Leoni Aleman, Diogo Almeida, Janko Altenschmidt, Sam Altman, Shyamal Anadkat, et al. Gpt-4 technical report. 
+
+arXiv preprint arXiv:2303.08774 , 2023. Kiam Heong Ang, Gregory Chong, and Yun Li. Pid control system analysis, design, and technology. 
+
+IEEE transactions on control systems technology , 13(4):559–576, 2005. Karl J Aström and Tore Hägglund. Advanced PID control . John Wiley & Sons, 2005. Jacob Austin, Augustus Odena, Maxwell Nye, Maarten Bosma, Henryk Michalewski, David Dohan, Ellen Jiang, Carrie Cai, Michael Terry, Quoc Le, et al. Program synthesis with large language models. arXiv preprint arXiv:2108.07732 , 2021. Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, et al. Language models are few-shot learn-ers. In NeurIPS , pp. 1877–1901, 2020. Federico Cassano, John Gouwar, Daniel Nguyen, Sydney Nguyen, Luna Phipps-Costin, Donald Pinckney, Ming-Ho Yee, Yangtian Zi, Carolyn Jane Anderson, Molly Q Feldman, et al. Multipl-e: A scalable and 15 polyglot approach to benchmarking neural code generation. IEEE Transactions on Software Engineering ,49(7):3675–3691, 2023. Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde De Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, et al. Evaluating large language models trained on code. arXiv preprint arXiv:2107.03374 , 2021. Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, et al. Training verifiers to solve math word problems. arXiv preprint arXiv:2110.14168 , 2021. Damai Dai, Chengqi Deng, Chenggang Zhao, RX Xu, Huazuo Gao, Deli Chen, Jiashi Li, Wangding Zeng, Xingkai Yu, Yu Wu, et al. Deepseekmoe: Towards ultimate expert specialization in mixture-of-experts language models. In ACL , pp. 1280–1297, 2024. Tri Dao and Albert Gu. Transformers are ssms: Generalized models and efficient algorithms through structured state space duality. arXiv preprint arXiv:2405.21060 , 2024. Nan Du, Yanping Huang, Andrew M Dai, Simon Tong, Dmitry Lepikhin, Yuanzhong Xu, Maxim Krikun, Yanqi Zhou, Adams Wei Yu, Orhan Firat, et al. Glam: Efficient scaling of language models with mixture-of-experts. In ICML , pp. 5547–5569, 2022. Xeron Du, Yifan Yao, Kaijing Ma, Bingli Wang, Tianyu Zheng, Minghao Liu, Yiming Liang, Xiaolong Jin, Zhenlin Wei, Chujie Zheng, et al. Supergpqa: Scaling llm evaluation across 285 graduate disciplines. In NeurIPS , 2026. William Fedus, Barret Zoph, and Noam Shazeer. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23(120):1–39, 2022. Trevor Gale, Deepak Narayanan, Cliff Young, and Matei Zaharia. Megablocks: Efficient sparse training with mixture-of-experts. In MLSys , pp. 288–304, 2023. Fabian Gloeckle, Badr Youbi Idrissi, Baptiste Rozière, David Lopez-Paz, and Gabriel Synnaeve. Better & faster large language models via multi-token prediction. arXiv preprint arXiv:2404.19737 , 2024. Kshitij Gupta, Benjamin Thérien, Adam Ibrahim, Mats L Richter, Quentin Anthony, Eugene Belilovsky, Irina Rish, and Timothée Lesort. Continual pre-training of large language models: How to (re) warm your model? arXiv preprint arXiv:2308.04014 , 2023. Suchin Gururangan, Ana Marasović, Swabha Swayamdipta, Kyle Lo, Iz Beltagy, Doug Downey, and Noah A Smith. Dont stop pretraining: Adapt language models to domains and tasks. In ACL , pp. 8342–8360, 2020. Jiaao He, Jiezhong Qiu, Aohan Zeng, Zhilin Yang, Jidong Zhai, and Jie Tang. Fastmoe: A fast mixture-of-expert training system. arXiv preprint arXiv:2103.13262 , 2021. Jiaao He, Jidong Zhai, Tiago Antunes, Haojie Wang, Fuwen Luo, Shangfeng Shi, and Qin Li. Fastermoe: modeling and optimizing training of large-scale dynamic pre-trained models. In PPoPP , pp. 120–134, 2022. Xu Owen He. Mixture of a million experts. arXiv preprint arXiv:2407.04153 , 2024. Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Stein-hardt. Measuring massive multitask language understanding. In ICLR , 2021a. Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. Measuring mathematical problem solving with the math dataset. arXiv preprint arXiv:2103.03874 , 2021b. J Stuart Hunter. The exponentially weighted moving average. Journal of quality technology , 18(4):203–210, 1986. AJ Isaksson and SF Graebe. Derivative filter is an integral part of pid design. IEE Proceedings-Control Theory and Applications , 149(1):41–45, 2002. Robert A Jacobs, Michael I Jordan, Steven J Nowlan, and Geoffrey E Hinton. Adaptive mixtures of local experts. Neural computation , 3(1):79–87, 1991. Peng Jin, Bo Zhu, Yuan Li, and Shuicheng Yan. Moe++: Accelerating mixture-of-experts methods with zero-computation experts. In ICLR , pp. 50832–50856, 2025a. 16 Peng Jin, Bo Zhu, Li Yuan, and Shuicheng Yan. Moh: Multi-head attention as mixture-of-head attention. In ICML , 2025b. Michael A Johnson and Mohammad H Moradi. PID control . Springer, 2005. Zixuan Ke, Yijia Shao, Haowei Lin, Tatsuya Konishi, Gyuhak Kim, and Bing Liu. Continual pre-training of language models. arXiv preprint arXiv:2302.03241 , 2023. Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu, Dehao Chen, Orhan Firat, Yanping Huang, Maxim Krikun, Noam Shazeer, and Zhifeng Chen. Gshard: Scaling giant models with conditional computa-tion and automatic sharding. In ICLR , 2021. Mike Lewis, Shruti Bhosale, Tim Dettmers, Naman Goyal, and Luke Zettlemoyer. Base layers: Simplify-ing training of large, sparse models. In ICML , pp. 6265–6274, 2021. Jing Li, Zhijie Sun, Xuan He, Li Zeng, Yi Lin, Entong Li, Binfan Zheng, Rongqian Zhao, and Xin Chen. Locmoe: A low-overhead moe for large language model training. arXiv preprint arXiv:2401.13920 , 2024. Aixin Liu, Bei Feng, Bing Xue, Bingxuan Wang, Bochao Wu, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenyu Zhang, Chong Ruan, et al. Deepseek-v3 technical report. arXiv preprint arXiv:2412.19437 ,2024. Bo Liu, Xingchao Liu, Xiaojie Jin, Peter Stone, and Qiang Liu. Conflict-averse gradient descent for multi-task learning. In NeurIPS , pp. 18878–18890, 2021. Niklas Muennighoff, Luca Soldaini, Dirk Groeneveld, Kyle Lo, Jacob Morrison, Sewon Min, Weijia Shi, Pete Walsh, Oyvind Tafjord, Nathan Lambert, et al. Olmoe: Open mixture-of-experts language models. In ICLR , pp. 62061–62121, 2025. Xiaonan Nie, Pinxue Zhao, Xupeng Miao, Tong Zhao, and Bin Cui. Hetumoe: An efficient trillion-scale mixture-of-expert distributed training system. arXiv preprint arXiv:2203.14685 , 2022. OpenAI. Introducing chatgpt. CoRR , 2022. URL https://openai.com/blog/chatgpt .OpenAI. Multilingual massive multitask language understanding (mmmlu). Dataset available at Hugging Face , 2024. Long Ouyang, Jeffrey Wu, Xu Jiang, Diogo Almeida, Carroll Wainwright, Pamela Mishkin, Chong Zhang, Sandhini Agarwal, Katarina Slama, Alex Ray, et al. Training language models to follow instructions with human feedback. In NeurIPS , pp. 27730–27744, 2022. Igor Podlubny. Fractional-order systems and fractional-order controllers. Institute of Experimental Physics, Slovak Academy of Sciences, Kosice , 12(3):1–18, 1994. Joan Puigcerver, Carlos Riquelme Ruiz, Basil Mustafa, and Neil Houlsby. From sparse to soft mixtures of experts. In ICLR , pp. 28435–28445, 2024. Zihan Qiu, Zekun Wang, Xiao Li, Yanpeng Li, Yang Xu, Yixuan Wang, Huaqing Zhang, Rui Men, Bochao Mao, Chengruidong Zhang, et al. On the design of qwen3. 8-next architecture: Evaluation, efficiency, and training stability. arXiv preprint arXiv:2608.30320 , 2026. Alec Radford, Jeffrey Wu, Rewon Child, David Luan, Dario Amodei, Ilya Sutskever, et al. Language models are unsupervised multitask learners. OpenAI blog , 1(8):9, 2019. Samyam Rajbhandari, Conglong Li, Zhewei Yao, Minjia Zhang, Reza Yazdani Aminabadi, Ammar Ah-mad Awan, Jeff Rasley, and Yuxiong He. Deepspeed-moe: Advancing mixture-of-experts inference and training to power next-generation ai scale. In ICML , pp. 18332–18346, 2022. Stephen Roller, Sainbayar Sukhbaatar, Jason Weston, et al. Hash layers for large sparse models. In 
+
+NeurIPS , pp. 17555–17566, 2021. Ozan Sener and Vladlen Koltun. Multi-task learning as multi-objective optimization. In NeurIPS , 2018. Pritesh Shah and Sudhir Agashe. Review of fractional pid controller. Mechatronics , 38:29–41, 2016. Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. arXiv preprint arXiv:1701.06538 , 2017. 17 Yutao Sun, Li Dong, Shaohan Huang, Shuming Ma, Yuqing Xia, Jilong Xue, Jianyong Wang, and Furu Wei. Retentive network: A successor to transformer for large language models. arXiv preprint arXiv:2307.08621 , 2023. Mirac Suzgun, Nathan Scales, Nathanael Schärli, Sebastian Gehrmann, Yi Tay, Hyung Won Chung, Aakanksha Chowdhery, Quoc Le, Ed H Chi, Denny Zhou, et al. Challenging big-bench tasks and whether chain-of-thought can solve them. In Findings of the ACL , pp. 13003–13051, 2023. Kimi Team, Tongtong Bai, Yifan Bai, Yiping Bao, Jianfeng Cai, Xinyuan Cai, Peizhou Cao, Yuxuan Cao, Ziwei Chai, Y Charles, et al. Kimi k3: Open frontier intelligence. arXiv preprint arXiv:2607.24653 , 2026. Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. In NeurIPS , 2017. Antonio Visioli. Practical PID control . Springer, 2006. Hongyu Wang, Shuming Ma, Li Dong, Shaohan Huang, Dongdong Zhang, and Furu Wei. Deepnet: Scaling transformers to 1,000 layers. IEEE Transactions on Pattern Analysis and Machine Intelligence , 46 (10):6761–6774, 2024a. Lean Wang, Huazuo Gao, Chenggang Zhao, Xu Sun, and Damai Dai. Auxiliary-loss-free load balancing strategy for mixture-of-experts. arXiv preprint arXiv:2408.15664 , 2024b. Yubo Wang, Xueguang Ma, Ge Zhang, Yuansheng Ni, Abhranil Chandra, Shiguang Guo, Weiming Ren, Aaran Arulraj, Xuan He, Ziyan Jiang, et al. Mmlu-pro: A more robust and challenging multi-task language understanding benchmark. In NeurIPS , pp. 95266–95290, 2024c. Peter R Winters. Forecasting sales by exponentially weighted moving averages. Management science , 6 (3):324–342, 1960. Ruibin Xiong, Yunchang Yang, Di He, Kai Zheng, Shuxin Zheng, Chen Xing, Huishuai Zhang, Yanyan Lan, Liwei Wang, and Tieyan Liu. On layer normalization in the transformer architecture. In ICML ,pp. 10524–10533, 2020. Fuzhao Xue, Zian Zheng, Yao Fu, Jinjie Ni, Zangwei Zheng, Wangchunshu Zhou, and Yang You. Open-moe: An early effort on open mixture-of-experts language models. arXiv preprint arXiv:2402.01739 ,2024. An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388 , 2025a. Songlin Yang, Bailin Wang, Yikang Shen, Rameswar Panda, and Yoon Kim. Gated linear attention trans-formers with hardware-efficient training. In ICML , pp. 56501–56523, 2024. Songlin Yang, Jan Kautz, and Ali Hatamizadeh. Gated delta networks: Improving mamba2 with delta rule. In ICLR , pp. 29687–29707, 2025b. Tianhe Yu, Saurabh Kumar, Abhishek Gupta, Sergey Levine, Karol Hausman, and Chelsea Finn. Gradient surgery for multi-task learning. In NeurIPS , pp. 5824–5836, 2020. Yanqi Zhou, Tao Lei, Hanxiao Liu, Nan Du, Yanping Huang, Vincent Zhao, Andrew M Dai, Quoc V Le, James Laudon, et al. Mixture-of-experts with expert choice routing. In NeurIPS , pp. 7103–7114, 2022. 
+
+## A Experimental Setup 
+
+A.0.1 Scaling Setups Model architectures. We evaluate three hybrid MoE configurations that cover different expert-pool and model scales. Their specifications are summarized in Tab. A. All three models combine full attention and gated linear attention (Yang et al., 2024; 2025b; Dao & Gu, 2024; Sun et al., 2023), with one full-attention layer every four Transformer layers. Each MoE layer contains one shared expert in addition to the routed experts. The input embedding and output head are untied. 18 Table A: Architectural specifications for the evaluated MoE models. Parameter counts include the input embedding and untied output head, and exclude the MTP module. Active parameters include all dense and shared components together with the routed experts selected by Top-K.
+
+Specification Small MoE Medium MoE Large MoE 
+
+Transformer layers 20 28 28 Hidden size 1024 2048 2048 Vocabulary size 248320 248320 248320 Softmax-attention heads 16 16 16 Query groups 2 2 2Softmax-attention head dimension 256 256 256 Full-attention interval 4 4 4Linear-attention key/value dimension 128 / 128 128 / 128 128 / 128 Linear-attention key/value heads 8 / 32 16 / 32 16 / 32 Per-expert FFN size 384 512 512 Routed experts 768 256 768 Shared experts 1 1 1Top-K 3 / 5 / 10 8 10 Tied input/output embeddings No No No Total parameters 18.9B 24.8B 69.9B Active parameters 0.87B / 0.91B / 1.03B 3.0B 3.2B 19

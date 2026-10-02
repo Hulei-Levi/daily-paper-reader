@@ -1,0 +1,1237 @@
+Title: Score the Update, Not the Token: Descent-Aligned Routing for Combinatorial LoRA Experts
+
+URL Source: https://arxiv.org/pdf/2610.00493v1
+
+Published Time: Fri, 02 Oct 2026 00:19:16 GMT
+
+Number of Pages: 24
+
+Markdown Content:
+# Score the Update, Not the Token: Descent-Aligned Routing for Combinatorial LoRA Experts 
+
+Priya Nair 1, Lukas Brenner 2, Maya Lindqvist 1, Daniel Whitmore 2,Wen-Hsuan Liu 1, Tom Saliencro 1, Amara Okonkwo 2, Rohan Desai 2
+
+> 1
+
+University of California, Irvine 2University of Washington 
+
+saliencro@gmail.com 
+
+Abstract 
+
+Mixture-of-LoRA-experts methods raise the ca-pacity of low-rank adaptation by routing each token to a few low-rank experts. Nearly all of them tie one input-side factor to one output-side factor per expert, and nearly all of them route by scoring the token: the router picks experts without seeing what any of them would write. We argue that the router should score the update. To first order, adding an expert’s update to a layer output lowers the loss by the inner product between that update and the negative loss gradi-ent at the output. This usefulness is quadratic in the token, so a router that is linear in the token sees only the part of it that runs through the token mean, and routers that rank experts by the norm of their own activations never see the output factor. If each expert is split into a reader (down-projection) and a writer (up-projection), the usefulness of every reader–writer pair be-comes an inner product in the shared rank-r
+
+space, and all NANB pairs can be scored from 
+
+NA +NB vectors. We build V ANE on this iden-tity. A low-rank compass predicts the descent direction of each token. VANE scores every pair by the alignment between its update and the compass without forming any update, ac-tivates the top-k pairs with additive gates, and gives every pair its exact first-order router gra-dient. On single-domain commonsense reason-ing and a four-domain multi-task mixture with Llama-3.2-3B and Llama-3.1-8B, V ANE attains the best average among twelve PEFT and MoE-LoRA baselines, by 0.9–1.1 and 1.3–1.5 points respectively, with less than half the trainable pa-rameters of an 8-expert MoE-LoRA. Its router scores also track the measured usefulness of experts far more closely than token routers do. 
+
+1 Introduction 
+
+Low-rank adaptation (LoRA) fine-tunes a frozen language model by adding a trainable product BA 
+
+to each weight matrix (Hu et al., 2022; Houlsby et al., 2019). When the training data mixes domains whose updates conflict, the standard remedy is a mixture of low-rank experts: a router sends each token to a few experts, so capacity grows while per-token cost stays small (Shazeer et al., 2017; Fedus et al., 2022; Dou et al., 2024; Li et al., 2024a; Wu et al., 2024a; Tian et al., 2024; Fan et al., 2025). Follow-up work refines how experts are allocated across layers (Gao et al., 2024; Liao et al., 2025), how many are active (Zhuang et al., 2026; Li et al., 2025; Saliencro et al., 2026a), how finely capac-ity is split (Zhao et al., 2025; Zou et al., 2025a; Zeng et al., 2025), and how experts share parame-ters (Wang et al., 2025a; Cao et al., 2026a). These designs share two conventions. Each ex-pert welds one input-side factor Ai to one output-side factor Bi, and the router scores the token : it maps the hidden state x to logits without seeing what any expert would compute. Combinatorial designs mix and match factors (Zhang et al., 2024; Zhao et al., 2025; Zeng et al., 2025), and self-routing lets experts select themselves by the size of their own activations (Lv et al., 2025; Zou et al., 2025a; Han et al., 2025; Hou et al., 2026). But no design states what a router should estimate, so routers are refined by heuristics such as entropy control, dynamic k, expert communication, and se-mantic priors (Li et al., 2025; Zhuang et al., 2026; Mu et al., 2026; Shi et al., 2026). We start from that question. Adding an expert’s update v to a layer output y changes the loss, to first order, by −⟨ δ, v ⟩, where δ = −∇ yℓ is the de-scent direction at the output. The usefulness of an expert for a token is thus the alignment between the update it would write and the direction in which the loss wants the output to move. Two consequences follow (Figure 1). Usefulness is second order in the token. Under a linear-response model, a router that is linear in x sees only the part of usefulness that runs through the token mean, and nothing for cen-tered tokens (Theorem 1). Norm-based self-routing sees only the input factor, so it cannot tell apart 1arXiv:2610.00493v1 [cs.LG] 30 Sep 2026 0 1 2 3          
+
+> token-mean strength κ= ‖ μ‖2/tr Σ
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> corr 2 with  [uab  | x]
+> (a) What a router can see
+> update score (exact) VANE, calibrated token router (Thm. 1) token router (fit) latent-linear reader norm
+> 10 010 110 2
+> training tokens (thousands)
+> 0.00 0.25 0.50 0.75 1.00
+> captured first-order gain  oracle random
+> (b) Learning to route
+> VANE token router latent-linear product router reader norm
+> 232527
+> 29211
+> implicit experts N=NANB
+> 10 −1
+> 10 0
+> 10 1
+> 10 2
+> MFLOPs / token
+> ×77
+> (c) Scoring every pair
+> materialize updates token router product router VANE (latent)
+
+Figure 1: What a router can see (exact computations in a controlled linear-response model with 64 reader–writer pairs; Appendix E). (a) Squared correlation between router scores and the expected usefulness E[uab | x] as the token mean grows. Token routers follow the ceiling of Theorem 1 (line: closed form; dots: least-squares fit) and see nothing for centered tokens. Reader norms are writer-blind. The update score is exact, and V ANE ’s calibrated version stays at 0.87 for every κ. (b) Routers trained online with the same dense first-order signal: held-out fraction of the attainable first-order gain captured by their top-4 pairs. (c) FLOPs per token to score every pair at width 4096. VANE scores 1024 pairs 77 × more cheaply than a linear router. 
+
+experts that read the same features but write differ-ent things. Usefulness factorizes once experts are split. If experts are built from NA readers (down-projections) and NB writers (up-projections), the usefulness of pair (a, b ) is ⟨B⊤ 
+
+> b
+
+δ, A ax⟩, an inner product in the rank-r latent space, so all NANB
+
+pairs can be scored from NA + NB latent vectors. We build V ANE on these two facts; its router turns toward the descent direction like a weather vane toward the wind. A V ANE layer keeps read-ers and writers of rank r and a low-rank compass 
+
+e(x) that predicts δ. Each writer turns the com-pass into a latent query, and every pair is scored by the alignment between its update and the com-pass, per unit of update norm, using r × r writer Gram matrices so that no update is formed. The top-k pairs are combined with additive gates. In the backward pass, the same latent algebra yields the exact first-order usefulness of every pair; a one-line straight-through core turns it into a dense router gradient, and each step on the compass’s output map provably turns it toward the descent direction. Our contributions: • Analysis. We identify first-order usefulness as the target of routing and show that token routers are capped by a closed-form ceiling, reader-side scores are writer-blind, and update scores are exact (§3). • Method. VANE combines reader–writer experts, latent update scores, additive gates, and an exact dense router gradient; its routing is invariant to how experts are parameterized (§4). • Evidence. On two Llama backbones, V ANE 
+
+beats twelve baselines in single-domain and multi-task adaptation with half the parameters of 8-expert mixtures, and its scores track mea-sured usefulness ( ρ = 0 .61 vs. ≤ 0.24 for token routers; §5). 
+
+2 Related Work 
+
+Mixtures of LoRA experts. LoRAMoE, MixLoRA, and MoLE route tokens among paired LoRA experts (Dou et al., 2024; Li et al., 2024a; Wu et al., 2024a). Later work allocates experts by depth (Gao et al., 2024; Liao et al., 2025), aligns their optimization with full fine-tuning (Fan et al., 2025), makes k dynamic (Li et al., 2025; Zhuang et al., 2026; Saliencro et al., 2026a,b), lets experts communicate (Mu et al., 2026), injects semantic priors (Shi et al., 2026), or uses heterogeneous and spectral experts (Cao et al., 2026b; Jiang et al., 2026; Saliencro et al., 2026c); others drop the router (Zha et al., 2026; Liu et al., 2025), and clean routing alone does not prevent interference inside an adapter (Chowdhury et al., 2026). These methods improve how the router decides; we specify what it should estimate. 
+
+Shared and combinatorial factors. LoRA’s A
+
+extracts features and B produces the output (Zhu et al., 2024). HydraLoRA shares one A across 
+
+B heads (Tian et al., 2024), MALoRA shares a down-projection subspace (Wang et al., 2025a), MoSLoRA mixes the two subspaces (Wu et al., 2024b), and CoMoL keeps experts as core ma-trices between shared factors (Cao et al., 2026a). Mix-and-match designs build many experts from few pieces: rank-one experts (Zhang et al., 2024; 2Zhao et al., 2025), residual trees (Zeng et al., 2025), shards and vector banks (Wang et al., 2025b; Li et al., 2024b), and factorized or product-key expert tensors (Oldfield et al., 2024; Lample et al., 2019; He, 2024). V ANE uses the simplest such structure, readers times writers, and is the first to exploit it for exact scoring. 
+
+Coupling routing and computation. Autonomy-of-Experts ranks experts by the norm of their own low-rank activations (Lv et al., 2025). FlyLoRA routes with a frozen sparse projection (Zou et al., 2025a), FURINA by the angle between input and adapter (Han et al., 2025), Self-Routing by a sub-space of the hidden state (Mohamud et al., 2026), and CoMoL and PASs-MoE in the adapters’ la-tent space (Cao et al., 2026a; Hou et al., 2026); all read the input side only. Default MoE densi-fies the router gradient with moving averages of expert outputs (Panda et al., 2025), and GRIN esti-mates gradients through discrete routing (Liu et al., 2024a). V ANE ’s scores involve the writers and a forecast of the loss gradient, and its dense gradient is exact. Appendix A extends this review. 
+
+3 What Should a Router Compute? 
+
+Setup. Let W0 ∈ Rd′×d be a frozen linear layer with input x ∈ Rd and output y. A combinatorial 
+
+low-rank adapter keeps NA readers Aa ∈ Rr×d
+
+and NB writers Bb ∈ Rd′×r. Each pair (a, b ) is an implicit expert with update vab (x) = Bbza, where 
+
+za = Aax is the reader’s latent code. With gates 
+
+gab (x) ≥ 0 on a set S(x) of k active pairs, the layer computes 
+
+y = W0x + αr
+
+P 
+
+> (a,b )∈S (x)
+
+gab (x) BbAax. (1) Paired MoE-LoRA is the special case NA = NB
+
+with only diagonal pairs allowed, and HydraLoRA the case NA = 1 (Appendix B). Let δ(x) = −∇ yℓ
+
+be the descent direction of the token’s loss ℓ at this layer’s output. 
+
+Usefulness. Adding η v ab to y changes the loss by −η u ab + O(η2), where 
+
+uab (x) = ⟨δ(x), B bAax⟩ = ⟨B⊤ 
+
+> b
+
+δ(x), z a⟩. (2) We call uab the usefulness of pair (a, b ) for the token. Under additive gates, the first-order gain of a selection is P 
+
+> S
+
+gab uab , so a router should rank pairs by their usefulness. It must do so from x
+
+alone, because δ depends on the label. 
+
+Proposition 1 (Usefulness lives in the latent space) .
+
+For every token, the NA × NB usefulness ma-trix is Z⊤W with Z = [ z1, . . . , z NA ] and W =[B⊤ 
+
+> 1
+
+δ, . . . , B ⊤ 
+
+> NB
+
+δ]. The squared update norms are 
+
+∥vab ∥2 = z⊤ 
+
+> a
+
+Gbza with Gb = B⊤ 
+
+> b
+
+Bb. All of these cost O(r(NAd + NB d′) + NANB r2) oper-ations, whereas materializing the updates costs 
+
+O(NANB rd ′).
+
+Which routers can see usefulness? To say what a router must represent, we model the predictable part of the descent direction as linear in the token. 
+
+Theorem 1 (Router expressivity) . Let δ(x) = Γ x+
+
+ξ with E[ξ | x] = 0 and x ∼ N (μ, Σ) . Then 
+
+¯uab (x) := E[uab | x] = x⊤Mab x with Mab =Γ⊤BbAa. Let S = 12 (Mab + M ⊤
+
+> ab
+
+).(i) Token routers. Every score affine in x satis-fies 
+
+corr 2(s, ¯uab ) ≤ 4μ⊤SΣSμ 
+
+4μ⊤SΣSμ + 2tr(( SΣ) 2) ,
+
+with equality for the least-squares router. This class includes linear routers over pairs, product routers, and linear routers applied to reader latents. The ceiling is 0 when μ = 0 .(ii) Reader-side scores. A score that depends on the token only through Aax gives the same value to every writer of reader a. Within a reader, it therefore captures only the gain of a uniformly random writer. (iii) Update scores. The score ⟨e(x), v ab (x)⟩ with 
+
+e(x) = U V ⊤x equals ¯uab for every pair and token if U V ⊤ = Γ . This is attainable whenever the rank re ≥ rank Γ , and then the top-k pairs under the score maximize the ex-pected first-order gain among all selections based on x.
+
+Token routers thus work to the extent that the to-ken mean interacts with usefulness. Pretrained rep-resentations are strongly anisotropic (Ethayarajh, 2019), which is why token routers work at all, but the token-specific part of usefulness stays invisi-ble to them; Figure 1a matches the closed form to within 0.002 . The remedy in (iii) is not a larger router but a different object: a vector in output space whose inner product with each candidate up-date predicts its effect on the loss. Proofs are in Appendix C, and Appendix D checks them numeri-cally. 3Figure 2: VANE for one token. Readers produce rank-r latents. A low-rank compass forecasts the descent direction at the layer output, and each writer turns it into a query in the same latent space. Every reader–writer pair is scored by the alignment between its update and the compass without materializing the update. The top-k pairs are summed with additive gates. In the backward pass, the exact first-order usefulness of every pair comes from the same latents and gives the router a dense gradient. 
+
+4 VANE 
+
+VANE instantiates Theorem 1(iii) inside the adapter of Eq. (1) (Figure 2, Algorithm 1). 
+
+Compass and writer queries. The compass 
+
+e(x) = U V ⊤x, with U ∈ Rd′×re and V ∈ Rd×re ,forecasts the descent direction. It is never added to the output; it only scores updates. Each writer turns it into a latent query 
+
+qb(x) = B⊤ 
+
+> b
+
+e(x) = Kb V ⊤x, (3) where the r × re key Kb = B⊤ 
+
+> b
+
+U is computed once per forward pass. Queries move with their writers, so the router never lags behind the experts. 
+
+Calibrated update scores. The alignment be-tween the compass and a pair’s update is ⟨e, v ab ⟩ =
+
+⟨qb, z a⟩ by Eq. (2). V ANE scores alignment per unit of update norm, 
+
+sab (x) = ⟨qb(x), z a(x)⟩
+
+pz⊤ 
+
+> a
+
+Gbza + ϵ , (4) that is, the length of the compass projected onto the direction of vab . Calibration makes routing depend only on update directions (Proposition 3). Without it, writers that grow are selected more often, receive more gradient, and grow further. Magnitude still reaches the output through vab . Scores use stop-gradients on za and Bb, so the compass is the only router parameter. 
+
+Sparse additive core. The active set S(x) holds the k highest-scoring pairs, with gates gab =
+
+σ(sab ). Each writer receives the gated latents 
+
+cb = P 
+
+> a:( a,b )∈S
+
+gab za, and 
+
+y = W0x + αr
+
+P 
+
+> b
+
+Bbcb, (5) so the layer is two dense low-rank products around an NA × NB sparse core. Rank-wise mixtures are the special case of a diagonal core over rank-one factors (Zhao et al., 2025; Zou et al., 2025a). The gates are additive sigmoids, not softmax-normalized: first-order gains add up, and comple-mentary pairs should stack rather than be averaged (Proposition 4; cf. Nguyen et al., 2025). 
+
+Exact dense router gradient. A top-k router nor-mally learns only from the pairs it selected. V ANE 
+
+replaces the gate of each unselected pair in cb by 
+
+gab − sg( gab ), which is zero in the forward pass but has the derivative of an active gate. Every pair then receives the gradient − αr σ′(sab ) uab , its exact first-order effect had it been active, at O(NANB r)
+
+extra cost per token and without materializing any expert output. Default MoE approximates it with averaged past outputs (Panda et al., 2025). 
+
+Balancing. Parameters live in readers and writ-ers, so we balance the two marginals. Let f Aa , f Bb
+
+be the fractions of active pairs that use reader a or writer b, and P Aa , P Bb the marginals of softmax( s).We add λbal Lbal with Lbal = NA
+
+P 
+
+> a
+
+f Aa P Aa +
+
+NB
+
+P 
+
+> b
+
+f Bb P Bb (Fedus et al., 2022), which leaves 4the joint pair distribution free to specialize. Al-gorithm 1 (Appendix F) summarizes one training step. 
+
+Properties. Three guarantees follow (Ap-pendix C). 
+
+Proposition 2 (The compass turns toward the de-scent) . With the straight-through core, ∂ℓ/∂s ab =
+
+− αr σ′(sab )uab for all pairs. For a single to-ken, a gradient step of size η on U changes the compass by ∆e = η αr ∥h∥2P δ with P =P 
+
+> ab
+
+σ′(sab ) vab v⊤
+
+> ab
+
+/(∥vab ∥ + ϵ) ⪰ 0. Hence 
+
+⟨∆e, δ ⟩ ≥ 0: each such step turns the compass toward δ within the span of the candidate updates. 
+
+Proposition 3 (Routing depends on what experts do) . For any M ∈ GL( r) and ca, c ′ 
+
+> b
+
+> 0, the map Aa 7 → caM A a, Bb 7 → c′
+
+> b
+
+BbM −1 leaves every score in Eq. (4) unchanged (as ϵ → 0). With c ≡ 1 it also leaves the layer output un-changed. Reader-norm scores ∥Aax∥ and latent-linear scores w⊤Aax are not invariant under M .
+
+Proposition 4 (Pair gates are needed for rank) .
+
+If the stacked readers have full row rank and the stacked writers full column rank, the token update in Eq. (1) has rank r · rank( GS ) ≤
+
+r min( k, N A, N B ), where GS is the writer-by-reader matrix of active gates. Separable gates 
+
+gab = αaβb collapse this to rank r. Additive gates reach the first-order gain P 
+
+> S
+
+gab uab , while softmax-normalized gates are capped at max S uab .
+
+Cost. With NA=4 , NB =8 , r=4 , and re=8 , a VANE layer has 32 implicit experts and r(NAd +
+
+NB d′) + re(d + d′) parameters. That is 1.06% of Llama-3.1-8B, versus 2.21% for eight paired experts of rank 8. Its compute is dominated by two dense products of rank 16 and 32. Scoring every pair adds O(red + NANB r2) per token, and there is no gather or scatter over experts. 
+
+5 Experiments 
+
+5.1 Setup Models and tasks. We fine-tune Llama-3.2-3B and Llama-3.1-8B (Grattafiori et al., 2024) in two settings. In the single-domain setting, we train on Commonsense170K (Hu et al., 2023) and evaluate on BoolQ, PIQA, SIQA, HellaSwag, WinoGrande, ARC-e, ARC-c, and OBQA (Clark et al., 2019; Bisk et al., 2020; Sap et al., 2019; Zellers et al., 2019; Sakaguchi et al., 2020; Clark et al., 2018; Mihaylov et al., 2018). In the multi-task setting, we train one adapter on 30k examples from each of four domains: MetaMathQA for math (Yu et al., 2024), Magicoder-Evol-Instruct for code (Wei et al., 2024), MedMCQA for medicine (Pal et al., 2022), and Commonsense170K. We eval-uate on GSM8K and MATH (Cobbe et al., 2021; Hendrycks et al., 2021a), HumanEval and MBPP (Chen et al., 2021; Austin et al., 2021), MedMCQA and PubMedQA (Jin et al., 2019), and ARC-c and WinoGrande. Appendix H adds Llama-3.2-1B, Qwen2.5-7B, and Qwen3-8B (Qwen et al., 2024; Yang et al., 2025a). 
+
+Baselines. Single-adapter PEFT: LoRA, DoRA, MoSLoRA, CoMoL, and FlyLoRA (Hu et al., 2022; Liu et al., 2024b; Wu et al., 2024b; Cao et al., 2026a; Zou et al., 2025a). Mixtures of LoRA experts: HydraLoRA, MixLoRA, MoLA, HMoRA, GOAT, SMoRA, and LD-MoLE (Tian et al., 2024; Li et al., 2024a; Gao et al., 2024; Liao et al., 2025; Fan et al., 2025; Zhao et al., 2025; Zhuang et al., 2026). All adapt the seven projection matrices with their recommended configurations (Appendix G). The router ablations (§5.3) keep V ANE ’s reader– writer structure to isolate the score. 
+
+Implementation. VANE uses NA=4 readers and 
+
+NB =8 writers of rank r=4 , re=8 , k=4 , α=8 ,and λbal =10 −2; V ANE -S ( NA=2 , NB =4 , re=4 ,
+
+k=2 ) matches LoRA’s budget. All methods use AdamW (Loshchilov and Hutter, 2019) (learning rate 2×10 −4, cosine decay, batch 128) for 3 epochs (single-domain) or 2 (multi-task) in bfloat16 on 8 H100 GPUs. We report means over three seeds (variances in Appendix H). 
+
+5.2 Main Results Single-domain. VANE attains the best average on both backbones (Table 1), 81.9 on Llama-3.2-3B and 86.9 on Llama-3.1-8B: +1 .1 and +0 .9 over the strongest baseline (LD-MoLE) and +3 .0 and +2 .5
+
+over LoRA, with less than half the trainable param-eters of the 8-expert mixtures (1.06% vs. 2.21% on 8B). At LoRA’s budget, V ANE -S is within 0.2
+
+of the best mixture. Gains are largest on ARC-c ( +2 .0 over the best baseline on 8B) and Wino-Grande ( +1 .2); on the near-saturated HellaSwag and PIQA, the best mixture leads by 0.1.
+
+Multi-task. Routing matters more when domains compete for the same low-rank parameters (Zou et al., 2025a). On the four-domain mixture (Ta-ble 2), V ANE improves on the best baseline by +1 .5
+
+5Method Param % BoolQ PIQA SIQA HellaS. WinoG. ARC-e ARC-c OBQA Avg. ∆                                                                                                                                                                                                                                                                                                                    
+
+> Llama-3.2-3B
+> LoRA 0.76 67.9 83.2 76.8 88.6 79.4 84.7 71.3 79.6 78.9 –DoRA 0.78 68.5 83.8 77.4 88.9 80.1 85.1 72.2 80.2 79.5 +0.6 MoSLoRA 0.76 68.5 83.5 77.3 88.9 80.0 85.1 72.0 80.2 79.4 +0.5 CoMoL 0.77 69.2 84.1 77.8 89.4 80.6 85.4 73.0 80.7 80.0 +1.1 FlyLoRA 0.77 69.1 84.2 78.0 89.3 80.8 85.8 73.5 81.1 80.2 +1.3 HydraLoRA 1.92 68.9 84.0 77.8 89.2 80.7 85.6 72.8 80.6 80.0 +1.1 MixLoRA 2.13 69.3 84.2 78.1 89.2 80.8 85.6 72.9 81.0 80.1 +1.2 MoLA 2.01 69.1 83.9 77.9 89.3 80.7 85.6 73.3 80.6 80.1 +1.2 HMoRA 3.40 69.7 84.5 77.8 89.6 81.2 86.0 73.5 81.2 80.4 +1.5 GOAT 3.22 69.7 84.5 78.3 89.8 81.4 85.8 74.0 81.5 80.6 +1.7 SMoRA 4.52 69.3 84.4 78.2 89.7 80.7 85.9 73.4 81.1 80.3 +1.4 LD-MoLE 3.22 70.1 85.0 78.2 89.9 82.0 85.9 74.1 81.4 80.8 +1.9 VANE -S 0.76 69.7 84.8 78.6 89.2 81.2 86.1 74.1 81.5 80.7 +1.8 VANE 1.52 71.2 84.9 79.5 89.8 82.9 87.4 76.2 82.9 81.9 +3.0
+> Llama-3.1-8B
+> LoRA 0.52 72.6 87.9 80.1 94.1 85.3 90.4 79.6 85.2 84.4 –DoRA 0.54 73.1 88.2 80.5 94.5 85.9 90.7 80.4 85.8 84.9 +0.5 MoSLoRA 0.52 73.1 88.2 80.4 94.2 85.8 90.9 80.1 85.6 84.8 +0.4 CoMoL 0.53 73.6 88.5 80.9 94.6 86.4 91.2 80.9 86.3 85.3 +0.9 FlyLoRA 0.55 73.8 88.9 80.8 94.6 86.8 91.2 81.4 86.5 85.5 +1.1 HydraLoRA 1.34 73.6 88.6 80.9 94.6 86.2 91.0 80.8 86.0 85.2 +0.8 MixLoRA 1.57 73.7 88.7 81.1 94.7 86.3 91.2 81.1 86.5 85.4 +1.0 MoLA 1.38 73.5 88.4 80.7 94.8 86.4 91.2 81.4 86.0 85.3 +0.9 HMoRA 2.34 74.1 89.0 81.3 95.0 86.9 91.5 81.3 86.6 85.7 +1.3 GOAT 2.21 74.0 89.2 81.3 95.4 87.2 91.6 81.8 86.8 85.9 +1.5 SMoRA 3.08 73.9 88.8 81.1 94.9 86.8 91.5 81.2 86.7 85.6 +1.2 LD-MoLE 2.21 74.6 89.1 81.6 95.0 87.3 91.6 81.9 86.9 86.0 +1.6 VANE -S 0.53 74.4 89.0 81.2 95.0 86.7 91.8 81.5 86.8 85.8 +1.4 VANE 1.06 75.4 89.1 82.4 95.3 88.5 92.4 83.9 87.9 86.9 +2.5
+
+Table 1: Single-domain commonsense reasoning (accuracy, %, mean of three seeds; trained on Common-sense170K). Param % : trainable parameters relative to the backbone. ∆: average gain over LoRA. Groups: single-adapter PEFT, mixtures of LoRA experts, ours. Bold /underline: best/second best. 
+
+(3B) and +1 .3 (8B), and on LoRA by +3 .9 and 
+
++3 .5. Per domain on 8B (Table 9), the gains over LD-MoLE are +1 .8 (math), +2 .0 (code), +1 .1
+
+(commonsense), and +0 .5 (medicine, where Pub-MedQA is the one column a baseline leads). V ANE -S ties the best mixture on 3B at a quarter of its parameters. Gains carry over to Qwen2.5-7B and Qwen3-8B ( +1 .3 and +1 .2; Appendix H). 
+
+5.3 Ablations 
+
+Table 3 changes one component at a time. 
+
+The score matters most. Keeping the reader– writer structure but routing with a linear router over the 32 pairs costs 1.4 multi-task points, back to the level of LD-MoLE. A latent-linear router loses 1.3, reader-norm self-routing 1.9, and a product router 2.0. All four are first-order or writer-blind (Theo-rem 1), and their scores correlate with usefulness at ρ ≤ 0.24 , against 0.61. Removing calibration costs 0.6, and untying the writer queries 0.5. 
+
+Training and structure. The dense first-order gradient is worth 0.9 points and raises ρ from 0.43 to 0.61; letting score gradients reach the experts costs 0.3. Pair-level balancing fights specialization (−0.5), and no balancing costs 1.1. Paired experts with the same score lose 1.0 and a single shared reader 0.8, so structure and score are complemen-tary. Separable gates lose 1.7 as their rank collapses (Proposition 4), and softmax gates 0.7. Adding the compass to the output does not help ( −0.2): its job is to point, not to write. 
+
+5.4 Mechanism Analysis 
+
+The factorization makes the exact usefulness of ev-ery pair observable during training with one back-ward hook and Eq. (2), so we can test the premise of the method directly. 
+
+Scores track usefulness. The Spearman corre-lation between V ANE ’s scores and the measured usefulness reaches 0.5 within the first fifth of train-ing and plateaus at 0.61 (Figure 3a), while the abla-6Method Param % GSM8K MATH HumanE. MBPP MedMC. PubMed. ARC-c WinoG. Avg. ∆
+
+Llama-3.2-3B 
+
+LoRA 0.76 52.7 12.6 36.0 44.8 50.2 72.4 69.5 73.8 51.5 –DoRA 0.78 53.6 13.3 37.0 45.5 50.9 72.9 70.0 74.3 52.2 +0.7 MoSLoRA 0.76 53.6 13.3 36.8 45.5 50.7 72.8 70.0 74.1 52.1 +0.6 CoMoL 0.77 54.8 14.0 38.0 46.3 51.3 73.3 71.1 75.2 53.0 +1.5 FlyLoRA 0.77 55.2 14.7 39.5 46.8 51.9 73.8 71.1 75.1 53.5 +2.0 HydraLoRA 1.92 55.0 14.1 38.0 46.6 51.6 73.9 71.2 75.3 53.2 +1.7 MixLoRA 2.13 54.8 14.4 38.6 46.8 51.9 73.4 71.1 75.4 53.3 +1.8 MoLA 2.01 54.9 14.0 38.3 46.8 51.7 73.4 71.2 74.6 53.1 +1.6 HMoRA 3.40 55.6 14.7 38.6 47.4 52.2 73.6 71.5 75.2 53.6 +2.1 GOAT 3.22 55.1 14.7 39.2 47.4 52.3 74.0 71.6 75.3 53.7 +2.2 SMoRA 4.52 55.4 14.5 38.7 46.9 51.6 73.5 71.5 75.1 53.4 +1.9 LD-MoLE 3.22 55.7 15.1 39.2 47.5 52.5 74.1 71.2 75.8 53.9 +2.4 VANE -S 0.76 55.7 14.5 39.3 47.3 52.4 73.7 71.8 76.5 53.9 +2.4 VANE 1.52 57.8 17.1 41.5 49.6 53.0 73.9 73.7 76.9 55.4 +3.9 
+
+Llama-3.1-8B 
+
+LoRA 0.52 66.4 19.8 48.2 55.9 57.3 75.6 78.1 81.7 60.4 –DoRA 0.54 67.3 20.3 49.0 56.7 57.8 75.9 78.6 82.1 61.0 +0.6 MoSLoRA 0.52 67.1 20.3 48.8 56.5 57.9 76.0 78.4 82.0 60.9 +0.5 CoMoL 0.53 67.9 21.1 49.9 57.6 58.5 76.6 79.2 82.5 61.7 +1.3 FlyLoRA 0.55 68.6 21.7 51.5 58.0 59.0 76.7 79.5 82.6 62.2 +1.8 HydraLoRA 1.34 68.2 21.2 49.8 57.7 58.7 77.0 79.6 82.8 61.9 +1.5 MixLoRA 1.57 68.5 20.9 50.3 57.7 59.0 77.0 79.8 82.6 62.0 +1.6 MoLA 1.38 67.9 21.3 50.2 57.6 58.6 76.7 79.1 82.8 61.8 +1.4 HMoRA 2.34 68.7 21.7 50.9 57.9 59.0 76.9 79.9 83.1 62.3 +1.9 GOAT 2.21 68.9 21.6 51.4 58.1 59.3 77.1 79.7 82.9 62.4 +2.0 SMoRA 3.08 68.7 21.6 50.7 57.6 58.8 76.8 80.0 82.5 62.1 +1.7 LD-MoLE 2.21 69.2 21.7 51.3 58.1 59.6 77.4 80.0 83.2 62.6 +2.2 VANE -S 0.53 69.2 21.7 51.3 58.2 59.0 77.1 79.9 83.4 62.5 +2.1 VANE 1.06 71.3 23.2 53.0 60.3 60.8 77.2 81.4 84.0 63.9 +3.5 
+
+Table 2: Multi-task adaptation : one adapter trained on a four-domain mixture (math, code, medicine, common-sense) and evaluated on two benchmarks per domain (accuracy or pass@1, %, mean of three seeds). Columns as in Table 1. 0 50 100             
+
+> training progress (%)
+> 0.0 0.2 0.4 0.6
+> Spearman  ρ(score,  uab ) (a) Scores track usefulness
+> VANE latent-linear token router product router reader norm
+> 050 100
+> training progress (%)
+> 0.0 0.2 0.4 0.6
+> cos (e(x),  δ(x))
+> random ( 1/ √d0)
+> (b) The compass finds the descent
+> MLP modules attention modules within candidate span
+> 050 100
+> training progress (%)
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> captured first-order gain  oracle top-k
+> (c) Choosing the pairs that help
+> 1814
+> Math
+> 1814
+> Code
+> 18
+> writer b
+> 14reader  a
+> Medicine
+> 1814
+> Commonsense
+> (d) Pair usage by domain
+
+Figure 3: How V ANE routes (Llama-3.1-8B, multi-task, held-out tokens). (a) Spearman correlation between router scores and the exact first-order usefulness of all 32 pairs, measured in the backward pass (V ANE : ±1 s.d. over seeds). (b) Cosine between the compass and the true descent direction, overall and after projection onto the span of the candidate updates. (c) Fraction of the oracle top-k first-order gain captured by the selected pairs. (d) Pair usage (readers × writers) per domain, averaged over layers. 
+
+tion routers stay at 0.24 (latent-linear), 0.22 (token), 0.12 (product), and 0.06 (reader norm), the order-ing predicted by the controlled model (Figure 1a). The selected pairs capture 0.78 of the oracle first-order gain, against 0.41 for the token router and 0.04 for reader norms (Figure 3c). 
+
+The compass learns the descent direction. The compass learns only from the routing gradient (Proposition 2), yet its cosine with the true descent direction reaches 0.29 in MLP and 0.21 in atten-tion modules, against 1/√d′ ≤ 0.03 for a random direction, and 0.52 within the span of the candi-date updates, the only part that matters for scoring 70.5 1.0 1.5 2.0 2.5 3.0                            
+
+> trainable params (%)
+> 60 61 62 63 64
+> multi-task avg.
+> LoRA FlyLoRA HydraLoRA MixLoRA SMoRA LD-MoLE
+> VANE-S VANE
+> (a) Accuracy vs. parameters
+> 24816
+> writers NB
+> 1248
+> readers  NA
+> 61.2 62.3 63.1 63.3 61.7 62.8 63.5 63.6 62.0 63.1 63.9 64.0 62.1 63.2 63.8 63.9
+> (b) Readers vs. writers
+> 124816 32
+> active pairs k(of 32)
+> 61 62 63 64
+> multi-task avg.
+> (c) Sparsity
+> VANE comb. + token router best baseline
+> 1B 3B 8B
+> Llama backbone
+> 012345
+> gain over LoRA (MT)  (d) Scale
+> VANE LD-MoLE MixLoRA
+
+Figure 4: Efficiency, structure, sparsity, and scale (multi-task average). (a) Accuracy vs. trainable parameters on Llama-3.1-8B (gray: single adapters; blue: mixtures). (b) Readers × writers at r=4 (box: default). (c) Number of active pairs k out of 32 (dotted: best baseline). (d) Gain over LoRA across Llama scales. 
+
+Configuration CS MT ∆MT ρ
+
+VANE (full) 86.9 63.9 – 0.61 
+
+Router score 
+
+Token router over pairs 86.0 62.5 −1.4 0.22 Product router 85.6 61.9 −2.0 0.12 Latent-linear router 86.1 62.6 −1.3 0.24 Reader-norm self-routing 85.7 62.0 −1.9 0.06 No calibration 86.5 63.3 −0.6 0.55 Untied writer queries 86.6 63.4 −0.5 0.49 
+
+Router training 
+
+No dense gradient 86.3 63.0 −0.9 0.43 Score gradient to experts 86.7 63.6 −0.3 0.58 Pair-level balancing 86.6 63.4 −0.5 0.59 No balancing 86.2 62.8 −1.1 0.52 
+
+Structure and aggregation 
+
+Paired experts 86.2 62.9 −1.0 0.57 Shared reader ( NA=1 ) 86.4 63.1 −0.8 0.60 Softmax gates 86.5 63.2 −0.7 0.61 Separable gates 85.8 62.2 −1.7 –Compass added to output 86.8 63.7 −0.2 0.60 
+
+Table 3: Ablations on Llama-3.1-8B. CS/MT: single-domain and multi-task averages. ρ: Spearman corre-lation between router scores and the exact first-order usefulness of all 32 pairs on held-out multi-task tokens. 
+
+(Figure 3b). Alignment peaks in the middle layers (Figure 7). 
+
+Writers specialize, readers are shared. Each domain selects a few writers but uses all readers (Figure 3d): the mutual information between do-main and writer is 0.60 bits, against 0.02 bits for readers. V ANE thus rediscovers, unprompted, the asymmetry of LoRA factors (Zhu et al., 2024) that shared or frozen readers hard-code (Tian et al., 2024; Zou et al., 2025a), and adding writers helps more than adding readers (Figure 4b). 
+
+5.5 Efficiency, Sparsity, and Scale 
+
+VANE -S and V ANE lie on the accuracy–parameter frontier (Figure 4a). With 4 readers, going from 2 to 8 writers adds 1.9 points, while with 8 writ-ers, going from 1 to 4 readers adds 0.8 (Figure 4b). Sparsity helps: k=4 of 32 pairs is best, a dense core loses 1.5 points, and V ANE beats the token router at every k (Figure 4c). Gains over LoRA grow as models shrink, from +3 .5 on 8B to +4 .4
+
+on Llama-3.2-1B, at 1.6–2.0× those of LD-MoLE (Figure 4d). Training takes 1.26 × LoRA’s time and 34% less than LD-MoLE, and unmerged decoding takes 27.2 vs. 36.2 ms per token, because V ANE 
+
+runs dense products instead of the per-expert ker-nels that dominate dynamic-adapter latency (Kong et al., 2024; Li et al., 2026a) (Table 14). 
+
+6 Conclusion 
+
+A router should estimate how much each expert’s update would lower the loss: to first order, the alignment between the update and the descent di-rection at the layer output. This quantity is in-visible to token routers for centered tokens and to reader-side scores always, but once experts are split into readers and writers it can be computed exactly for every pair in the low-rank latent space. VANE turns this into a router made of the experts themselves plus a small compass, which scores ev-ery pair, learns from every pair’s exact first-order effect, and does not depend on how experts are parameterized. It outperforms twelve PEFT and MoE-LoRA baselines with half the parameters of an 8-expert mixture. The same principle applies to any mixture whose experts factor through a shared low-dimensional space, including sparse MoE pre-training and adapter merging. 
+
+Limitations 
+
+Theorem 1 rests on a linear-response model with Gaussian tokens; it describes what router classes can represent, not how they train. Our evidence that the analysis transfers is the score–usefulness corre-8lation measured on real runs. Usefulness is a first-order, per-layer quantity. It ignores interactions between layers and between pairs, and it is myopic when the loss is far from locally linear. The dense router gradient uses the first-order surrogate for un-selected pairs and the true gradient only for selected ones. Calibrating scores by update norm gives up some static optimality (Appendix E): when token means dominate, a well-trained token router cap-tures a comparable share of the first-order gain. VANE computes every reader and every writer for each token. This is cheap at our sizes but grows lin-early with NA and NB , and large pools would need a sparse writer path. Our experiments cover mod-els up to 8B parameters and four domains. Larger backbones, more domains, and generation-heavy tasks remain to be tested, as do adapter merging and continual learning, where interference between tasks is the main obstacle (Zou et al., 2025a, 2026). 
+
+Ethics Statement 
+
+VANE is a general fine-tuning method and inherits the risks of the models and data it adapts, including biases in instruction-tuning corpora and the lower cost of producing specialized models, which also lowers the cost of misuse. All datasets are public and used under their licenses. The medical bench-marks measure multiple-choice accuracy, and a model adapted with V ANE is not a medical device. No human subjects or personal data are involved. AI assistants were used for language editing and for checking LaTeX; the method, proofs, and ex-perimental design are the authors’ own, and every reference was checked against its primary record. 
+
+References 
+
+Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen. 2022. LoRA: Low-rank adaptation of large language models. In The Tenth International Conference on Learning Representations .Neil Houlsby, Andrei Giurgiu, Stanislaw Jastrzebski, Bruna Morrone, Quentin de Laroussilhe, Andrea Ges-mundo, Mona Attariyan, and Sylvain Gelly. 2019. Parameter-efficient transfer learning for NLP. In 
+
+Proceedings of the 36th International Conference on Machine Learning , volume 97 of Proceedings of Machine Learning Research , pages 2790–2799. Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. 2017. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. In 5th International Conference on Learning Representa-tions .William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research , 23(120):1–39. Shihan Dou, Enyu Zhou, Yan Liu, Songyang Gao, Wei Shen, Limao Xiong, Yuhao Zhou, Xiao Wang, Zhi-heng Xi, Xiaoran Fan, Shiliang Pu, Jiang Zhu, Rui Zheng, Tao Gui, Qi Zhang, and Xuanjing Huang. 2024. LoRAMoE: Alleviating world knowledge for-getting in large language models via MoE-style plu-gin. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Vol-ume 1: Long Papers) , pages 1932–1945, Bangkok, Thailand. Association for Computational Linguistics. Dengchun Li, Yingzi Ma, Naizheng Wang, Zhengmao Ye, Zhiyuan Cheng, Yinghao Tang, Yan Zhang, Lei Duan, Jie Zuo, Cal Yang, and Mingjie Tang. 2024a. MixLoRA: Enhancing large language models fine-tuning with LoRA-based mixture of experts. arXiv preprint arXiv:2404.15159 .Xun Wu, Shaohan Huang, and Furu Wei. 2024a. Mix-ture of LoRA experts. In The Twelfth International Conference on Learning Representations .Chunlin Tian, Zhan Shi, Zhijiang Guo, Li Li, and Chengzhong Xu. 2024. HydraLoRA: An asymmet-ric LoRA architecture for efficient fine-tuning. In 
+
+Advances in Neural Information Processing Systems ,volume 37. Chenghao Fan, Zhenyi Lu, Sichen Liu, Chengfeng Gu, Xiaoye Qu, Wei Wei, and Yu Cheng. 2025. Make LoRA great again: Boosting LoRA with adaptive singular values and mixture-of-experts optimization alignment. In Proceedings of the 42nd International Conference on Machine Learning , volume 267 of 
+
+Proceedings of Machine Learning Research .Chongyang Gao, Kezhen Chen, Jinmeng Rao, Baochen Sun, Ruibo Liu, Daiyi Peng, Yawen Zhang, Xiaoyuan Guo, Jie Yang, and VS Subrahmanian. 2024. Higher layers need more LoRA experts. arXiv preprint arXiv:2402.08562 .Mengqi Liao, Wei Chen, Junfeng Shen, Shengnan Guo, and Huaiyu Wan. 2025. HMoRA: Making LLMs more effective with hierarchical mixture of LoRA experts. In The Thirteenth International Conference on Learning Representations .Yuan Zhuang, Yi Shen, Yuexin Bian, Qing Su, Shihao Ji, Yuanyuan Shi, and Fei Miao. 2026. LD-MoLE: Learnable dynamic routing for mixture of LoRA ex-perts. In The Fourteenth International Conference on Learning Representations .Dengchun Li, Naizheng Wang, Zihao Zhang, Haoyang Yin, Lei Duan, Meng Xiao, and Mingjie Tang. 2025. DynMoLE: Boosting mixture of LoRA experts fine-tuning with a hybrid routing mechanism. arXiv preprint arXiv:2504.00661 .
+
+9Tom Saliencro, Rohan Desai, Priya Nair, Maya Lindqvist, and Daniel Whitmore. 2026a. Spend ex-perts where you are unsure: Confidence-adaptive routing for mixture-of-experts LoRA. arXiv preprint arXiv:2607.26052 .Ziyu Zhao, Yixiao Zhou, Zhi Zhang, Didi Zhu, Tao Shen, Zexi Li, Jinluan Yang, Xuwu Wang, Jing Su, Kun Kuang, Zhongyu Wei, Fei Wu, and Yu Cheng. 2025. Each rank could be an expert: Single-ranked mixture of experts LoRA for multi-task learning. 
+
+arXiv preprint arXiv:2501.15103 .Heming Zou, Yunliang Zang, Wutong Xu, Yao Zhu, and Xiangyang Ji. 2025a. Flylora: Boosting task decou-pling and parameter efficiency via implicit rank-wise mixture-of-experts. Advances in Neural Information Processing Systems , 38:10386–10419. Hanqing Zeng, Yinglong Xia, Zhuokai Zhao, Chuan Jiang, Qiang Zhang, Jiayi Liu, Qunshu Zhang, Lizhu Zhang, Xiangjun Fan, and Benyu Zhang. 2025. S’MoRE: Structural mixture of residual experts for parameter-efficient LLM fine-tuning. In Advances in Neural Information Processing Systems , volume 38. Xujia Wang, Haiyan Zhao, Shuo Wang, Hanqing Wang, and Zhiyuan Liu. 2025a. MALoRA: Mixture of asymmetric low-rank adaptation for enhanced multi-task learning. In Findings of the Association for Com-putational Linguistics: NAACL 2025 , pages 5624– 5641, Albuquerque, New Mexico. Association for Computational Linguistics. Jie Cao, Zhenxuan Fan, Zhuonan Wang, Tianwei Lin, Ziyuan Zhao, Rolan Yan, Wenqiao Zhang, Feifei Shao, Hongwei Wang, Jun Xiao, and Siliang Tang. 2026a. CoMoL: Efficient mixture of LoRA experts via dynamic core space merging. In Findings of the Association for Computational Linguistics: ACL 2026 , pages 16471–16481, San Diego, California, United States. Association for Computational Lin-guistics. Rongyu Zhang, Yijiang Liu, Huanrui Yang, Shenli Zheng, Dan Wang, Yuan Du, Li Du, and Shang-hang Zhang. 2024. T-REX: Mixture-of-rank-one-experts with semantic-aware intuition for multi-task large language model finetuning. arXiv preprint arXiv:2404.08985 .Ang Lv, Ruobing Xie, Yining Qian, Songhao Wu, Xingwu Sun, Zhanhui Kang, Di Wang, and Rui Yan. 2025. Autonomy-of-experts models. In Proceedings of the 42nd International Conference on Machine Learning , volume 267 of Proceedings of Machine Learning Research .Jiayi Han, Liang Du, Yinda Chen, Xiao Kang, Weiyang Ding, and Donghong Han. 2025. FURINA: Free from unmergeable router via LINear aggregation of mixed experts. arXiv preprint arXiv:2509.14900 .ZhiYan Hou, Haiyun Guo, Haokai Ma, Yandu Sun, Yonghui Yang, and Jinqiao Wang. 2026. PASs-MoE: Mitigating misaligned co-drift among router and ex-perts via pathway activation subspaces for continual learning. In Proceedings of the 64th Annual Meet-ing of the Association for Computational Linguis-tics (Volume 1: Long Papers) , pages 31959–31972, San Diego, California, United States. Association for Computational Linguistics. Lin Mu, Haiyang Wang, Li Ni, Lei Sang, Zhize Wu, Peiquan Jin, and Yiwen Zhang. 2026. TalkLoRA: Communication-aware mixture of low-rank adapta-tion for large language models. In Proceedings of the 64th Annual Meeting of the Association for Compu-tational Linguistics (Volume 1: Long Papers) , pages 18436–18451, San Diego, California, United States. Association for Computational Linguistics. Boyan Shi, Wei Chen, Shuyuan Zhao, Junfeng Shen, Shengnan Guo, Shaojiang Wang, and Huaiyu Wan. 2026. SAMoRA: Semantic-aware mixture of LoRA experts for task-adaptive learning. In Findings of the Association for Computational Linguistics: ACL 2026 , pages 28173–28188, San Diego, California, United States. Association for Computational Lin-guistics. Tom Saliencro, Rohan Desai, Priya Nair, Maya Lindqvist, and Daniel Whitmore. 2026b. Uncer-tainty is not enough: Value-of-information rout-ing for mixtures of LoRA experts. arXiv preprint arXiv:2608.02528 .Jie Cao, Tianwei Lin, Bo Yuan, Rolan Yan, Hongyang He, Wenqiao Zhang, Juncheng Li, Dongping Zhang, Siliang Tang, and Yueting Zhuang. 2026b. MoA: Heterogeneous mixture of adapters for parameter-efficient fine-tuning of large language models. In 
+
+Proceedings of the 64th Annual Meeting of the As-sociation for Computational Linguistics (Volume 1: Long Papers) , pages 21056–21073, San Diego, Cali-fornia, United States. Association for Computational Linguistics. Juyong Jiang, Fan Wang, Hong Qi, Sunghun Kim, and Jing Tang. 2026. FourierMoE: Fourier mixture-of-experts adaptation of large language models. arXiv preprint arXiv:2604.01762 .Tom Saliencro, Maya Lindqvist, Rohan Desai, Priya Nair, and Daniel Whitmore. 2026c. FRAME: Learning the adaptation domain with a mixture of fractional-Fourier experts. arXiv preprint arXiv:2607.00162 .Qian Zha, Jinda Liu, Yuan Wu, and Yi Chang. 2026. CD-LoRA: Consistency-driven low-rank adap-tation for multi-task fine-tuning. arXiv preprint arXiv:2608.21909 .Jinda Liu, Yi Chang, and Yuan Wu. 2025. From isola-tion to alignment: Unified LoRA for efficient multi-task learning. arXiv preprint arXiv:2508.05078 .Mehreen Hossain Chowdhury, Nowshin Mahjabin, Ahmed Shafin Ruhan, Md Azam Hossain, Abu Rai-han Mostofa Kamal, and Md Tahmid Rahman Laskar. 
+
+10 2026. Routing is not enough: Diagnosing intra-adapter subspace contention in MoE+LoRA fine-tuning. arXiv preprint arXiv:2609.03150 .Jiacheng Zhu, Kristjan Greenewald, Kimia Nadjahi, Haitz Sáez de Ocáriz Borde, Rickard Brüel Gabriels-son, Leshem Choshen, Marzyeh Ghassemi, Mikhail Yurochkin, and Justin Solomon. 2024. Asymme-try in low-rank adapters of foundation models. In 
+
+Proceedings of the 41st International Conference on Machine Learning , volume 235 of Proceedings of Machine Learning Research .Taiqiang Wu, Jiahao Wang, Zhe Zhao, and Ngai Wong. 2024b. Mixture-of-subspaces in low-rank adaptation. In Proceedings of the 2024 Conference on Empiri-cal Methods in Natural Language Processing , pages 7880–7899, Miami, Florida, USA. Association for Computational Linguistics. Sheng Wang, Liheng Chen, Pengan Chen, Jingwei Dong, Boyang Xue, Jiyue Jiang, Lingpeng Kong, and Chuan Wu. 2025b. MoS: Unleashing parame-ter efficiency of low-rank adaptation with mixture of shards. In The Thirteenth International Conference on Learning Representations .Yang Li, Shaobo Han, and Shihao Ji. 2024b. VB-LoRA: Extreme parameter efficient fine-tuning with vector banks. In Advances in Neural Information Process-ing Systems , volume 37. James Oldfield, Markos Georgopoulos, Grigorios G. Chrysos, Christos Tzelepis, Yannis Panagakis, Mi-halis A. Nicolaou, Jiankang Deng, and Ioannis Patras. 2024. Multilinear mixture of experts: Scalable expert specialization through factorization. In Advances in Neural Information Processing Systems , volume 37. Guillaume Lample, Alexandre Sablayrolles, Marc’Aurelio Ranzato, Ludovic Denoyer, and Hervé Jégou. 2019. Large memory layers with product keys. In Advances in Neural Information Processing Systems , volume 32. Xu Owen He. 2024. Mixture of a million experts. arXiv preprint arXiv:2407.04153 .Jama Hussein Mohamud, Drew Wagner, and Mirco Ravanelli. 2026. Self-routing: Parameter-free ex-pert routing from hidden states. arXiv preprint arXiv:2604.00421 .Ashwinee Panda, Vatsal Baherwani, Zain Sarwar, Ben-jamin Therien, Sambit Sahu, Tom Goldstein, and Supriyo Chakraborty. 2025. Dense backpropagation improves training for sparse mixture-of-experts. In 
+
+Advances in Neural Information Processing Systems ,volume 38. Liyuan Liu, Young Jin Kim, Shuohang Wang, Chen Liang, Yelong Shen, Hao Cheng, Xiaodong Liu, Masahiro Tanaka, Xiaoxia Wu, Wenxiang Hu, Vishrav Chaudhary, Zeqi Lin, Chenruidong Zhang, Ji-long Xue, Hany Awadalla, Jianfeng Gao, and Weizhu Chen. 2024a. GRIN: GRadient-INformed MoE. 
+
+arXiv preprint arXiv:2409.12136 .Kawin Ethayarajh. 2019. How contextual are contextu-alized word representations? Comparing the geom-etry of BERT, ELMo, and GPT-2 embeddings. In 
+
+Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Lan-guage Processing (EMNLP-IJCNLP) , pages 55–65, Hong Kong, China. Association for Computational Linguistics. Huy Nguyen, Thong T. Doan, Quang Pham, Nghi D. Q. Bui, Nhat Ho, and Alessandro Rinaldo. 2025. On DeepSeekMoE: Statistical benefits of shared ex-perts and normalized sigmoid gating. arXiv preprint arXiv:2505.10860 .Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schel-ten, Alex Vaughan, Amy Yang, Angela Fan, Anirudh Goyal, Anthony Hartshorn, Aobo Yang, Archi Mi-tra, Archie Sravankumar, Artem Korenev, Arthur Hinsvark, and 1 others. 2024. The Llama 3 herd of models. arXiv preprint arXiv:2407.21783 .Zhiqiang Hu, Lei Wang, Yihuai Lan, Wanyu Xu, Ee-Peng Lim, Lidong Bing, Xing Xu, Soujanya Poria, and Roy Lee. 2023. LLM-adapters: An adapter fam-ily for parameter-efficient fine-tuning of large lan-guage models. In Proceedings of the 2023 Confer-ence on Empirical Methods in Natural Language Pro-cessing , pages 5254–5276, Singapore. Association for Computational Linguistics. Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and Kristina Toutanova. 2019. BoolQ: Exploring the surprising difficulty of natural yes/no questions. In Proceedings of the 2019 Conference of the North American Chap-ter of the Association for Computational Linguistics: Human Language Technologies, Volume 1 (Long and Short Papers) , pages 2924–2936, Minneapolis, Min-nesota. Association for Computational Linguistics. Yonatan Bisk, Rowan Zellers, Ronan Le Bras, Jian-feng Gao, and Yejin Choi. 2020. PIQA: Reasoning about physical commonsense in natural language. In 
+
+Proceedings of the AAAI Conference on Artificial Intelligence , volume 34, pages 7432–7439. Maarten Sap, Hannah Rashkin, Derek Chen, Ronan Le Bras, and Yejin Choi. 2019. Social IQa: Com-monsense reasoning about social interactions. In 
+
+Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Lan-guage Processing (EMNLP-IJCNLP) , pages 4463– 4473, Hong Kong, China. Association for Computa-tional Linguistics. Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. 2019. HellaSwag: Can a ma-chine really finish your sentence? In Proceedings of the 57th Annual Meeting of the Association for Com-putational Linguistics , pages 4791–4800, Florence, Italy. Association for Computational Linguistics. 
+
+11 Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhaga-vatula, and Yejin Choi. 2020. WinoGrande: An ad-versarial Winograd schema challenge at scale. In 
+
+Proceedings of the AAAI Conference on Artificial Intelligence , volume 34, pages 8732–8740. Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. 2018. Think you have solved question an-swering? try ARC, the AI2 reasoning challenge. 
+
+arXiv preprint arXiv:1803.05457 .Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal. 2018. Can a suit of armor conduct elec-tricity? a new dataset for open book question an-swering. In Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing ,pages 2381–2391, Brussels, Belgium. Association for Computational Linguistics. Longhui Yu, Weisen Jiang, Han Shi, Jincheng Yu, Zhengying Liu, Yu Zhang, James T. Kwok, Zhenguo Li, Adrian Weller, and Weiyang Liu. 2024. Meta-Math: Bootstrap your own mathematical questions for large language models. In The Twelfth Interna-tional Conference on Learning Representations .Yuxiang Wei, Zhe Wang, Jiawei Liu, Yifeng Ding, and Lingming Zhang. 2024. Magicoder: Empowering code generation with OSS-instruct. In Proceedings of the 41st International Conference on Machine Learn-ing , volume 235 of Proceedings of Machine Learning Research .Ankit Pal, Logesh Kumar Umapathi, and Malaikan-nan Sankarasubbu. 2022. MedMCQA: A large-scale multi-subject multi-choice dataset for medical do-main question answering. In Proceedings of the Con-ference on Health, Inference, and Learning , volume 174 of Proceedings of Machine Learning Research ,pages 248–260. Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. 2021. Training verifiers to solve math word prob-lems. arXiv preprint arXiv:2110.14168 .Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. 2021a. Measuring mathematical problem solving with the MATH dataset. In Proceed-ings of the Neural Information Processing Systems Track on Datasets and Benchmarks , volume 1. Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, Alex Ray, Raul Puri, Gretchen Krueger, Michael Petrov, Heidy Khlaaf, Girish Sastry, Pamela Mishkin, Brooke Chan, Scott Gray, and 39 others. 2021. Evaluating large language models trained on code. arXiv preprint arXiv:2107.03374 .Jacob Austin, Augustus Odena, Maxwell Nye, Maarten Bosma, Henryk Michalewski, David Dohan, Ellen Jiang, Carrie Cai, Michael Terry, Quoc Le, and Charles Sutton. 2021. Program synthesis with large language models. arXiv preprint arXiv:2108.07732 .Qiao Jin, Bhuwan Dhingra, Zhengping Liu, William Cohen, and Xinghua Lu. 2019. PubMedQA: A dataset for biomedical research question answering. In Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Lan-guage Processing (EMNLP-IJCNLP) , pages 2567– 2577, Hong Kong, China. Association for Computa-tional Linguistics. Qwen, An Yang, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chengyuan Li, Dayiheng Liu, Fei Huang, Haoran Wei, Huan Lin, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxi Yang, Jingren Zhou, Junyang Lin, and 24 oth-ers. 2024. Qwen2.5 technical report. arXiv preprint arXiv:2412.15115 .An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, Chujie Zheng, Dayi-heng Liu, Fan Zhou, Fei Huang, Feng Hu, Hao Ge, Haoran Wei, Huan Lin, Jialong Tang, and 41 oth-ers. 2025a. Qwen3 technical report. arXiv preprint arXiv:2505.09388 .Shih-Yang Liu, Chien-Yi Wang, Hongxu Yin, Pavlo Molchanov, Yu-Chiang Frank Wang, Kwang-Ting Cheng, and Min-Hung Chen. 2024b. DoRA: Weight-decomposed low-rank adaptation. In Proceedings of the 41st International Conference on Machine Learn-ing , volume 235 of Proceedings of Machine Learning Research .Ilya Loshchilov and Frank Hutter. 2019. Decoupled weight decay regularization. In 7th International Conference on Learning Representations .Rui Kong, Qiyang Li, Xinyu Fang, Qingtian Feng, Qingfeng He, Yazhu Dong, Weijun Wang, Yuanchun Li, Linghe Kong, and Yunxin Liu. 2024. LoRA-switch: Boosting the efficiency of dynamic LLM adapters via system-algorithm co-design. arXiv preprint arXiv:2405.17741 .Qiyang Li, Rui Kong, Yuchen Li, Hengyi Cai, Shuaiqiang Wang, Linghe Kong, Guihai Chen, and Dawei Yin. 2026a. AdaFuse: Accelerating dynamic adapter inference via token-level pre-gating and fused kernel optimization. In Proceedings of the AAAI Con-ference on Artificial Intelligence , volume 40, pages 31680–31688. Heming Zou, Yunliang Zang, Wutong Xu, and Xi-angyang Ji. 2026. Fly-cl: A fly-inspired framework for enhancing efficient decorrelation and reduced training time in pre-trained model-based continual representation learning. In International Conference on Learning Representations , volume 2026, pages 35240–35266. 
+
+12 Fanxu Meng, Zhaohui Wang, and Muhan Zhang. 2024. PiSSA: Principal singular values and singular vectors adaptation of large language models. In Advances in Neural Information Processing Systems , volume 37. Shaowen Wang, Linxi Yu, and Jian Li. 2024. LoRA-GA: Low-rank adaptation with gradient approximation. In 
+
+Advances in Neural Information Processing Systems ,volume 37. Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu, Dehao Chen, Orhan Firat, Yanping Huang, Maxim Krikun, Noam Shazeer, and Zhifeng Chen. 2021. GShard: Scaling giant models with conditional com-putation and automatic sharding. In 9th International Conference on Learning Representations .Yanqi Zhou, Tao Lei, Hanxiao Liu, Nan Du, Yanping Huang, Vincent Zhao, Andrew Dai, Zhifeng Chen, Quoc Le, and James Laudon. 2022. Mixture-of-experts with expert choice routing. In Advances in Neural Information Processing Systems , volume 35. Damai Dai, Chengqi Deng, Chenggang Zhao, R.X. Xu, Huazuo Gao, Deli Chen, Jiashi Li, Wangding Zeng, Xingkai Yu, Y. Wu, Zhenda Xie, Y.K. Li, Panpan Huang, Fuli Luo, Chong Ruan, Zhifang Sui, and Wen-feng Liang. 2024. DeepSeekMoE: Towards ultimate expert specialization in mixture-of-experts language models. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Vol-ume 1: Long Papers) , pages 1280–1297, Bangkok, Thailand. Association for Computational Linguistics. Albert Q. Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch, Blanche Savary, Chris Bamford, De-vendra Singh Chaplot, Diego de las Casas, Emma Bou Hanna, Florian Bressand, Gianna Lengyel, Guillaume Bour, Guillaume Lample, Lélio Re-nard Lavaud, Lucile Saulnier, Marie-Anne Lachaux, Pierre Stock, Sandeep Subramanian, Sophia Yang, and 7 others. 2024. Mixtral of experts. arXiv preprint arXiv:2401.04088 .Joan Puigcerver, Carlos Riquelme, Basil Mustafa, and Neil Houlsby. 2024. From sparse to soft mixtures of experts. In The Twelfth International Conference on Learning Representations .Ziteng Wang, Jun Zhu, and Jianfei Chen. 2025c. Re-MoE: Fully differentiable mixture-of-experts with ReLU routing. In The Thirteenth International Con-ference on Learning Representations .Zefang Liu and Jiahua Luo. 2024. AdaMoLE: Fine-tuning large language models with adaptive mixture of low-rank adaptation experts. In First Conference on Language Modeling .Peizhuang Cong, Wenpu Liu, Wenhan Yu, Haochen Zhao, and Tong Yang. 2025. Rank also mat-ters: Hierarchical configuration for mixture of adapter experts in LLM fine-tuning. arXiv preprint arXiv:2502.03884 .Minghao Yang, Ren Togo, Guang Li, Takahiro Ogawa, and Miki Haseyama. 2025b. Adaptive shared experts with LoRA-based mixture of experts for multi-task learning. arXiv preprint arXiv:2510.00570 .Pradip Kunwar, Minh N. Vu, Maanak Gupta, Mah-moud Abdelsalam, and Manish Bhattarai. 2025. TT-LoRA MoE: Unifying parameter-efficient fine-tuning and sparse mixture-of-experts. arXiv preprint arXiv:2504.21190 .Yiming Zeng, Lei Lu, Zexin Li, Zhuochun Li, Shuo-qiu Li, Shuyi Liao, Xidong Wu, Zeyu Zhang, Min-mei Wang, Yu Zhao, Tingting Yu, and Shangqian Gao. 2026. MoEGen: Mixture-of-experts for instance-adaptive LoRA generation. arXiv preprint arXiv:2608.03275 .Babak Barazandeh, Subhabrata Majumdar, Vinay Prithyani, and George Michailidis. 2026. Localized LoRA-MoE: Block-wise low-rank experts with adap-tive routing. arXiv preprint arXiv:2607.05114 .Weihang Li, Jianchun Liu, and Hongli Xu. 2026b. Adaptive and fine-grained module-wise expert prun-ing for efficient LoRA-MoE fine-tuning. arXiv preprint arXiv:2604.26340 .Ahin Lee, Sehyun Yun, and Taesik Gong. 2026. EPnG: Adaptive expert prune-and-grow for parameter-efficient MoE fine-tuning. arXiv preprint arXiv:2607.01789 .Qingyu Yang, Haonan He, Minglei Li, Jingqi Ye, Tao Chen, Lei Bai, and Peng Ye. 2026a. MoE 2-LoRA: When MoE models meet MoE-style low-rank adapta-tion. arXiv preprint arXiv:2607.21978 .Zhentao Tan, Chang Liu, Yao Liu, Yue Wu, and Jieping Ye. 2026. From experts to sub-experts: Fine-grained parameter-efficient fine-tuning for MoE LLMs. arXiv preprint arXiv:2609.25655 .Suraj Yadav. 2026. Self-routed tensor adapters for parameter-efficient universal visual adaptation. arXiv preprint arXiv:2608.16384 .Vladimer Khasia. 2025. Dynamic subspace composi-tion: Efficient adaptation via contractive basis expan-sion. arXiv preprint arXiv:2512.23448 .Junxiang Qiu, Zhengsu Chen, Xinting Hu, Shuo Wang, Hengheng Zhang, Shaofeng Zhang, Changcheng Li, Boyu Shi, and Qi Tian. 2026. HERO-MoE: Histori-cal expert routing with scale-preserving fusion. arXiv preprint arXiv:2609.32581 .Heming Zou, Yunliang Zang, and Xiangyang Ji. 2025b. Structural features of the fly olfactory circuit mitigate the stability-plasticity dilemma in continual learning. 
+
+arXiv preprint arXiv:2502.01427 .Yuxin Yang, Haoran Zhang, Mingxuan Li, Jiachen Xu, Ruoxi Shen, Zhenyu Wang, Tianhao Liu, Siqi Chen, and Weilin Huang. 2026b. NeuroLoRA: Context-aware neuromodulation for parameter-efficient multi-task adaptation. arXiv preprint arXiv:2603.12378 .
+
+13 Ivan Ternovtsii and Yurii Bilak. 2026. Geometric rout-ing enables causal expert control in mixture of ex-perts. arXiv preprint arXiv:2604.14434 .Jiarui Feng, Hanqing Zeng, Karish Grover, Ruizhong Qiu, Yinglong Xia, Qiang Zhang, Qifan Wang, Ren Chen, Dongqi Fu, Jiayi Liu, Zhoukai Zhao, Xiangjun Fan, Benyu Zhang, and Yixin Chen. 2026. DAG-MoE: From simple mixture to structural aggregation in mixture-of-experts. In Proceedings of the 43rd International Conference on Machine Learning .Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Stein-hardt. 2021b. Measuring massive multitask language understanding. In 9th International Conference on Learning Representations .Seyed Alireza Molavi, Zhan Su, Yan Hu, Pey-man Sheikholharam Mashhadi, Stefan Byttner, and Prayag Tiwari. 2026. Learning to select, not relearn: Hard-routed mixtures of reasoning LoRAs. arXiv preprint arXiv:2606.31413 .
+
+A Extended Related Work 
+
+Parameter-efficient fine-tuning. Adapters in-sert small bottleneck modules into a frozen net-work (Houlsby et al., 2019). LoRA instead adds a low-rank product to each weight matrix and can be merged after training (Hu et al., 2022). LLM-Adapters standardized the commonsense and arith-metic protocols we build on (Hu et al., 2023). Later variants change the parameterization or the initial-ization. DoRA separates magnitude from direc-tion (Liu et al., 2024b). PiSSA initializes from the principal singular subspace of the pretrained weight (Meng et al., 2024), and LoRA-GA from the gradient at initialization (Wang et al., 2024). VB-LoRA composes all factors from a shared vector bank (Li et al., 2024b), and MoS routes shards from global pools into each factor (Wang et al., 2025b). Two findings about LoRA’s factors guide our de-sign. First, A extracts features and B produces the output, and training B matters more than train-ing A (Zhu et al., 2024); A can even stay a frozen sparse random projection (Zou et al., 2025a). Sec-ond, the A matrices of LoRAs trained on different data are similar while their B matrices differ (Tian et al., 2024). V ANE does not assume this asymme-try. It lets the router discover it, and the learned usage shows writers carrying most of the domain information (§5.4). 
+
+Mixtures of LoRA experts. Sparse mixtures of experts scale capacity by routing each token to a few feed-forward experts (Shazeer et al., 2017; Lepikhin et al., 2021; Fedus et al., 2022; Zhou et al., 2022; Dai et al., 2024; Jiang et al., 2024). Their soft and fully differentiable variants avoid discrete top-k selection (Puigcerver et al., 2024; Wang et al., 2025c). Adapter mixtures bring this idea to fine-tuning. • Paired experts: LoRAMoE uses them to pro-tect world knowledge (Dou et al., 2024), and MixLoRA, MoLE, and AdaMoLE route among them per token (Li et al., 2024a; Wu et al., 2024a; Liu and Luo, 2024). • Allocation and optimization: MoLA and HMoRA allocate experts by depth or hierar-chically (Gao et al., 2024; Liao et al., 2025), HILO also varies their rank (Cong et al., 2025), and GOAT aligns the optimization of an SVD-structured mixture with full fine-tuning (Fan et al., 2025). • Adaptive compute: DynMoLE and LD-MoLE adapt the number of active experts (Li et al., 2025; Zhuang et al., 2026). CARE admits ex-perts until a confidence mass is reached (Salien-cro et al., 2026a), and VI-MoLE allocates experts by certified value of information (Saliencro et al., 2026b). • Richer routing and heterogeneous experts: Talk-LoRA lets experts exchange information before routing (Mu et al., 2026), and SAMoRA aligns routing with input semantics (Shi et al., 2026). MoA mixes heterogeneous adapter types (Cao et al., 2026b), FourierMoE and FRAME move experts to spectral or fractional domains (Jiang et al., 2026; Saliencro et al., 2026c), and adaptive shared experts combine task-specific and shared experts (Yang et al., 2025b). • Other structures: TT-LoRA MoE trains ten-sorized experts separately and routes among them (Kunwar et al., 2025), MoEGen gen-erates instance-specific updates from expert codes (Zeng et al., 2026), and Localized LoRA-MoE routes over blocks of the weight ma-trix (Barazandeh et al., 2026). • Pruning and MoE backbones: DMEP prunes ex-perts per module once routing stabilizes (Li et al., 2026b), EPnG prunes and grows expert ranks un-der a fixed budget (Lee et al., 2026), and MoE 2-LoRA and NSFT adapt MoE language models with routed or sub-expert adapters (Yang et al., 2026a; Tan et al., 2026). Several works question routing itself. CD-LoRA and Align-LoRA remove routers and align repre-14 sentations in a shared space (Zha et al., 2026; Liu et al., 2025), and Chowdhury et al. (2026) show that disjoint routing does not prevent interference inside an adapter. All of these methods leave open what quantity a router should estimate. V ANE an-swers this question and derives its router from the answer. 
+
+Shared factors, combinatorial experts, and ten-sor views. Sharing factors across experts saves parameters and couples experts. • Shared or mixed subspaces: HydraLoRA shares a single down-projection across heads (Tian et al., 2024), MALoRA shares a low-rank sub-space (Wang et al., 2025a), and MoSLoRA learns a mixer between the two LoRA subspaces (Wu et al., 2024b). • Core experts: CoMoL stores experts as core ma-trices between shared factors and routes in the core space (Cao et al., 2026a). Self-Routed Ten-sor Adapters blend slices of a shared Tucker core with weights computed from the low-rank pro-jection (Yadav, 2026). • Many experts from few parts: T-REX mixes and matches rank-one experts so that the expert sub-space grows quadratically with linear parameter cost (Zhang et al., 2024). SMoRA treats every rank as an expert (Zhao et al., 2025), S’MoRE assembles residual experts along trees (Zeng et al., 2025), and Dynamic Subspace Compo-sition builds updates from a sparse set of basis vectors (Khasia, 2025). • Factorized expert tensors: product keys retrieve from a Cartesian product of sub-keys (Lample et al., 2019), and PEER uses them to route among a million tiny experts (He, 2024). μMoE com-putes a mixture over a factorized expert ten-sor (Oldfield et al., 2024). VANE ’s reader–writer product is the simplest com-binatorial structure in this family. Its distinctive use is computational: because every pair factors through the same rank-r latent, the router can evalu-ate every pair’s first-order effect in that latent space. 
+
+Routing signals. Token routers map the hidden state to logits, possibly with priors such as semantic clusters (Zhang et al., 2024; Shi et al., 2026) or the routing history of earlier layers (Qiu et al., 2026). Self-routing methods remove the router. • AoE ranks experts by the norms of their own low-rank activations (Lv et al., 2025). • FlyLoRA uses the top-k coordinates of a frozen sparse projection as an implicit router (Zou et al., 2025a). Its decorrelation properties also help continual learning (Zou et al., 2026, 2025b), and NeuroLoRA adds a context gate before selec-tion (Yang et al., 2026b). • FURINA activates experts by the angle between the input and each adapter’s direction (Han et al., 2025). Self-Routing uses a subspace of the hid-den state as logits (Mohamud et al., 2026), and geometric routing uses cosine similarity in a low-dimensional metric space (Ternovtsii and Bilak, 2026). • PASs-MoE calibrates routing with each expert’s pathway activations to prevent router–expert co-drift (Hou et al., 2026). In the terms of Theorem 1, every one of these scores is either affine in the token or a function of the input-side activations alone. None involves the writer or the loss. On the training side, Default MoE gives the router a dense gradient by substi-tuting moving averages of expert outputs for un-selected experts (Panda et al., 2025). GRIN esti-mates gradients through discrete routing (Liu et al., 2024a), and DAG-MoE learns how selected experts are aggregated (Feng et al., 2026). V ANE ’s dense gradient differs from Default MoE’s in being exact to first order, which the factorization makes afford-able, and it is the gradient of the quantity the router is designed to estimate. 
+
+Value of information and adaptive compute. 
+
+VI-MoLE also routes by an estimate of risk reduc-tion (Saliencro et al., 2026b). It learns the residual risk of each prefix of router-ordered experts, cer-tifies it on held-out data, and decides how much compute to spend and when to abstain. V ANE an-swers a complementary question, which pairs to activate at a fixed k. It does so with a first-order estimate that is exact during training and forecast at test time. The two could be combined: V ANE ’s scores could order the candidates whose value VI-MoLE certifies. 
+
+B A Unified View of Low-Rank Mixtures 
+
+Stack the readers into ˜A ∈ RNAr×d and the writers into ˜B ∈ Rd′×NB r. Every layer of the form of Eq. (1) computes 
+
+∆W (x) = ˜B  G(x) ⊗ Ir
+
+ ˜A, (6) where G(x) ∈ RNB ×NA is the writer-by-reader matrix of gates. Table 4 places existing designs in 15 this template. Paired MoE-LoRA uses a diagonal 
+
+G and a token router. HydraLoRA uses a single column. MoSLoRA replaces G ⊗ Ir by a fixed dense mixer, and CoMoL by a routed mixture of dense cores. Rank-one mixtures set r = 1 . V ANE 
+
+uses a sparse G over all NANB pairs, chosen by update scores. The template also shows why the combinatorial structure is cheap to score. The use-fulness of all pairs, G-weighted or not, is the matrix 
+
+Z⊤W of Proposition 1, whose size is set by the number of factors rather than the number of pairs.                               
+
+> Method G(x)rRouter score
+> LoRA [1] r–Paired MoE-LoRA diagonal rtoken HydraLoRA one column rtoken MoSLoRA fixed dense mixer r–CoMoL routed dense core rlatent-linear SMoRA, FlyLoRA diagonal 1token, reader T-REX sparse 1token AoE (as adapter) diagonal rreader norm VANE sparse, all pairs rupdate
+
+Table 4: Low-rank mixtures as instances of Eq. (6). “Reader” scores depend on the token only through the input-side activations; “update” scores depend on the writer and on a forecast of the loss gradient. 
+
+C Proofs 
+
+Throughout, x ∈ Rd is a token, za = Aax, vab =
+
+Bbza, δ = −∇ yℓ, and uab = ⟨δ, v ab ⟩. We write 
+
+σ′ 
+
+> ab
+
+= σ′(sab ).
+
+C.1 Proof of Proposition 1 
+
+Let ℓ be differentiable at y. Then ℓ(y + ηv ab ) = 
+
+ℓ(y) + η⟨∇ yℓ, v ab ⟩ + o(η) = ℓ(y) − ηu ab + o(η),and O(η2) if ℓ is twice differentiable. By asso-ciativity, uab = δ⊤BbAax = ( B⊤ 
+
+> b
+
+δ)⊤(Aax) = 
+
+w⊤ 
+
+> b
+
+za with wb = B⊤ 
+
+> b
+
+δ. Collecting za and wb as columns of Z ∈ Rr×NA and W ∈ Rr×NB gives 
+
+[uab ] = Z⊤W . Similarly ∥vab ∥2 = z⊤ 
+
+> a
+
+B⊤ 
+
+> b
+
+Bbza =
+
+z⊤ 
+
+> a
+
+Gbza. For the cost, Z takes NArd multiply– adds and W takes NB rd ′. The product Z⊤W takes 
+
+NANB r. The Gram matrices take NB r2d′ once per forward pass, which is shared by all tokens in the batch, and the norms take NANB r2 per to-ken. Materializing all updates requires NANB rd ′
+
+multiply–adds after Z, plus NANB d′ for the inner products with δ.
+
+C.2 Proof of Theorem 1 
+
+We first record the moments of Gaussian quadratic forms that the proof needs. 
+
+Lemma 1. Let ε ∼ N (0 , Σ) , S symmetric, and 
+
+m ∈ Rd. Then E[ε⊤Sε ] = tr( SΣ) , Var( ε⊤Sε ) = 2 tr  (SΣ) 2, and Eε (ε⊤Sε ) = 0 , so in particu-lar Cov( m⊤ε, ε ⊤Sε ) = 0 .Proof. Write ε = Σ 1/2g with g ∼ N (0 , I ) and diagonalize Σ1/2SΣ1/2 = QΛQ⊤. Then ε⊤Sε =P 
+
+> i
+
+λi ˜g2 
+
+> i
+
+with ˜g = Q⊤g ∼ N (0 , I ). Its mean is P 
+
+> i
+
+λi = tr( SΣ) and its variance is 2 P 
+
+> i
+
+λ2 
+
+> i
+
+=2 tr(( SΣ) 2). The last claim holds because ε(ε⊤Sε )
+
+is an odd function of ε and the distribution of ε is symmetric. 
+
+Expected usefulness. Since E[ξ | x] =0, ¯uab (x) = E[(Γ x + ξ)⊤BbAax | x] =
+
+x⊤Γ⊤BbAax = x⊤Mab x = x⊤Sx , because a quadratic form depends only on the symmetric part of its matrix. Writing x = μ + ε,
+
+¯uab = μ⊤Sμ + 2 μ⊤Sε + ε⊤Sε. (7) By Lemma 1 the last two terms are uncorrelated, so 
+
+Var(¯ uab ) = 4 μ⊤SΣSμ + 2 tr(( SΣ) 2). The first term is the mean-interaction part of usefulness and the second is the token-specific part. 
+
+Part (i). Let s(x) = w⊤x + c = w⊤ε +const . By Eq. (7) and Lemma 1, Cov( s, ¯uab ) = Cov( w⊤ε, 2μ⊤Sε ) = 2 w⊤ΣSμ and Var( s) = 
+
+w⊤Σw. By the Cauchy–Schwarz inequality in the inner product ⟨p, q ⟩Σ = p⊤Σq,
+
+corr 2(s, ¯uab ) = 4( w⊤ΣSμ )2
+
+w⊤Σw Var(¯ uab ) ≤ 4 μ⊤SΣSμ 
+
+Var(¯ uab ) ,
+
+with equality iff w ∝ Sμ . The least-squares router is w⋆ = Σ −1Cov( x, ¯uab ) = Σ −1(2Σ Sμ ) = 2 Sμ ,which attains the bound. A linear router over pairs uses an arbitrary w per pair. A product router uses 
+
+w = wa + w′
+
+> b
+
+, and a latent-linear router uses w =
+
+A⊤ 
+
+> a
+
+cab . All three are affine in x and obey the bound. When μ = 0 the numerator is zero. 
+
+A closed form for isotropic tokens. Let Σ = 
+
+σ2I and let the direction of μ be uniform on the sphere, independent of S. Then Eμ[μ⊤S2μ] = 
+
+∥μ∥2tr( S2)/d . With κ = ∥μ∥2/tr Σ =
+
+∥μ∥2/(dσ 2), the ratio of expected mean-interaction to expected total variance is 
+
+4σ2∥μ∥2tr( S2)/d 
+
+4σ2∥μ∥2tr( S2)/d + 2 σ4tr( S2) = 2κ
+
+1 + 2 κ .
+
+Even when the token mean carries as much en-ergy as the fluctuations ( κ = 1 ), token routers can explain at most about two thirds of the expected usefulness variance. 16 Part (ii). If sab = φ(Aax) for some function φ,then sab = sab ′ for all writers b, b ′, so the score can-not order the writers of a reader. Any tie-breaking rule that does not look at the writers chooses among them independently of {uab }b. Conditional on the chosen reader, the expected usefulness of the cho-sen writer is therefore the average over writers, which is the gain of a uniformly random writer. For paired experts, where each reader has one writer, the same argument shows that reader-side scores rank experts independently of what their writers do. 
+
+Part (iii). If U V ⊤ = Γ , then ⟨e(x), v ab (x)⟩ =
+
+x⊤V U ⊤BbAax = x⊤Γ⊤BbAax = ¯ uab (x). A fac-torization Γ = U V ⊤ with inner dimension re ex-ists iff re ≥ rank Γ . For optimality, take any rule that selects k pairs S(x) from x. By the tower rule, 
+
+E[P 
+
+> S(x)
+
+uab ] = E[P 
+
+> S(x)
+
+¯uab (x)] . Pointwise in 
+
+x, the sum is maximized by the k largest ¯uab (x),which are the top-k pairs under the score. 
+
+Remark 1. The noise ξ plays no role in Theo-rem 1. It adds variance to the realized usefulness that no router can predict from x, so it lowers every router’s correlation with realized usefulness by the same factor. When re < rank Γ , the best rank-re
+
+compass in the least-squares sense is the reduced-rank regression of δ on x. Figure 5a shows the correlation saturating once re reaches rank Γ = 6 .
+
+C.3 Proof of Proposition 2 Forward pass. The straight-through core uses 
+
+˜gab = mab gab + (1 − mab )( gab − sg( gab )) . Its value is mab gab because g − sg( g) evaluates to zero, so cb and y coincide with Eq. (5). 
+
+Router gradient. Since sg has zero derivative, 
+
+∂˜gab /∂g ab = mab + (1 − mab ) = 1 for ev-ery pair. From y = W0x + αr
+
+P 
+
+> b
+
+Bbcb we get 
+
+∂ℓ/∂c b = αr B⊤ 
+
+> b
+
+∇yℓ = − αr B⊤ 
+
+> b
+
+δ, and ∂c b/∂ ˜gab =
+
+za. Hence ∂ℓ/∂g ab = − αr ⟨B⊤ 
+
+> b
+
+δ, z a⟩ = − αr uab 
+
+and ∂ℓ/∂s ab = − αr σ′
+
+> ab
+
+uab . For an unselected pair, the coefficient of za in cb has value zero, so no gradient reaches za or Bb through that term. Unse-lected pairs therefore train only the router. 
+
+The compass step. With stop-gradients on 
+
+za and Bb, the score in Eq. (4) is sab =
+
+⟨e, v ab ⟩/(∥vab ∥ + ϵ) with e = U h . Thus 
+
+∂s ab /∂e = vab /(∥vab ∥ + ϵ) and 
+
+∇eℓ = X
+
+> ab
+
+∂ℓ ∂s ab 
+
+vab 
+
+∥vab ∥ + ϵ
+
+= − αr
+
+X
+
+> ab
+
+σ′
+
+> ab
+
+vab v⊤
+
+> ab
+
+∥vab ∥ + ϵ δ = − αr P δ, 
+
+using uab = v⊤
+
+> ab
+
+δ. Each summand of P is a nonnegative multiple of a rank-one projector, so 
+
+P ⪰ 0. For a single token, ∇U ℓ = ( ∇eℓ)h⊤,and the step U ← U − η∇U ℓ changes e = U h 
+
+by ∆e = −η(∇eℓ)∥h∥2 = η αr ∥h∥2P δ . Hence 
+
+⟨∆e, δ ⟩ = η αr ∥h∥2 δ⊤P δ ≥ 0. Equality holds only if δ is orthogonal to every candidate up-date. 
+
+Remark 2. A step on V changes the compass by 
+
+η αr ∥x∥2U U ⊤P δ , whose alignment with δ is not sign-definite. Over a batch, the step on U also mixes tokens through ⟨ht, h t′ ⟩. Appendix D checks the single-token statement, and Figure 3b measures the alignment reached by full training. 
+
+C.4 Proof of Proposition 3 
+
+Let A′ 
+
+> a
+
+= caM A a and B′ 
+
+> b
+
+= c′
+
+> b
+
+BbM −1.Then z′ 
+
+> a
+
+= caM z a and v′ 
+
+> ab
+
+= B′
+
+> b
+
+z′ 
+
+> a
+
+=
+
+cac′
+
+> b
+
+BbM −1M z a = cac′
+
+> b
+
+vab . The compass is un-touched, so ⟨e, v ′
+
+> ab
+
+⟩ = cac′
+
+> b
+
+⟨e, v ab ⟩ and ∥v′
+
+> ab
+
+∥ =
+
+cac′
+
+> b
+
+∥vab ∥. As ϵ → 0 the ratio in Eq. (4) is unchanged, and so are the top-k set and the gates. In latent terms, q′ 
+
+> b
+
+= c′
+
+> b
+
+M −⊤ qb and 
+
+G′ 
+
+> b
+
+= c′2 
+
+> b
+
+M −⊤ GbM −1, so ⟨q′
+
+> b
+
+, z ′
+
+> a
+
+⟩ = cac′
+
+> b
+
+⟨qb, z a⟩
+
+and z′⊤  
+
+> a
+
+G′
+
+> b
+
+z′ 
+
+> a
+
+= c2
+
+> a
+
+c′2 
+
+> b
+
+z⊤ 
+
+> a
+
+Gbza, as the latent com-putation requires. With c ≡ 1, B′
+
+> b
+
+A′ 
+
+> a
+
+=
+
+BbAa for every pair, so the layer output is un-changed. In contrast, ∥A′
+
+> a
+
+x∥ = ca∥M A ax∥ dif-fers from ∥Aax∥ unless caM is orthogonal. A non-orthogonal M such as diag(2 , 1, . . . , 1) reorders readers whose latents load on different coordinates, although it changes no expert’s function. Likewise, 
+
+w⊤A′
+
+> a
+
+x = ca(M ⊤w)⊤Aax changes at fixed router weights. 
+
+Remark 3 (Calibration breaks a rich-get-richer loop) . Under raw scores ⟨e, v ab ⟩ = ∥vab ∥ ⟨ e, ˆvab ⟩,scaling writer b by c > 1 multiplies all of its scores by c. For positively aligned tokens this raises its selection frequency, and with it the share of the task gradient it receives. Writers that grow are selected more often and grow further. By Proposition 3, calibrated scores are invariant to this scaling, so selection depends only on the direction of an update and magnitude enters only through the output. The 
+
+17 static cost of this choice is measured in Appendix E and its training benefit in Table 3. 
+
+C.5 Proof of Proposition 4 
+
+Let A and B be the readers and writers that appear in S, and ˜AA, ˜BB their stacks. Then P 
+
+> S
+
+gab BbAa = ˜BB(GS ⊗ Ir) ˜AA. If ˜B has full column rank it is injective, and if ˜A has full row rank it is surjective onto RNAr. Neither changes the rank of a middle factor, so the rank is 
+
+rank( GS ⊗ Ir) = r rank( GS ). The rank of GS is at most its number of rows, columns, and nonzero entries, which gives the bound. If the gates are sep-arable over a product set, GS = βα ⊤ has rank one. The first-order gain of P 
+
+> S
+
+gab vab is P 
+
+> S
+
+gab uab by linearity. If g ≥ 0 and P g = 1 , this is a convex combination and at most max S uab .
+
+Remark 4 (Factor-level gradient sharing) . Under balanced marginals, each token activates on aver-age k/N A pairs that contain a given reader and 
+
+k/N B that contain a given writer. With paired experts and the same number NANB of implicit experts, the figure is k/ (NANB ) per expert. Each reader therefore receives gradient from NB times more token events, and each writer from NA times more. The combinatorial layer has the expressivity of NANB experts while estimating only NA + NB
+
+factors. 
+
+D Numerical Verification 
+
+code/theory_checks.py checks every statement in float64 on random layers ( d=48 , d′=40 , NA=4 ,
+
+NB =6 , r=3 , re=5 ) with a random cross-entropy head. It uses the reference implementation 
+
+code/vane_layer.py , the same code that defines the method. Table 5 reports the worst case over random draws. 
+
+E The Controlled Linear-Response Study 
+
+Model. Figure 1 and Figure 5 use the model of Theorem 1 with the following settings: • Width d = d′ = 64 and NA = NB = 8 fixed random readers and writers of rank r = 4 , giving 64 pairs, with k = 4 active. • Tokens x = μ + Σ 1/2g, where Σ has eigenvalues decaying as i−0.6 in a random basis, normalized to tr Σ = d, and μ = √κd ˆu for a random unit vector ˆu.• Descent directions δ = Γ x + ξ, with a random 
+
+Γ of rank 6 and isotropic noise ξ whose total variance equals that of Γx.Experts are fixed, so the study isolates routing. All numbers are computed, none simulated. 
+
+Panel (a) of Figure 1. For each κ, we fit each router class on 60k tokens and evaluate its squared correlation with E[uab | x] on 40k fresh tokens, averaged over the 64 pairs. • Token router: least squares from x for each pair. • Latent-linear router: least squares from za.• Reader norm: ∥za∥.• V ANE : compass fitted by rank-8 reduced-rank regression of δ on x, with calibrated and raw scores. The closed form of Theorem 1(i), averaged over pairs, matches the fitted token router to within 
+
+0.002 at every κ.
+
+Panel (b). Each router is trained online for 2,500 steps with Adam on batches of 256 tokens. The loss is − P 
+
+> ab
+
+σ(sab )uab , computed with the re-alized (noisy) usefulness, which is exactly the dense first-order signal V ANE ’s straight-through core provides. The learning rate is the best of three per router. We report the held-out captured gain 
+
+(Gsel − Grand )/(Gorc − Grand ) of the top-4 pairs, where G is the expected first-order gain. Final values: • V ANE 0.875 , token router 0.688 , and latent-linear router 0.643 ;• reader norm −0.03 , no better than random; • product router −0.11 , worse than random. The product router fails because usefulness is not additive over readers and writers. A sum of a reader logit and a writer logit ranks the best reader and the best writer highly even when their pair is harmful, which Proposition 4 anticipates for separable struc-tures. The compass learns only from the routing signal, yet it reaches 0.875 , close to the 0.88 of the regression-fitted compass (Figure 5c at κ = 0 .5). 
+
+What the extra panels show. Figure 5a con-firms Theorem 1(iii): the raw update score reaches a squared correlation of 0.9998 at re = rank Γ .Panel (b) shows that the raw score keeps capturing all of the attainable gain up to 256 pairs, while to-ken and latent-linear routers stay at 0.5–0.7. The calibrated score declines from 0.99 to 0.80 as the pool grows, because it ranks pairs by alignment per unit norm rather than by total gain, and with many pairs the two rankings diverge more often. Panel 18 Check Result 
+
+Latent alignment vs. materialized ⟨e, B bAax⟩ 2.7×10 −15 
+
+Latent calibrated score vs. materialized norm 6.7×10 −16 
+
+Loss change vs. −ηu ab (η=10 −5), rel. error 4.9×10 −4
+
+Autograd ∂ℓ/∂s ab vs. − αr σ′uab , all pairs, rel. 2.1×10 −16 
+
+Gradient to unselected pairs without the ST core 0cos(∆ e, δ ) after a step on U : min / mean (200 draws) +0 .224 / +0 .486 
+
+Output change under the gauge A → M A , B → BM −1 6.3×10 −13 
+
+Score change under gauge and rescaling ( ϵ=10 −6) 1.3×10 −5
+
+AoE reader-norm change under the same map (mean rel.) 1.52 
+
+Latent-linear score change (median rel.) 1.71 
+
+Thm. 1(i), κ=0 /0.25 /1/4: theory 0/. 309 /. 372 /. 929 
+
+Monte Carlo ( 4×10 5) 0/. 308 /. 373 /. 929 
+
+Rank: matching of 4 pairs / shared reader 16 / 4
+
+Rank: separable / generic gates over 16 pairs 4 / 16 
+
+Table 5: Numerical verification of Propositions 1–4 and Theorem 1 (output of code/theory_checks.py ). The 
+
+10 −5 score change comes from the ϵ in Eq. (4). 1 2 3 4 6 8 16               
+
+> compass rank re
+> 0.2 0.4 0.6 0.8 1.0
+> corr 2 with  [uab  | x]
+> rank Γ
+> (a) Compass rank
+> update score (raw) VANE, calibrated
+> 816 32 64 128 256
+> pairs NANB(top-4 selected)
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> captured first-order gain  (b) Number of pairs
+> 01234
+> token-mean strength κ
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> captured first-order gain  (c) Token-mean strength
+> update score (raw) VANE, calibrated token router latent-linear reader norm
+
+Figure 5: Controlled linear-response study, continued (exact computations). (a) Squared correlation with expected usefulness vs. compass rank. The raw update score is exact once re ≥ rank Γ = 6 , and calibration caps it at 0.87 .(b) Captured first-order gain of fitted routers as the number of pairs grows ( k = 4 ). (c) Captured gain vs. token-mean strength: token routers catch up only when the token mean dominates. 
+
+(c) shows the regime in which token routers suf-fice. When the token mean dominates ( κ ≥ 2), the mean-interaction part of usefulness carries most of its variance, and a least-squares token router captures 0.91 –0.97 of the gain, more than the cal-ibrated score’s 0.88 . Calibration therefore has a static cost, which is the price of the scale invari-ance in Proposition 3. In training, where writer norms evolve, the invariance pays off: removing calibration costs 0.6 points (Table 3). 
+
+F Implementation Details 
+
+Layer. code/vane_layer.py wraps a frozen 
+
+nn.Linear and keeps four parameter tensors: • the stacked readers ˜A ∈ RNAr×d and writers 
+
+˜B ∈ Rd′×NB r;• the compass maps U ∈ Rd′×re and V ∈ Rd×re .The forward pass works on a batch of tokens T :1. It computes Z = X ˜A⊤, reshaped to T ×NA ×r,and H = XV .2. It computes the writer keys Kb = B⊤
+
+b U and 
+
+Algorithm 1: VANE layer (one training step) 
+
+Input: tokens X; readers {Aa}; writers {Bb};compass U, V za ← Aax for all a; h ← V ⊤xKb ← sg( Bb)⊤U ; Gb ← sg( Bb)⊤sg( Bb) // once 
+
+sab ← ⟨ Kbh, z a⟩/(pz⊤ 
+
+> a
+
+Gbza + ϵ) // all pairs 
+
+m ← top-k mask of s; g ← σ(s)˜g ← m ⊙ g + (1 − m) ⊙ (g − sg( g)) // ST core 
+
+cb ← P 
+
+> a
+
+˜gab za; y ← W0x + αr
+
+P 
+
+> b
+
+Bbcb
+
+L ← ℓ(y) + λbal Lbal ; backpropagate 
+
+Grams Gb = B⊤
+
+b Bb once for the batch, under stop-gradients on the writers. 3. It computes all scores with two einsum calls and a normalization, selects with topk over the flat-tened NANB scores, forms the straight-through gates, and mixes the latents into the T × NB × r
+
+core. 4. It applies ˜B as one dense matrix product. There is no per-expert gather or scatter. The layer is two dense low-rank products (total rank 19 NAr = 16 and NB r = 32 at the default) around a small dense tensor contraction. A backward hook, attach_usefulness_probe , records the ex-act usefulness of all pairs from ∂ℓ/∂y and was used for every mechanism measurement in §5.4. 
+
+Initialization. Readers and V use LoRA’s Kaiming-uniform initialization, and U is drawn from N (0 , 1/d ′). Writers are drawn from 
+
+N (0 , 10 −8) rather than zero. Scores are directions of updates, so every writer needs a direction from the first step, while the initial update stays negli-gible. Zero writers with random tie-breaking also train but lose 0.4 points (Table 13). 
+
+Inference. At test time the compass is the router. The straight-through term is dropped, and the forward pass is otherwise identical. For single-sequence decoding, a sparse path applies only the at most k writers that receive an active pair. For batched decoding the dense path is faster, and we report it. Dynamic adapters are slow to decode mainly because of fragmented per-expert kernel launches, not because of their arithmetic (Kong et al., 2024; Li et al., 2026a). V ANE ’s dense path is-sues the same few kernels for every token. Because the active set depends on the token, the adapter cannot be merged into W0, which is also true of every MoE-LoRA baseline. 
+
+Memory. Per token, V ANE stores NAr + re +
+
+NANB activations for the backward pass, which is 56 floats per adapted matrix at the default. Paired MoE-LoRA with 8 experts of rank 8 stores 16 latent floats plus routing buffers. 
+
+G Experimental Setup 
+
+Data. Single-domain. Commonsense170K is the union of the training sets of the eight commonsense benchmarks, as released with LLM-Adapters (Hu et al., 2023). We evaluate on their standard test splits with the LLM-Adapters prompts and answer extraction. 
+
+Multi-task. We draw 30k examples from each of four sources with a fixed seed, giving 120k exam-ples: • MetaMathQA (Yu et al., 2024); • Magicoder-Evol-Instruct-110K (Wei et al., 2024); • the MedMCQA training split (Pal et al., 2022); • Commonsense170K. We evaluate on GSM8K (1,319 test problems), MATH (5,000), HumanEval (164), MBPP (500 test problems), the MedMCQA dev split (4,183), PubMedQA’s 500 labeled test questions, ARC-c (1,172), and the WinoGrande dev split (1,267). Math uses exact match after answer extraction, code uses greedy pass@1, and the remaining bench-marks use accuracy. 
+
+Prompts and decoding. All multi-task data use one Alpaca-style instruction template. Decoding is greedy, with at most 512 new tokens for math and code and 32 for multiple-choice answers. 
+
+Baselines. Table 6 lists every configuration. Pa-rameter counts are computed from the Llama layer shapes by code/param_count.py and appear as Param% in Tables 1 and 2. All methods adapt the q, k, v, o, gate, up, and down projections. Mix-tures use their auxiliary losses at the recommended weights. Every method, V ANE included, uses the same optimizer, schedule, batch size, number of epochs, and learning rate ( 2×10 −4). We tuned only the learning rate, over {10 −4, 2×10 −4, 3×10 −4}
+
+on a held-out slice of the training mixture, and 
+
+2×10 −4 was best or tied for every method. 
+
+Hyperparameters and compute. Table 7 lists the training configuration. Runs use 8 NVIDIA H100 80GB GPUs with bfloat16 and FlashAtten-tion. A multi-task run on Llama-3.1-8B takes 3.9 hours for V ANE (Table 14). All numbers are means over seeds 0, 1, and 2. 
+
+H Additional Results 
+
+Variance across seeds. Table 8 reports means and standard deviations over three seeds for the strongest methods. It also reports the 95% con-fidence interval of the paired per-seed difference between V ANE and LD-MoLE, which excludes zero in every setting. 
+
+Per-domain view. Table 9 averages Table 2 within each domain. V ANE ’s margin is largest on code and math, the domains whose updates differ most from the rest of the mixture. It is smallest on medicine, where PubMedQA is close to saturation for all methods. 
+
+Other backbones. Table 10 repeats both set-tings on Qwen2.5-7B and Qwen3-8B with the same hyperparameters. The margins over LD-MoLE (+0 .9/+1 .3 and +0 .8/+1 .2 on single-domain/multi-task) are in line with the Llama re-20 Method Configuration (per adapted matrix) 3B % 8B %                                                                
+
+> LoRA rank 16, α=32 0.76 0.52 DoRA rank 16 + magnitude vector 0.78 0.54 MoSLoRA rank 16 + learnable 16 ×16 mixer 0.76 0.52 CoMoL shared rank-16 LoRA + 8 core experts ( 16 ×16 ) + core-space router 0.77 0.53 FlyLoRA rank 32, frozen sparse random A, top-8 ranks active, trainable B0.77 0.55 HydraLoRA shared A(rank 8) + 8 Bheads (rank 8) + router 1.92 1.34 MixLoRA 8 experts of rank 8 on MLP projections (top-2), rank-8 LoRA on attention 2.13 1.57 MoLA 2/4/6/8 experts of rank 8 in the four quarters of the network (top-2) 2.01 1.38 HMoRA 8 experts of rank 8, token- and task-level hierarchical routing 3.40 2.34 GOAT 8 SVD-initialized experts of rank 8 (top-2), theoretical scaling 3.22 2.21 SMoRA 64 rank-one experts, top-8 dynamic rank-wise activation 4.52 3.08 LD-MoLE 8 experts of rank 8, differentiable dynamic routing with sparsity control 3.22 2.21 VANE -S NA=2 ,NB=4 ,r=4 ,re=4 ,k=2 (8 implicit experts) 0.76 0.53 VANE NA=4 ,NB=8 ,r=4 ,re=8 ,k=4 (32 implicit experts) 1.52 1.06
+
+Table 6: Baseline and V ANE configurations with trainable-parameter fractions for Llama-3.2-3B and Llama-3.1-8B.                          
+
+> Hyperparameter Value
+> Readers / writers / rank 4 / 8 / 4 Compass rank re8Active pairs k4 of 32 Scale α8 ( α/r = 2 )Gates σ(sab ), additive Calibration ϵ10 −6
+> Balancing λbal 10 −2(marginal) Writer init std 10 −4
+> Optimizer AdamW, β=(0 .9,0.999)
+> Learning rate 2×10 −4, cosine Warm-up / weight decay 3% / 0 Batch size 128 sequences Epochs 3 (CS), 2 (MT) Max length 256 (CS), 1024 (MT) Seeds 0, 1, 2
+
+Table 7: Default V ANE hyperparameters (shared by all backbones and both settings). 
+
+sults. On Llama-3.2-1B, multi-task averages are 41.2 (LoRA), 42.8 (MixLoRA), 43.4 (LD-MoLE), and 45.6 (V ANE ), which gives the leftmost points of Figure 4d. 
+
+Readers, writers, and rank. Table 11 gives the full grid behind Figure 4b with each cell’s parame-ter share. At a fixed budget, writers are the better investment. The (4 , 16) cell gains only 0.1 over the default for 52% more parameters, and eight readers do not beat four. 
+
+Sparsity and compass rank. Table 12 lists the 
+
+k sweep of Figure 4c and a compass-rank sweep. Accuracy and score–usefulness correlation saturate at re = 8 , as in the controlled model, where sat-uration occurs at the rank of the linear response. The balancing weight and the writer initialization matter little within an order of magnitude of the defaults (Table 13). 
+
+Cost. Table 14 reports training time, peak mem-ory, and decoding latency on Llama-3.1-8B. V ANE 
+
+trains 1.26 × slower than LoRA, like HydraLoRA, and 34% faster than LD-MoLE, because it runs two dense products instead of per-expert dispatch. 
+
+Data efficiency, retention, and placement. With 10% of the multi-task mixture, V ANE leads LD-MoLE by 1.6 points (Table 15). Each reader and writer receives gradient from many more tokens than a paired expert would (Appendix C), which matters most when data is scarce. After multi-task training, zero-shot MMLU (Hendrycks et al., 2021b) drops least with V ANE (Table 16). Restrict-ing any method to attention or to MLP projections costs accuracy, and MLP projections matter more. 
+
+Router classes on the same structure. Table 17 summarizes the mechanism measurements of Fig-ure 3 at the end of training. The ordering of the score classes is the one Theorem 1 predicts and Fig-ure 1 shows in the controlled model: reader norm, then product, then token and latent-linear routers, then update scores. 
+
+Training dynamics. VANE reaches a lower train-ing loss and a higher held-out accuracy through-out training (Figure 6a,b). The advantage appears early, when the compass has aligned (Figure 3b) and scores already track usefulness. In 62% of to-kens the four active pairs use four distinct readers and four distinct writers, so the token update has the maximal rank 4r (Figure 6c). The sum of active gates averages 2.3 (Figure 6d), well above the value 1 that softmax normalization would force. Com-plementary pairs are stacked rather than averaged, which is the behavior that Proposition 4 motivates. 21 Llama-3.2-3B Llama-3.1-8B Method CS MT CS MT LoRA 78 .9 ± 0.21 51 .5 ± 0.34 84 .4 ± 0.21 60 .4 ± 0.34 
+
+MixLoRA 80 .1 ± 0.24 53 .3 ± 0.38 85 .4 ± 0.24 62 .0 ± 0.38 
+
+GOAT 80 .6 ± 0.19 53 .7 ± 0.31 85 .9 ± 0.19 62 .4 ± 0.31 
+
+LD-MoLE 80 .8 ± 0.22 53 .9 ± 0.36 86 .0 ± 0.22 62 .6 ± 0.36 
+
+VANE -S 80 .7 ± 0.18 53 .9 ± 0.29 85 .8 ± 0.18 62 .5 ± 0.29 
+
+VANE 81 .9 ± 0.16 55 .4 ± 0.27 86 .9 ± 0.16 63 .9 ± 0.27 
+
+VANE −LD-MoLE, 95% CI [0 .71 , 1.33] [1 .12 , 1.98] [0 .58 , 1.14] [0 .95 , 1.73] 
+
+Table 8: Table averages over three seeds (mean ± s.d.) and the 95% CI of the paired V ANE −LD-MoLE difference. 
+
+Llama-3.2-3B Llama-3.1-8B Method Math Code Med. CS Math Code Med. CS LoRA 32.7 40.4 61.3 71.7 43.1 52.1 66.5 79.9 HydraLoRA 34.6 42.3 62.8 73.3 44.7 53.8 67.9 81.2 MixLoRA 34.6 42.7 62.7 73.3 44.7 54.0 68.0 81.2 GOAT 34.9 43.3 63.2 73.5 45.3 54.8 68.2 81.3 LD-MoLE 35.4 43.4 63.3 73.5 45.5 54.7 68.5 81.6 VANE -S 35.1 43.3 63.1 74.2 45.5 54.8 68.1 81.7 VANE 37.5 45.6 63.5 75.3 47.3 56.7 69.0 82.7 
+
+Table 9: Multi-task accuracy averaged within domains (Med.: medicine; CS: commonsense). 0 1000        
+
+> optimizer step
+> 0.8 1.0 1.2
+> training loss
+> (a) Training loss
+> LoRA MixLoRA LD-MoLE VANE
+> 050 100
+> training progress (%)
+> 50 55 60 65
+> held-out MT avg.
+> (b) Held-out accuracy
+> 1r 2r 3r 4r
+> token update rank (top-4 pairs)
+> 0.0 0.2 0.4 0.6
+> fraction of tokens
+> (c) Pairs combine
+> 123
+> gate sum per token
+> 0500 1000 1500
+> tokens
+> softmax (sum = 1)
+> (d) Additive gates
+
+Figure 6: Training dynamics and gate statistics (Llama-3.1-8B, multi-task). (a) Training loss. (b) Held-out multi-task average during training. (c) Rank of the per-token update among the top-4 pairs, in units of r. Most tokens combine pairs with distinct readers and writers and reach rank 4r (Proposition 4). (d) Sum of the active gates per token. Complementary pairs stack well above the softmax constraint of 1. 1 8 16 24 32 
+
+> layer
+> qkvogate up down
+
+(a) Compass alignment cos (e, δ) per module and layer             
+
+> A1 A2 A3 A4 B1 B2 B3 B4 B5 B6 B7 B8
+> 0.0 0.2 0.4 0.6
+> share of selected pairs  readers writers
+
+(b) Factor utilization 
+
+> marginal balancing no balancing
+> 0.05 0.10 0.15 0.20 0.25 0.30 0.35 0.40
+
+Figure 7: Where the compass points (Llama-3.1-8B, multi-task). (a) Cosine between the compass and the true descent direction per module and layer. Alignment is highest in the middle layers and in the MLP projections. (b) Share of selected pairs per reader and writer. Marginal balancing keeps every factor in use while pair usage stays specialized (Figure 3d); without it, two readers and three writers absorb most of the traffic. 
+
+I Discussion 
+
+Why score the update. A router has one job, to choose the computation that helps the current token. For a mixture of additive updates, “helps” has a precise first-order meaning, alignment with the de-scent direction at the output. It depends on what the 22 Qwen2.5-7B Qwen3-8B Method CS MT CS MT LoRA 85.6 64.8 87.1 67.9 MixLoRA 86.5 66.3 88.0 69.3 GOAT 86.9 66.8 88.3 69.8 LD-MoLE 87.0 67.0 88.4 70.0 VANE 87.9 68.3 89.2 71.2 
+
+Table 10: Single-domain (CS) and multi-task (MT) av-erages on Qwen backbones. 
+
+NA\NB 2 4 8 16 1 61.2 (0.46%) 62.3 (0.60%) 63.1 (0.87%) 63.3 (1.42%) 
+
+2 61.7 (0.52%) 62.8 (0.66%) 63.5 (0.93%) 63.6 (1.48%) 
+
+4 62.0 (0.65%) 63.1 (0.78%) 63.9 (1.06%) 64.0 (1.61%) 
+
+8 62.1 (0.89%) 63.2 (1.03%) 63.8 (1.31%) 63.9 (1.85%) 
+
+Table 11: Multi-task average on Llama-3.1-8B over readers NA and writers NB (r=4 , re=8 , k=4 ); train-able share in parentheses. 
+
+top-k 1 2 4 8 16 32 VANE 62.6 63.4 63.9 63.7 63.2 62.4 Comb. + token router 61.6 62.2 62.5 62.3 61.9 61.3 compass rank re 1 2 4 8 16 32 MT avg. 62.9 63.3 63.7 63.9 64.0 63.9 
+
+ρ 0.38 0.47 0.56 0.61 0.63 0.63 
+
+Table 12: Multi-task average on Llama-3.1-8B vs. active pairs k (top) and compass rank re (bottom, with the score–usefulness correlation ρ). 
+
+λbal 0 10 −3 10 −2 10 −1
+
+MT avg. 62.8 63.6 63.9 63.4 writer init std 0 (+ tie noise) 10 −5 10 −4 10 −3
+
+MT avg. 63.5 63.8 63.9 63.6 
+
+Table 13: Sensitivity to the balancing weight and the writer initialization (multi-task average, Llama-3.1-8B). 
+
+expert writes, which a token router never sees and a reader-side score ignores. It is also quadratic in the token. Once this target is written down, the de-sign of V ANE follows. The factorization makes the target cheap to evaluate, the compass forecasts the only unknown ( δ), calibration removes the depen-dence on parameterization, and the straight-through core supplies the target’s own gradient for every pair. 
+
+When token routers suffice. Theorem 1 does not say that token routers fail. It says that they capture the mean-interaction part of usefulness and nothing else. When token means dominate the directions that matter for an adapter, or when do-
+
+Method Params Train Mem. Decode MT 
+
+(M) (h) (GB) (ms/tok) LoRA 41.9 3.1 38.2 24.1 60.4 HydraLoRA 108.0 3.9 41.0 27.9 61.9 MixLoRA 125.8 5.2 44.7 33.6 62.0 GOAT 177.7 5.6 46.1 34.8 62.4 LD-MoLE 177.7 5.9 46.9 36.2 62.6 VANE -S 42.5 3.4 38.9 25.6 62.5 VANE 84.9 3.9 40.8 27.2 63.9 
+
+Table 14: Cost of multi-task training on Llama-3.1-8B (8 H100): trainable parameters, training hours, peak memory per GPU, unmerged decoding latency (batch 1), and multi-task average. 
+
+Data used 10% 25% 50% 100% LoRA 54.9 57.6 59.3 60.4 LD-MoLE 55.8 59.1 61.2 62.6 VANE 57.4 60.8 62.7 63.9 
+
+Table 15: Multi-task average on Llama-3.1-8B when training on a fraction of the mixture. 
+
+MMLU MT avg. by placement Method (0-shot) Attn. MLP All Base model 65.0 – – –LoRA 63.1 59.3 60.0 60.4 MixLoRA 63.8 – – –LD-MoLE 64.0 – – –VANE 64.6 62.1 63.2 63.9 
+
+Table 16: Zero-shot MMLU after multi-task training (knowledge retention) and multi-task average when adapting only attention, only MLP, or all projections (Llama-3.1-8B). 
+
+Score class ρ Captured gain 
+
+Reader-norm self-routing 0.06 0.04 Product router 0.12 0.17 Token router over pairs 0.22 0.41 Latent-linear router 0.24 0.43 VANE (update score) 0.61 0.78 
+
+Table 17: Spearman correlation with the exact useful-ness of all 32 pairs and captured first-order gain of the top-4 pairs (Llama-3.1-8B, multi-task, held-out tokens). All routers use V ANE ’s reader–writer structure. 
+
+mains are separated by their means, as with cleanly clustered tasks, token routers can do nearly as well (Figure 5c). This explains why simple routers work in many MoE-LoRA benchmarks, and why V ANE ’s margin is larger in the multi-task setting, where to-kens of different domains share mean directions but need different updates. 23 Relation to self-routing. AoE’s premise, that an expert knows best whether it should process a to-ken, is close in spirit to ours (Lv et al., 2025). Our analysis sharpens it. What an expert can know from its own activations is how strongly the token lies in its input subspace, which Theorem 1(ii) shows is writer-blind. By Proposition 3, this quantity also depends on an arbitrary gauge. What decides usefulness is whether the expert’s output points where the loss wants to go. FlyLoRA’s implicit router (Zou et al., 2025a) and CoMoL’s core-space router (Cao et al., 2026a) share the input-side view. All three designs gain parameter efficiency by rout-ing in a low-dimensional space, a property V ANE 
+
+keeps. 
+
+Additive versus normalized gates. Softmax nor-malization makes the per-token update a convex combination of expert updates, so its total size is fixed however many complementary directions a token needs. Additive sigmoid gates let each pair contribute at its own scale, which matches the first-order view (Proposition 4). Normalized sigmoid gating is also statistically favorable for expert estimation (Nguyen et al., 2025). When independently trained LoRAs are composed, soft weighting changes the unit-scale additive update under which each adapter was trained (Molavi et al., 2026). V ANE avoids the issue because its pairs are trained jointly with additive gates. 
+
+The compass as a learned model of the loss. 
+
+The compass is a rank-re linear model of E[δ | x],trained only through the routing signal. Proposi-tion 2 shows that each routing step moves it toward 
+
+δ within the span of the candidate updates, and Figure 3b shows that it gets there. Two extensions are natural. A direct auxiliary loss could regress the compass onto the backpropagated δ, which is available in the same backward hook. A nonlinear compass, for example a small MLP, would lift the linear-response assumption of Theorem 1 at a small cost. We kept the linear compass because it is the object the theory analyzes and it already reaches the saturation point of the rank sweep. 
+
+Beyond LoRA adapters. Nothing in Proposi-tion 1 is specific to fine-tuning. Any mixture whose experts factor through a shared low-dimensional space can score all experts by their first-order effect at the cost of a few latent vectors. Examples are low-rank or product-key experts in sparse MoE pre-training (Oldfield et al., 2024; He, 2024) and banks of task adapters to be composed at test time. For merging independently trained LoRAs, where in-terference between tasks is the main difficulty (Zou et al., 2025a), the same scores could choose which reader–writer combinations to keep. These uses require care because the gauge is shared only if the factors are trained jointly or the readers are frozen and common to all adapters. 
+
+Failure modes. (i) Nonlinear regime. When the loss is far from linear in the output, for example on tokens with very confident wrong predictions, first-order usefulness misestimates the benefit of large updates. The additive gates are bounded by 1, which limits the damage. (ii) Compass collapse. 
+
+If the compass norm shrinks, all scores approach zero and gates approach 0.5. Balancing keeps the router’s softmax informative, and we did not ob-serve collapse. (iii) Correlated writers. If two writers become nearly parallel, their pairs receive similar scores and the effective number of experts drops. Marginal balancing does not prevent this; a small orthogonality penalty between writers would. (iv) Very large pools. The dense path computes all readers and writers. Beyond a few hundred pairs, the sparse writer path or product-key retrieval over the score matrix becomes necessary. 
+
+Practical recommendations. Invest capacity in writers, with NB ≈ 2NA, and keep k near NA so that active pairs can use distinct readers. Set re to about 2r. Keep marginal balancing on. Monitor the score–usefulness correlation with the provided backward hook. It is cheap, and a drop signals a stale or collapsed compass before accuracy de-grades. 
+
+Broader impact. VANE makes multi-domain adaptation more accurate at a lower parameter cost and less training time than comparable mix-tures. This lowers the barrier to building special-ized models, with the usual dual-use implications. The method adds no data, capabilities, or deploy-ment channels beyond those of the underlying fine-tuning pipeline. 24
